@@ -11,9 +11,8 @@ code to the older form.
 
 `typing-to-the-future` includes a custom `setuptools` build_py command to
 transform Python files into the compatibility form when creating a wheel
-using any PEP-517 build backend. Currently, both editable mode and sdist
-conversions are not supported (for sdists, this isn't such a concern, since
-the conversion will take place when the sdist is being installed as a wheel).
+using any PEP-517 build backend. There is experimental support for editable
+mode using a custom import hook, which transforms the code at import-time.
 
 To setup a build-time conversion, add the following to `setup.py` (it can be
 the only content of `setup.py` if `pyproject.toml` is used for metadata):

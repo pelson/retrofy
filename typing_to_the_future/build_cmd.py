@@ -1,4 +1,7 @@
 import typing
+from typing import Dict, List
+import pathlib
+import site
 
 try:
     import setuptools
@@ -28,7 +31,22 @@ class ConvertCodeToLegacyForm(build_py):
         if mod.code != new.code:
             Path(py_path).write_text(new.code)
 
+    def run(self):
+        super().run()
+        if self.editable_mode:
+            top_level_pkgs = [
+                pkg for pkg in self.distribution.packages if '.' not in pkg
+            ]
+
+            sp = pathlib.Path(site.getsitepackages()[0])
+
+            for pkg in top_level_pkgs:
+                fn = sp / f'_typing_to_the_future.__editable_compat__.{pkg}.pth'
+                self.announce('Writing editable file at fn)
+                fn.write_text(f'''import typing_to_the_future._meta_hook_converter as c; c.register_hook(['{pkg}']);''')
+
     def build_module(self, module, module_file, package):
+        # Note that this does not get called in editable mode.
         outfile, copied = super().build_module(module, module_file, package)
 
         # self.has_announced_downgrade = getattr(self, 'has_announced_downgrade', False)
@@ -46,6 +64,6 @@ class ConvertCodeToLegacyForm(build_py):
 def cmd_class(
         existing_cmd_class: typing.Optional[typing.Dict[str, typing.Type]] = None,
 ) -> typing.Dict[str, typing.Type]:
-    return dict(**(existing_cmd_class.items()) or {}, **{
+    return dict(**(existing_cmd_class or {}), **{
         'build_py': ConvertCodeToLegacyForm,
     })
