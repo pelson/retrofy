@@ -7,7 +7,7 @@ name = "typing-to-the-future"
 dynamic = [
   "version",  # The version is taken directly from the repository, using setuptools-scm.
 ]
-# description = "<Insert short description of the project>"
+description = "A tool to convert modern Python typing to less modern Python versions"
 readme = "README.md"
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -22,8 +22,7 @@ requires-python = ">=3.11"
 
 # The core dependencies of the project.
 dependencies = [
-  # "numpy",
-  # "other-mandatory-requirement",
+  "libcst",
 ]
 
 [project.optional-dependencies]
