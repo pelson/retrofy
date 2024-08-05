@@ -19,6 +19,23 @@ import libcst as cst
 
 from ._converters import convert_union
 
+from setuptools.command.dist_info import dist_info as _dist_info
+
+
+RUNTIME_DEPENDENCIES = [
+    'importlib-metadata',
+    'typing-extensions',
+]
+
+
+class CustomDistInfoCommand(_dist_info):
+    def run(self):
+        # Add the runtime dependencies. This is also done in the build-py
+        # command, however it is necessary to do it here to support editable
+        # mode.
+        self.distribution.install_requires.extend(RUNTIME_DEPENDENCIES)
+        super().run()
+
 
 class ConvertCodeToLegacyForm(build_py):
     def convert_to_legacy(self, py_path: str) -> bool:
@@ -32,7 +49,19 @@ class ConvertCodeToLegacyForm(build_py):
             Path(py_path).write_text(new.code)
 
     def run(self):
+        # Add the runtime dependencies to the project. These only apply to
+        # the build wheel phase. For editable installs, we rely on the fact
+        # that it has already been added in the dist-info command.
+        self.distribution.install_requires.extend(RUNTIME_DEPENDENCIES)
+
+        # installed for editable mode (therefore we mirror the same requirements in this project)
+        # self.distribution.install_requires.extend([
+        #     'typing-extensions',
+        #     'typing-extensions',
+        # ])
+
         super().run()
+
         if self.editable_mode:
             top_level_pkgs = [
                 pkg for pkg in self.distribution.packages if '.' not in pkg
@@ -42,7 +71,7 @@ class ConvertCodeToLegacyForm(build_py):
 
             for pkg in top_level_pkgs:
                 fn = sp / f'_typing_to_the_future.__editable_compat__.{pkg}.pth'
-                self.announce('Writing editable file at fn)
+                self.announce(f'Writing editable file at {fn}', logging.INFO)
                 fn.write_text(f'''import typing_to_the_future._meta_hook_converter as c; c.register_hook(['{pkg}']);''')
 
     def build_module(self, module, module_file, package):
@@ -66,4 +95,5 @@ def cmd_class(
 ) -> typing.Dict[str, typing.Type]:
     return dict(**(existing_cmd_class or {}), **{
         'build_py': ConvertCodeToLegacyForm,
+        'dist_info': CustomDistInfoCommand,
     })
