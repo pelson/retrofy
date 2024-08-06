@@ -4,7 +4,7 @@ import typing
 
 from importlib.abc import MetaPathFinder
 
-from ._converters import convert_union
+from ._converters import convert
 import libcst as cst
 
 
@@ -28,8 +28,7 @@ class OnTheFlyConverter(SourceLoader):
         with open(filename) as f:
             data = f.read()
 
-        mod = cst.parse_module(data)
-        new_code = convert_union(mod).code
+        new_code = convert(data)
         return new_code
 
 

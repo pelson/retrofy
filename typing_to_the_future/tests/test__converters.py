@@ -43,3 +43,17 @@ def test_union__future__():
     module = cst.parse_module(test_case_source)
     result = _converters.convert_union(module)
     assert result.code == expected
+
+
+def test_convert():
+    test_case_source = textwrap.dedent("""
+    def bar(a: list[str]) -> list[str]:
+        return a
+    """)
+
+    expected = textwrap.dedent("""
+    def bar(a: typing.List[str]) -> typing.List[str]:
+        return a
+    """)
+    result = _converters.convert(test_case_source)
+    assert result == expected

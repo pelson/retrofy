@@ -65,11 +65,35 @@ def convert_union(module: cst.Module) -> cst.Module:
     `typing.Union[SomeClass, AnotherClass]`, with the appropriate `typing`
     import included.
 
+    Note that this typically doesn't need to be done at runtime, and mostly is
+    a type checking feature.
+
     """
 
     wrapper = cst.metadata.MetadataWrapper(module)
     metadata = wrapper.resolve(cst.metadata.ScopeProvider)
-    # print("M:", metadata)
 
     transformer = TypingTransformer(metadata)
     return module.visit(transformer)
+
+
+def convert_sequence_subscript(module: cst.Module) -> cst.Module:
+    """
+    Convert the built-in sequence types such as `list[int]` to the
+    `typing.List[int]` form.
+
+    Currently only `list[int]` is supported.
+    """
+    # TODO: Do this correctly. Including adding the necessry typing import.
+    orig = module.code
+    new = orig.replace('list[str]', 'typing.List[str]')
+    if new != orig:
+        return cst.parse_module(new)
+    return module
+
+
+def convert(code: str) -> str:
+    mod = cst.parse_module(code)
+    mod = convert_sequence_subscript(mod)
+    mod = convert_union(mod)
+    return mod.code
