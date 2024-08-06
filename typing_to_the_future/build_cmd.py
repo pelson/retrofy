@@ -53,6 +53,7 @@ class ConvertCodeToLegacyForm(build_py):
         # the build wheel phase. For editable installs, we rely on the fact
         # that it has already been added in the dist-info command.
         self.distribution.install_requires.extend(RUNTIME_DEPENDENCIES)
+        self.distribution.install_requires.append('typing-to-the-future')
 
         # installed for editable mode (therefore we mirror the same requirements in this project)
         # self.distribution.install_requires.extend([
