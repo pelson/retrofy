@@ -33,7 +33,10 @@ class CustomDistInfoCommand(_dist_info):
         # Add the runtime dependencies. This is also done in the build-py
         # command, however it is necessary to do it here to support editable
         # mode.
+
         self.distribution.install_requires.extend(RUNTIME_DEPENDENCIES)
+        if self.editable_mode:
+            self.distribution.install_requires.append('typing-to-the-future')
         super().run()
 
 
@@ -53,7 +56,6 @@ class ConvertCodeToLegacyForm(build_py):
         # the build wheel phase. For editable installs, we rely on the fact
         # that it has already been added in the dist-info command.
         self.distribution.install_requires.extend(RUNTIME_DEPENDENCIES)
-        self.distribution.install_requires.append('typing-to-the-future')
 
         # installed for editable mode (therefore we mirror the same requirements in this project)
         # self.distribution.install_requires.extend([
@@ -73,6 +75,7 @@ class ConvertCodeToLegacyForm(build_py):
             for pkg in top_level_pkgs:
                 fn = sp / f'_typing_to_the_future.__editable_compat__.{pkg}.pth'
                 self.announce(f'Writing editable file at {fn}', logging.INFO)
+                # TODO: We need to do this properly so that it is uninstalled correctly by pip.
                 fn.write_text(f'''import typing_to_the_future._meta_hook_converter as c; c.register_hook(['{pkg}']);''')
 
     def build_module(self, module, module_file, package):
