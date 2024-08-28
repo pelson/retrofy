@@ -5,25 +5,33 @@ compatible with older Python versions.
 
 The idea is to be able to maintain the modern typing in your
 repository, and then as part of the build stage, convert the
-code to the older form.
+code to the older form. You should continue to test your project against older
+versions (e.g. in CI) for full confidence in the compatibility.
 
 ## Build-time transformation
 
-`typing-to-the-future` includes a custom `setuptools` build_py command to
+`typing-to-the-future` includes the ability to customise the build to
 transform Python files into the compatibility form when creating a wheel
-using any PEP-517 build backend. There is experimental support for editable
-mode using a custom import hook, which transforms the code at import-time.
+using any PEP-517 build backend. This includes support for editable installs
+(PEP-660), which transforms the code at import-time using standard import hook
+machinery.
 
 To setup a build-time conversion, add the following to `setup.py` (it can be
 the only content of `setup.py` if `pyproject.toml` is used for metadata):
 
 ```
-from typing_to_the_future.build_cmd import cmd_class
-from setuptools import setup
+[build-system]
+requires = ["multistage-build", "setuptools", "wheel", "setuptools_scm==7.*", "setuptools-ext"]
+build-backend = "multistage_build:backend"
 
-setup(
-   cmdclass=cmd_class(),
-)
+[tool.multistage-build]
+build-backend = "setuptools.build_meta"
+post-build-editable = [
+    {hook-function="typing_to_the_future.wheel_modifier:compatibility_via_import_hook"},
+]
+post-build-wheel = [
+    {hook-function="typing_to_the_future.wheel_modifier:compatibility_via_rewrite"},
+]
 ```
 
 ## Available transformations
