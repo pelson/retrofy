@@ -1,4 +1,4 @@
-# typing-to-the-future
+# retrofy
 
 A tool which takes modern Python typing code, and makes it
 compatible with older Python versions.
@@ -10,7 +10,7 @@ versions (e.g. in CI) for full confidence in the compatibility.
 
 ## Build-time transformation
 
-`typing-to-the-future` includes the ability to customise the build to
+`retrofy` includes the ability to customise the build to
 transform Python files into the compatibility form when creating a wheel
 using any PEP-517 build backend. This includes support for editable installs
 (PEP-660), which transforms the code at import-time using standard import hook
@@ -27,10 +27,10 @@ build-backend = "multistage_build:backend"
 [tool.multistage-build]
 build-backend = "setuptools.build_meta"
 post-build-editable = [
-    {hook-function="typing_to_the_future.wheel_modifier:compatibility_via_import_hook"},
+    {hook-function="retrofy.wheel_modifier:compatibility_via_import_hook"},
 ]
 post-build-wheel = [
-    {hook-function="typing_to_the_future.wheel_modifier:compatibility_via_rewrite"},
+    {hook-function="retrofy.wheel_modifier:compatibility_via_rewrite"},
 ]
 ```
 

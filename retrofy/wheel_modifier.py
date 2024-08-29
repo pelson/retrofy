@@ -1,11 +1,11 @@
 import pathlib
-
 import shutil
-from setuptools_ext import WheelModifier
 import zipfile
 
+from setuptools_ext import WheelModifier
 
 from ._converters import convert
+
 
 def compatibility_via_import_hook(wheel: pathlib.Path):
     """Add a pth hook to ensure make imported code compatible at import time (i.e. suitable for editable mode)"""
@@ -16,13 +16,13 @@ def compatibility_via_import_hook(wheel: pathlib.Path):
         whl = WheelModifier(whl_zip)
 
         top_level = whl.read(
-            whl.dist_info_dirname() + '/top_level.txt'
+            whl.dist_info_dirname() + '/top_level.txt',
         ).decode('utf-8').splitlines()
         top_level_pkgs = [pkg for pkg in top_level if pkg]
 
         for pkg in top_level_pkgs:
-            fn = f'_typing_to_the_future.__editable_compat__.{pkg}.pth'
-            script = f"import typing_to_the_future._meta_hook_converter as c; c.register_hook(['{pkg}']);"
+            fn = f'_retrofy.__editable_compat__.{pkg}.pth'
+            script = f"import retrofy._meta_hook_converter as c; c.register_hook(['{pkg}']);"
             whl.write(zipfile.ZipInfo(fn), script)
 
         with wheel.open("wb") as whl_fh:
