@@ -16,8 +16,8 @@ using any PEP-517 build backend. This includes support for editable installs
 (PEP-660), which transforms the code at import-time using standard import hook
 machinery.
 
-To setup a build-time conversion, add the following to `setup.py` (it can be
-the only content of `setup.py` if `pyproject.toml` is used for metadata):
+To setup a build-time conversion, add the `multistage_build` backend within
+`pyproject.toml`, for example:
 
 ```
 [build-system]
