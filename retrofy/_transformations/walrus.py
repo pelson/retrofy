@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 import typing
+
 import libcst as cst
 
 
@@ -20,7 +22,7 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
 
             assign_stmt = cst.Assign(
                 targets=[cst.AssignTarget(target=target)],
-                value=value
+                value=value,
             )
             self.assignments_stack[-1].append(assign_stmt)
             updated_node = cst.Expr(cst.Name(target.value))

@@ -1,5 +1,5 @@
 """
-Documentation for the typing_to_the_future package
+Documentation for the retrofy package
 
 """
 # Import the version from the generated _version.py file. __version__ is part

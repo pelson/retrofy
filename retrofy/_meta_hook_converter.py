@@ -1,18 +1,14 @@
-import sys
 import pathlib
+import sys
 import typing
+from importlib import invalidate_caches
+from importlib.abc import MetaPathFinder, SourceLoader
+from importlib.machinery import FileFinder
+from os.path import isdir
 
-from importlib.abc import MetaPathFinder
-
-from ._converters import convert
 import libcst as cst
 
-
-import sys
-from os.path import isdir
-from importlib import invalidate_caches
-from importlib.abc import SourceLoader
-from importlib.machinery import FileFinder
+from ._converters import convert
 
 
 class OnTheFlyConverter(SourceLoader):
