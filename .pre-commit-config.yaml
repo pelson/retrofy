@@ -1,0 +1,27 @@
+repos:
+  - repo: https://gitlab.cern.ch/pre-commit-hook-mirrors/pre-commit/mirrors-mypy
+    rev: 'v1.4.1'
+    hooks:
+      - id: mypy
+        additional_dependencies: ["types-mock"]
+  - repo: https://gitlab.cern.ch/pre-commit-hook-mirrors/pre-commit/pre-commit-hooks
+    rev: "v4.0.1"
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+  - repo: https://gitlab.cern.ch/pre-commit-hook-mirrors/asottile/add-trailing-comma
+    rev: "v2.1.0"
+    hooks:
+      - id: add-trailing-comma
+        args: ["--py36-plus"]
+  - repo: https://gitlab.cern.ch/pre-commit-hook-mirrors/PyCQA/isort
+    rev: "5.11.5"
+    hooks:
+      - id: isort
+  - repo: https://gitlab.cern.ch/pre-commit-hook-mirrors/pycqa/flake8
+    rev: '4.0.1'
+    hooks:
+      - id: flake8
+        args:
+          - '--max-line-length=100'
+          - '--per-file-ignores=pyda/tests/*.py:E501'

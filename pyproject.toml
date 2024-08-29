@@ -23,6 +23,7 @@ requires-python = ">=3.7"
 # The core dependencies of the project.
 dependencies = [
   "libcst",
+  "setuptools-ext",  # TODO: Get rid of this dependency when there is a wheel interface elsewhere.
 ]
 
 [project.optional-dependencies]
@@ -46,5 +47,5 @@ write_to = "retrofy/_version.py"
 
 [project.entry-points.multistage_build]
 # Declare automatic hooks for a multistage-build using project.
-post-build-wheel = "retrofy.wheel_modifier:compatibility_via_import_hook"
-post-build-editable = "retrofy.wheel_modifier:compatibility_via_rewrite"
+post-build-wheel = "retrofy._pep517_hooks:compatibility_via_rewrite"
+post-build-editable = "retrofy._pep517_hooks:compatibility_via_import_hook"
