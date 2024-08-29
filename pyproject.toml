@@ -56,6 +56,11 @@ include = ["typing_to_the_future", "typing_to_the_future.*"]
 [tool.setuptools_scm]
 write_to = "typing_to_the_future/_version.py"
 
+[project.entry-points.multistage_build]
+# Declare automatic hooks for a multistage-build using project.
+post-build-wheel = "typing_to_the_future.wheel_modifier:compatibility_via_import_hook"
+post-build-editable = "typing_to_the_future.wheel_modifier:compatibility_via_rewrite"
+
 [tool.acc_py_template]
 features = [
   {name = "core", version = 2},
