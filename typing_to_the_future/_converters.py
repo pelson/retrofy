@@ -1,5 +1,6 @@
 import dataclasses
 import libcst as cst
+from ._transformations import walrus
 
 
 class TypingTransformer(cst.CSTTransformer):
@@ -92,8 +93,13 @@ def convert_sequence_subscript(module: cst.Module) -> cst.Module:
     return module
 
 
+def convert_walrus_operator(module: cst.Module) -> cst.Module:
+    return module.visit(walrus.WalrusOperatorTransformer())
+
+
 def convert(code: str) -> str:
     mod = cst.parse_module(code)
     mod = convert_sequence_subscript(mod)
+    mod = convert_walrus_operator(mod)
     mod = convert_union(mod)
     return mod.code
