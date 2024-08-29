@@ -32,6 +32,8 @@ def compatibility_via_import_hook(wheel: pathlib.Path):
         with wheel.open("wb") as whl_fh:
             whl.write_wheel(whl_fh)
 
+    print('Enabling automatic retrofiting of Python code at import-time')
+
     # TODO: I think we need to add retrofy as a runtime dependency for editable mode
     #  (we can do this).
 
