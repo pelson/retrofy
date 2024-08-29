@@ -7,7 +7,7 @@ name = "retrofy"
 dynamic = [
   "version",  # The version is taken directly from the repository, using setuptools-scm.
 ]
-description = "A tool to convert modern Python typing to less modern Python versions"
+description = "A tool to convert modern Python code to less modern Python versions"
 readme = "README.md"
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -26,32 +26,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The optional dependencies of the project, installable using the "extras" syntax.
 test = [
   "pytest",
 ]
 doc = [
 ]
 dev = [
-  # Dependencies for development of the project, such as type checkers,
-  # linters, etc.
-  # "requirement-for-development-purposes-only",
-
-  # Include the "test" and "doc" dependencies in the dev dependencies.
   "retrofy[doc,test]",
 ]
 
 [project.urls]
-# Homepage = "<Insert your URL>"
-# Repository = "<Insert your URL>"
+Homepage = "https://gitlab.cern.ch/pelson/retrofy"
 
 [tool.setuptools.packages.find]
 include = ["retrofy", "retrofy.*"]
-
-[tool.setuptools.package-data]
-# All package data which is tracked by git is included automatically due to
-# include-package-data=true (the default) along with setuptools-scm. More details at:
-# https://setuptools.pypa.io/en/latest/userguide/datafiles.html#include-package-data
 
 [tool.setuptools_scm]
 write_to = "retrofy/_version.py"
@@ -60,8 +48,3 @@ write_to = "retrofy/_version.py"
 # Declare automatic hooks for a multistage-build using project.
 post-build-wheel = "retrofy.wheel_modifier:compatibility_via_import_hook"
 post-build-editable = "retrofy.wheel_modifier:compatibility_via_rewrite"
-
-[tool.acc_py_template]
-features = [
-  {name = "core", version = 2},
-]

@@ -16,22 +16,16 @@ using any PEP-517 build backend. This includes support for editable installs
 (PEP-660), which transforms the code at import-time using standard import hook
 machinery.
 
-To setup a build-time conversion, add the following to `setup.py` (it can be
-the only content of `setup.py` if `pyproject.toml` is used for metadata):
+To setup a build-time conversion, add the `multistage_build` backend within
+`pyproject.toml`, for example:
 
 ```
 [build-system]
-requires = ["multistage-build", "setuptools", "wheel", "setuptools_scm==7.*", "setuptools-ext"]
+requires = ["multistage-build", "setuptools", "wheel", "setuptools_scm==7.*", "retrofy"]
 build-backend = "multistage_build:backend"
 
 [tool.multistage-build]
 build-backend = "setuptools.build_meta"
-post-build-editable = [
-    {hook-function="retrofy.wheel_modifier:compatibility_via_import_hook"},
-]
-post-build-wheel = [
-    {hook-function="retrofy.wheel_modifier:compatibility_via_rewrite"},
-]
 ```
 
 ## Available transformations
@@ -40,6 +34,8 @@ For all transformations, an `import typing` will be injected where necessary
 and appropriate.
 
 * `A | B` -> `typing.Union[A, B]`
+
+* PEP-572 - walrus operator
 
 ## Transformations not yet implemented
 

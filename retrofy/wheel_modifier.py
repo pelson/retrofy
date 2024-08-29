@@ -8,7 +8,11 @@ from ._converters import convert
 
 
 def compatibility_via_import_hook(wheel: pathlib.Path):
-    """Add a pth hook to ensure make imported code compatible at import time (i.e. suitable for editable mode)"""
+    """
+    Add a pth hook to ensure make imported code compatible at import time
+    (i.e. suitable for editable mode)
+
+    """
     editable_copy = wheel.parent / (wheel.name + '.copy.whl')
     shutil.copy(wheel, editable_copy)
 
@@ -27,6 +31,9 @@ def compatibility_via_import_hook(wheel: pathlib.Path):
 
         with wheel.open("wb") as whl_fh:
             whl.write_wheel(whl_fh)
+
+    # TODO: I think we need to add retrofy as a runtime dependency for editable mode
+    #  (we can do this).
 
     editable_copy.unlink()
 

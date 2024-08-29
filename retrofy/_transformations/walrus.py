@@ -11,7 +11,7 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
 
     See PEP-572 for details.
     """
-    def __init__(self):
+    def __init__(self) -> None:
         self.assignments_stack: typing.List[typing.List[cst.Expr]] = []
         super().__init__()
 
@@ -31,10 +31,16 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
     def visit_If(self, node: cst.If):
         self.assignments_stack.append([])
 
-    def leave_If(self, original_node: cst.BaseCompoundStatement, updated_node: cst.BaseCompoundStatement) -> cst.BaseCompoundStatement | cst.FlattenSentinel:
+    def leave_If(
+            self,
+            original_node: cst.BaseCompoundStatement,
+            updated_node: cst.BaseCompoundStatement,
+    ) -> cst.BaseCompoundStatement | cst.FlattenSentinel:
         assignments = self.assignments_stack.pop()
         if assignments:
-            new_nodes = cst.FlattenSentinel([cst.SimpleStatementLine([t for t in assignments])] + [updated_node])
+            new_nodes = cst.FlattenSentinel(
+                [cst.SimpleStatementLine([t for t in assignments])] + [updated_node],
+            )
             return new_nodes
         else:
             return updated_node
@@ -77,7 +83,11 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
     def visit_Assign(self, node: cst.Assign):
         self.assignments_stack.append([])
 
-    def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign | cst.FlattenSentinel:
+    def leave_Assign(
+            self,
+            original_node: cst.Assign,
+            updated_node: cst.Assign,
+    ) -> cst.Assign | cst.FlattenSentinel:
         assignments = self.assignments_stack.pop()
         if assignments:
             new_nodes = cst.FlattenSentinel(assignments + [updated_node])
@@ -113,7 +123,7 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
             if with_pars:
                 lpar, rpar = [cst.LeftSquareBracket()], [cst.RightSquareBracket()]
             else:
-                lpar = rpar = ()
+                lpar, rpar = [], []
 
             if isinstance(left, cst.List):
                 pass
@@ -127,9 +137,16 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
 
         ifs = updated_node.for_in.ifs
         inner = cst.CompFor(
-            target=join_list(updated_node.for_in.target, cst.List([cst.Element(a.targets[0].target) for a in assignments])),
+            target=join_list(
+                updated_node.for_in.target,
+                cst.List([cst.Element(a.targets[0].target) for a in assignments]),
+            ),
             iter=cst.GeneratorExp(
-                elt=join_list(updated_node.for_in.target, cst.List([cst.Element(a.value) for a in assignments]), with_pars=True),
+                elt=join_list(
+                    updated_node.for_in.target,
+                    cst.List([cst.Element(a.value) for a in assignments]),
+                    with_pars=True,
+                ),
                 for_in=cst.CompFor(
                     target=updated_node.for_in.target,
                     iter=updated_node.for_in.iter,
