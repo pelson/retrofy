@@ -103,7 +103,7 @@ def convert_walrus_operator(module: cst.Module) -> cst.Module:
 
 
 def convert_type_alias(module: cst.Module) -> cst.Module:
-    return module.visit(type_alias.TypeAliasTransformer())
+    return module.visit(type_alias.PEP695Transformer())
 
 
 def convert(code: str) -> str:

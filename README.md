@@ -37,10 +37,17 @@ and appropriate.
 
 * PEP-572 - walrus operator
 
-* PEP-695 - type statements:
-  * `type Point = tuple[float, float]` -> `Point = tuple[float, float]`
-  * `type GenericPoint[T] = tuple[T, T]` -> `T = typing.TypeVar("T"); GenericPoint: typing.TypeAlias = tuple[T, T]`
-  * `type BoundedPoint[T: int] = tuple[T, T]` -> `T = typing.TypeVar("T", bound=int); BoundedPoint: typing.TypeAlias = tuple[T, T]`
+* PEP-695 - type statements, generic classes, and generic functions:
+  * Type statements:
+    * `type Point = tuple[float, float]` -> `Point = tuple[float, float]`
+    * `type GenericPoint[T] = tuple[T, T]` -> `T = typing.TypeVar("T"); GenericPoint: typing.TypeAlias = tuple[T, T]`
+    * `type BoundedPoint[T: int] = tuple[T, T]` -> `T = typing.TypeVar("T", bound=int); BoundedPoint: typing.TypeAlias = tuple[T, T]`
+  * Generic classes:
+    * `class ClassA[T]: ...` -> `from typing import Generic, TypeVar; T = TypeVar("T"); class ClassA(Generic[T]): ...`
+    * `class ClassA[T: str]: ...` -> `T = TypeVar("T", bound=str); class ClassA(Generic[T]): ...`
+  * Generic functions:
+    * `def func[T](a: T) -> T: ...` -> `T = typing.TypeVar("T"); def func(a: T) -> T: ...`
+    * `def func[T: str](a: T) -> T: ...` -> `T = typing.TypeVar("T", bound=str); def func(a: T) -> T: ...`
 
 ## Transformations not yet implemented
 

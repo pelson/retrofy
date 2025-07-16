@@ -218,3 +218,84 @@ def test_integration_generic_with_converters():
 
     result = _converters.convert(test_case_source)
     assert result == expected
+
+
+def test_generic_class_simple():
+    """Test simple generic class transformation."""
+    test_case_source = textwrap.dedent("""
+    class ClassA[T]:
+        def method1(self) -> T:
+            pass
+    """)
+
+    expected = textwrap.dedent("""
+    from typing import Generic, TypeAlias, TypeVar
+    T = TypeVar("T")
+    class ClassA(Generic[T]):
+        def method1(self) -> T:
+            pass
+    """)
+
+    module = cst.parse_module(test_case_source)
+    result = _converters.convert_type_alias(module)
+    assert result.code == expected
+
+
+def test_generic_class_with_bound():
+    """Test generic class with bound transformation."""
+    test_case_source = textwrap.dedent("""
+    class ClassA[T: str]:
+        def method1(self) -> T:
+            pass
+    """)
+
+    expected = textwrap.dedent("""
+    from typing import Generic, TypeAlias, TypeVar
+    T = TypeVar("T", bound=str)
+    class ClassA(Generic[T]):
+        def method1(self) -> T:
+            pass
+    """)
+
+    module = cst.parse_module(test_case_source)
+    result = _converters.convert_type_alias(module)
+    assert result.code == expected
+
+
+def test_generic_function_simple():
+    """Test simple generic function transformation."""
+    test_case_source = textwrap.dedent("""
+    def func[T](a: T) -> T:
+        return a
+    """)
+
+    expected = textwrap.dedent("""
+    import typing
+    T = typing.TypeVar("T")
+    def func(a: T) -> T:
+        return a
+    """)
+
+    module = cst.parse_module(test_case_source)
+    result = _converters.convert_type_alias(module)
+    assert result.code == expected
+
+
+def test_integration_generic_class_with_converters():
+    """Test generic class works with the full converter pipeline."""
+    test_case_source = textwrap.dedent("""
+    class ClassA[T: str]:
+        def method1(self) -> T:
+            pass
+    """)
+
+    expected = textwrap.dedent("""
+    from typing import Generic, TypeAlias, TypeVar
+    T = TypeVar("T", bound=str)
+    class ClassA(Generic[T]):
+        def method1(self) -> T:
+            pass
+    """)
+
+    result = _converters.convert(test_case_source)
+    assert result == expected
