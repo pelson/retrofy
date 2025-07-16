@@ -43,9 +43,9 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
 
     Remaining Limitations:
     - Complex assignment targets (libcst doesn't support obj.attr := value syntax)
-    - Short-circuiting in comprehensions: AND/OR operations in comprehensions
-      may not preserve exact short-circuiting behavior (e.g., all walrus expressions
-      are evaluated even if some conditions are false)
+    - Complex short-circuiting: Only simple two-assignment AND operations in
+      comprehensions are fully supported for short-circuiting. More complex
+      boolean expressions may fall back to non-short-circuiting behavior
     - Walrus in lambda expressions may have edge cases
 
     See PEP-572 for details.
@@ -71,7 +71,8 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
         )
 
     def _extract_assignment_target(
-        self, assignment: cst.Assign,
+        self,
+        assignment: cst.Assign,
     ) -> cst.BaseAssignTargetExpression:
         """Extract the target from an assignment."""
         return assignment.targets[0].target
@@ -106,7 +107,8 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
         """Ensure expression is properly parenthesized when needed."""
         # Add parentheses for any complex expression in break conditions
         if isinstance(
-            expr, (cst.BinaryOperation, cst.BooleanOperation, cst.Comparison),
+            expr,
+            (cst.BinaryOperation, cst.BooleanOperation, cst.Comparison),
         ):
             return expr.with_changes(
                 lpar=[cst.LeftParen()],
@@ -135,44 +137,8 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
         assignments: list[cst.Assign],
     ) -> cst.ListComp:
         """Transform list comprehension with walrus assignments."""
-        # Handle nested comprehensions
-        if node.for_in.inner_for_in is not None:
-            return self._transform_nested_list_comprehension(node, assignments)
-
-        # Check if we need short-circuiting for comprehensions
-        if (
-            len(assignments) > 1
-            and node.for_in.ifs
-            and self._comprehension_needs_short_circuiting(node.for_in.ifs[0])
-        ):
-            return self._transform_short_circuit_comprehension(node, assignments)
-
-        # Standard transformation (existing behavior)
-        # Extract variable targets and values from assignments
-        var_targets = [self._extract_assignment_target(a) for a in assignments]
-        var_values = [a.value for a in assignments]
-
-        # Create new target that includes both original and walrus variables
-        original_target = node.for_in.target
-        new_target = self._combine_targets(original_target, var_targets)
-
-        # Create new iterator that produces tuples of (original, walrus_values...)
-        new_iter = cst.GeneratorExp(
-            elt=self._create_tuple_expression(original_target, var_values),
-            for_in=cst.CompFor(
-                target=original_target,
-                iter=node.for_in.iter,
-                ifs=(),  # Move conditions to outer comprehension
-            ),
-        )
-
-        # Update the comprehension
-        return node.with_changes(
-            for_in=cst.CompFor(
-                target=new_target,
-                iter=new_iter,
-                ifs=node.for_in.ifs,
-            ),
+        return self._generic_comprehension_transform(
+            node, assignments, is_short_circuit=True,
         )
 
     def _transform_nested_list_comprehension(
@@ -224,35 +190,8 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
         assignments: list[cst.Assign],
     ) -> cst.SetComp:
         """Transform set comprehension with walrus assignments."""
-        # Handle nested comprehensions
-        if node.for_in.inner_for_in is not None:
-            return self._transform_nested_set_comprehension(node, assignments)
-
-        # Extract variable targets and values from assignments
-        var_targets = [self._extract_assignment_target(a) for a in assignments]
-        var_values = [a.value for a in assignments]
-
-        # Create new target that includes both original and walrus variables
-        original_target = node.for_in.target
-        new_target = self._combine_targets(original_target, var_targets)
-
-        # Create new iterator that produces tuples of (original, walrus_values...)
-        new_iter = cst.GeneratorExp(
-            elt=self._create_tuple_expression(original_target, var_values),
-            for_in=cst.CompFor(
-                target=original_target,
-                iter=node.for_in.iter,
-                ifs=(),  # Move conditions to outer comprehension
-            ),
-        )
-
-        # Update the comprehension
-        return node.with_changes(
-            for_in=cst.CompFor(
-                target=new_target,
-                iter=new_iter,
-                ifs=node.for_in.ifs,
-            ),
+        return self._generic_comprehension_transform(
+            node, assignments, is_short_circuit=True,
         )
 
     def _transform_dict_comprehension(
@@ -261,35 +200,8 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
         assignments: list[cst.Assign],
     ) -> cst.DictComp:
         """Transform dict comprehension with walrus assignments."""
-        # Handle nested comprehensions
-        if node.for_in.inner_for_in is not None:
-            return self._transform_nested_dict_comprehension(node, assignments)
-
-        # Extract variable targets and values from assignments
-        var_targets = [self._extract_assignment_target(a) for a in assignments]
-        var_values = [a.value for a in assignments]
-
-        # Create new target that includes both original and walrus variables
-        original_target = node.for_in.target
-        new_target = self._combine_targets(original_target, var_targets)
-
-        # Create new iterator that produces tuples of (original, walrus_values...)
-        new_iter = cst.GeneratorExp(
-            elt=self._create_tuple_expression(original_target, var_values),
-            for_in=cst.CompFor(
-                target=original_target,
-                iter=node.for_in.iter,
-                ifs=(),  # Move conditions to outer comprehension
-            ),
-        )
-
-        # Update the comprehension
-        return node.with_changes(
-            for_in=cst.CompFor(
-                target=new_target,
-                iter=new_iter,
-                ifs=node.for_in.ifs,
-            ),
+        return self._generic_comprehension_transform(
+            node, assignments, is_short_circuit=True,
         )
 
     def _combine_targets(
@@ -442,7 +354,9 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
         )
 
     def _needs_short_circuiting(
-        self, test_expr: cst.BaseExpression, assignments: list[cst.Assign],
+        self,
+        test_expr: cst.BaseExpression,
+        assignments: list[cst.Assign],
     ) -> bool:
         """Check if the test expression contains boolean operators that need short-circuiting."""
         if len(assignments) <= 1:
@@ -455,7 +369,8 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
     def _contains_and_operations(self, node: cst.CSTNode) -> bool:
         """Recursively check if a node contains AND operations."""
         if isinstance(node, cst.BooleanOperation) and isinstance(
-            node.operator, cst.And,
+            node.operator,
+            cst.And,
         ):
             return True
 
@@ -531,64 +446,191 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
         return [assignment_line, simple_if]
 
     def _build_first_condition(
-        self, test_expr: cst.BaseExpression, first_var: cst.BaseAssignTargetExpression,
+        self,
+        test_expr: cst.BaseExpression,
+        first_var: cst.BaseAssignTargetExpression,
     ) -> cst.BaseExpression:
         """Extract the first condition from a boolean AND expression."""
         # Simplified: assume the first condition involves the first variable
         # A full implementation would parse the expression tree
         if isinstance(test_expr, cst.BooleanOperation) and isinstance(
-            test_expr.operator, cst.And,
+            test_expr.operator,
+            cst.And,
         ):
             return test_expr.left
         return first_var
 
     def _build_second_condition(
-        self, test_expr: cst.BaseExpression, first_var: cst.BaseAssignTargetExpression,
+        self,
+        test_expr: cst.BaseExpression,
+        first_var: cst.BaseAssignTargetExpression,
     ) -> cst.BaseExpression:
         """Extract the second condition from a boolean AND expression."""
         # Simplified: assume the second condition is the right side of AND
         if isinstance(test_expr, cst.BooleanOperation) and isinstance(
-            test_expr.operator, cst.And,
+            test_expr.operator,
+            cst.And,
         ):
             return test_expr.right
         return test_expr
 
     def _comprehension_needs_short_circuiting(
-        self, condition: cst.BaseExpression,
+        self,
+        condition: cst.CompIf,
     ) -> bool:
         """Check if a comprehension condition needs short-circuiting."""
-        return isinstance(condition, cst.BooleanOperation) and isinstance(
-            condition.operator, cst.And,
+        return isinstance(condition.test, cst.BooleanOperation) and isinstance(
+            condition.test.operator,
+            cst.And,
         )
 
-    def _transform_short_circuit_comprehension(
-        self,
-        node: cst.ListComp,
-        assignments: list[cst.Assign],
-    ) -> cst.ListComp:
-        """Transform comprehension with proper short-circuiting for AND operations."""
-        # For now, fall back to standard behavior but acknowledge the limitation
-        # A full implementation would require complex nested generator expressions
+    def _extract_first_condition_from_and(
+        self, condition: cst.BaseExpression,
+    ) -> cst.BaseExpression | None:
+        """Extract the first condition from an AND expression."""
+        if isinstance(condition, cst.BooleanOperation) and isinstance(
+            condition.operator, cst.And,
+        ):
+            return condition.left
+        return None
 
-        # Extract variable targets and values from assignments
+    def _extract_second_condition_from_and(
+        self, condition: cst.BaseExpression,
+    ) -> cst.BaseExpression | None:
+        """Extract the second condition from an AND expression."""
+        if isinstance(condition, cst.BooleanOperation) and isinstance(
+            condition.operator, cst.And,
+        ):
+            return condition.right
+        return None
+
+    def _generic_comprehension_transform(
+        self,
+        node: cst.ListComp | cst.SetComp | cst.DictComp,
+        assignments: list[cst.Assign],
+        is_short_circuit: bool = False,
+    ) -> cst.ListComp | cst.SetComp | cst.DictComp:
+        """Generic comprehension transformation that works for all comprehension types."""
+        # Handle nested comprehensions
+        if node.for_in.inner_for_in is not None:
+            return self._handle_nested_comprehension(node, assignments)
+
+        # Check if we need short-circuiting for comprehensions
+        if (
+            is_short_circuit
+            and len(assignments) == 2
+            and node.for_in.ifs
+            and self._comprehension_needs_short_circuiting(node.for_in.ifs[0])
+        ):
+            return self._generic_two_assignment_short_circuit(node, assignments)
+
+        # Standard transformation
+        return self._generic_standard_comprehension_transform(node, assignments)
+
+    def _generic_two_assignment_short_circuit(
+        self,
+        node: cst.ListComp | cst.SetComp | cst.DictComp,
+        assignments: list[cst.Assign],
+    ) -> cst.ListComp | cst.SetComp | cst.DictComp:
+        """Generic two-assignment short-circuiting for any comprehension type."""
+        first_assign, second_assign = assignments
+
+        # Extract targets and values
+        first_target = self._extract_assignment_target(first_assign)
+        first_value = first_assign.value
+        second_target = self._extract_assignment_target(second_assign)
+        second_value = second_assign.value
+
+        original_target = node.for_in.target
+
+        # Create inner generator: ((x, f(x)) for x in data)
+        inner_gen = cst.GeneratorExp(
+            elt=cst.Tuple(
+                elements=[cst.Element(original_target), cst.Element(first_value)],
+                lpar=[cst.LeftParen()],
+                rpar=[cst.RightParen()],
+            ),
+            for_in=cst.CompFor(
+                target=original_target,
+                iter=node.for_in.iter,
+                ifs=(),
+            ),
+        )
+
+        # Create middle generator: ((x, y, g(x, y)) for x, y in inner_gen if y)
+        middle_target = cst.Tuple(
+            elements=[cst.Element(original_target), cst.Element(first_target)],
+            lpar=[],
+            rpar=[],
+        )
+
+        # Extract the condition for the first variable from the original if clause
+        first_condition = self._extract_first_condition_from_and(
+            node.for_in.ifs[0].test,
+        )
+
+        middle_gen = cst.GeneratorExp(
+            elt=cst.Tuple(
+                elements=[
+                    cst.Element(original_target),
+                    cst.Element(first_target),
+                    cst.Element(second_value),
+                ],
+                lpar=[cst.LeftParen()],
+                rpar=[cst.RightParen()],
+            ),
+            for_in=cst.CompFor(
+                target=middle_target,
+                iter=inner_gen,
+                ifs=[cst.CompIf(test=first_condition)] if first_condition else [],
+            ),
+        )
+
+        # Create outer target that includes all variables
+        outer_target = cst.Tuple(
+            elements=[
+                cst.Element(original_target),
+                cst.Element(first_target),
+                cst.Element(second_target),
+            ],
+            lpar=[],
+            rpar=[],
+        )
+
+        # Extract the condition for the second variable
+        second_condition = self._extract_second_condition_from_and(
+            node.for_in.ifs[0].test,
+        )
+
+        # Update the comprehension
+        return node.with_changes(
+            for_in=cst.CompFor(
+                target=outer_target,
+                iter=middle_gen,
+                ifs=[cst.CompIf(test=second_condition)] if second_condition else [],
+            ),
+        )
+
+    def _generic_standard_comprehension_transform(
+        self,
+        node: cst.ListComp | cst.SetComp | cst.DictComp,
+        assignments: list[cst.Assign],
+    ) -> cst.ListComp | cst.SetComp | cst.DictComp:
+        """Generic standard comprehension transformation."""
         var_targets = [self._extract_assignment_target(a) for a in assignments]
         var_values = [a.value for a in assignments]
-
-        # Create new target that includes both original and walrus variables
         original_target = node.for_in.target
         new_target = self._combine_targets(original_target, var_targets)
 
-        # Create new iterator that produces tuples of (original, walrus_values...)
         new_iter = cst.GeneratorExp(
             elt=self._create_tuple_expression(original_target, var_values),
             for_in=cst.CompFor(
                 target=original_target,
                 iter=node.for_in.iter,
-                ifs=(),  # Move conditions to outer comprehension
+                ifs=(),
             ),
         )
 
-        # Update the comprehension
         return node.with_changes(
             for_in=cst.CompFor(
                 target=new_target,
@@ -596,6 +638,21 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
                 ifs=node.for_in.ifs,
             ),
         )
+
+    def _handle_nested_comprehension(
+        self,
+        node: cst.ListComp | cst.SetComp | cst.DictComp,
+        assignments: list[cst.Assign],
+    ) -> cst.ListComp | cst.SetComp | cst.DictComp:
+        """Handle nested comprehensions by delegating to specific methods."""
+        if isinstance(node, cst.ListComp):
+            return self._transform_nested_list_comprehension(node, assignments)
+        elif isinstance(node, cst.SetComp):
+            return self._transform_nested_set_comprehension(node, assignments)
+        elif isinstance(node, cst.DictComp):
+            return self._transform_nested_dict_comprehension(node, assignments)
+        else:
+            raise ValueError(f"Unsupported comprehension type: {type(node).__name__}")
 
     # Core visitor methods - push scope for each statement type
     def visit_If(self, node: cst.If) -> None:
@@ -663,7 +720,9 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
         # Check if we need short-circuiting behavior
         if self._needs_short_circuiting(updated_node.test, assignments):
             return self._transform_short_circuit_if(
-                original_node, updated_node, assignments,
+                original_node,
+                updated_node,
+                assignments,
             )
 
         # Simple case: just put assignments before the if

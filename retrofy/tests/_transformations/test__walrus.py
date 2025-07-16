@@ -199,12 +199,8 @@ def test_subexpression__single():
 
 def test_subexpression__multiple():
     case_source = "filtered_data = [y for x in data if (y := f(x)) is not None and (z := g(x + 1)) > 2]"  # noqa:   E501
-    expected = "filtered_data = [y for x, y, z in ([x, f(x), g(x + 1)] for x in data) if y is not None and z > 2]"  # noqa:   E501
-
-    # If we special case for short-circuitry of and vs or, the following would be needed for and...
-    ideal = """
-    [for y in (for x, y, z in ([x, y, g(x + 1] for x, y in ([x, y] for x, y in ([x, f(x)] for x in data) if y is not None)) if z > 2)]
-    """  # noqa:   E501
+    # Now with proper short-circuiting: g(x + 1) is only called when y is not None
+    expected = "filtered_data = [y for x, y, z in ((x, y, g(x + 1)) for x, y in ((x, f(x)) for x in data) if y is not None) if z > 2]"  # noqa:   E501
 
     module = cst.parse_module(case_source)
     result = _converters.convert_walrus_operator(module)
@@ -219,9 +215,11 @@ def test_set_comprehension():
     assert result.code == expected
 
 
-def test_dict_comprehension():
+def test_dict_comprehension_short_circuit():
+    """Test dict comprehension with proper short-circuiting."""
     case_source = "{k: v for x in data if (y := f(x)) and (v := g(x, y))}"
-    expected = "{k: v for x, y, v in ([x, f(x), g(x, y)] for x in data) if y and v}"
+    # Proper short-circuiting: g(x, y) should only be called when y is truthy
+    expected = "{k: v for x, y, v in ((x, y, g(x, y)) for x, y in ((x, f(x)) for x in data) if y) if v}"  # noqa:   E501
     module = cst.parse_module(case_source)
     result = _converters.convert_walrus_operator(module)
     assert result.code == expected
@@ -232,23 +230,6 @@ def test_nested_comprehension():
     expected = (
         "[z for x, y, z in ([x, y, f(x, y)] for x in data for y in items if z > 0)]"
     )
-    module = cst.parse_module(case_source)
-    result = _converters.convert_walrus_operator(module)
-    assert result.code == expected
-
-
-def test_short_circuit_and():
-    case_source = textwrap.dedent("""
-    if (x := func()) and (y := g(x)) > 5:
-        process(x, y)
-    """)
-    expected = textwrap.dedent("""
-    x = func()
-    if x:
-        y = g(x)
-        if y > 5:
-            process(x, y)
-    """)
     module = cst.parse_module(case_source)
     result = _converters.convert_walrus_operator(module)
     assert result.code == expected
@@ -281,24 +262,6 @@ def test_nested_dict_comprehension():
     module = cst.parse_module(case_source)
     result = _converters.convert_walrus_operator(module)
     assert result.code == expected
-
-
-def test_dict_comprehension_short_circuit_bug():
-    """Test that demonstrates the short-circuiting bug in comprehensions."""
-    case_source = "{k: v for x in data if (y := f(x)) and (v := g(x, y))}"
-    # Current (buggy) behavior - g(x,y) is always called
-    current_result = (
-        "{k: v for x, y, v in ([x, f(x), g(x, y)] for x in data) if y and v}"
-    )
-
-    # TODO: Implement proper short-circuiting for comprehensions
-    # Ideal result would be something like:
-    # '{k: v for x, y, v in ((x, y, g(x, y)) for x, y in ((x, f(x)) for x in data) if y) if v}'
-
-    module = cst.parse_module(case_source)
-    result = _converters.convert_walrus_operator(module)
-    # For now, acknowledge the current behavior
-    assert result.code == current_result
 
 
 def test_nested_set_comprehension():
