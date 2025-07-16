@@ -1,12 +1,6 @@
-import pathlib
 import sys
 import typing
-from importlib import invalidate_caches
 from importlib.abc import MetaPathFinder, SourceLoader
-from importlib.machinery import FileFinder
-from os.path import isdir
-
-import libcst as cst
 
 from ._converters import convert
 
@@ -30,7 +24,7 @@ class OnTheFlyConverter(SourceLoader):
 
 class MyMetaPathFinder(MetaPathFinder):
     def __init__(self, package_names: typing.Sequence[str] = ()):
-        self.package_names = set()
+        self.package_names: set[str] = set()
         self.add_package_handling(package_names)
 
     def add_package_handling(self, package_names: typing.Sequence[str]):
@@ -38,7 +32,7 @@ class MyMetaPathFinder(MetaPathFinder):
 
     def find_spec(self, fullname, path, target=None):
         for prefix in self.package_names:
-            if fullname != prefix and not fullname.startswith(f'{prefix}.'):
+            if fullname != prefix and not fullname.startswith(f"{prefix}."):
                 return None
 
         # If your custom logic doesn't handle it, defer to the next finder

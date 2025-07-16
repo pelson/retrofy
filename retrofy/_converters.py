@@ -2,7 +2,7 @@ import dataclasses
 
 import libcst as cst
 
-from ._transformations import walrus
+from ._transformations import type_alias, walrus
 
 
 class TypingTransformer(cst.CSTTransformer):
@@ -11,17 +11,20 @@ class TypingTransformer(cst.CSTTransformer):
         self._require_typing = False
         self._has_typing = False  # TODO: We can figure this out.
 
-    def leave_Annotation(self, node: cst.Annotation, updated_node: cst.Annotation) -> cst.Annotation:
+    def leave_Annotation(
+        self,
+        node: cst.Annotation,
+        updated_node: cst.Annotation,
+    ) -> cst.Annotation:
         if isinstance(updated_node.annotation, cst.BinaryOperation):
             # TODO: Use a matcher here.
             if isinstance(updated_node.annotation.operator, cst.BitOr):
-
                 # print('ANNO scope', self._scope[node.annotation])
                 self._require_typing = True
                 new_node = cst.Subscript(
                     cst.Attribute(
-                        cst.Name('typing'),
-                        cst.Name('Union'),
+                        cst.Name("typing"),
+                        cst.Name("Union"),
                     ),
                     slice=(
                         cst.SubscriptElement(
@@ -45,7 +48,7 @@ class TypingTransformer(cst.CSTTransformer):
                         cst.Import(
                             [
                                 cst.ImportAlias(
-                                    cst.Name('typing'),
+                                    cst.Name("typing"),
                                 ),
                             ],
                         ),
@@ -89,7 +92,7 @@ def convert_sequence_subscript(module: cst.Module) -> cst.Module:
     """
     # TODO: Do this correctly. Including adding the necessry typing import.
     orig = module.code
-    new = orig.replace('list[str]', 'typing.List[str]')
+    new = orig.replace("list[str]", "typing.List[str]")
     if new != orig:
         return cst.parse_module(new)
     return module
@@ -99,9 +102,14 @@ def convert_walrus_operator(module: cst.Module) -> cst.Module:
     return module.visit(walrus.WalrusOperatorTransformer())
 
 
+def convert_type_alias(module: cst.Module) -> cst.Module:
+    return module.visit(type_alias.TypeAliasTransformer())
+
+
 def convert(code: str) -> str:
     mod = cst.parse_module(code)
     mod = convert_sequence_subscript(mod)
     mod = convert_walrus_operator(mod)
+    mod = convert_type_alias(mod)
     mod = convert_union(mod)
     return mod.code

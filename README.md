@@ -37,6 +37,11 @@ and appropriate.
 
 * PEP-572 - walrus operator
 
+* PEP-695 - type statements:
+  * `type Point = tuple[float, float]` -> `Point = tuple[float, float]`
+  * `type GenericPoint[T] = tuple[T, T]` -> `T = typing.TypeVar("T"); GenericPoint: typing.TypeAlias = tuple[T, T]`
+  * `type BoundedPoint[T: int] = tuple[T, T]` -> `T = typing.TypeVar("T", bound=int); BoundedPoint: typing.TypeAlias = tuple[T, T]`
+
 ## Transformations not yet implemented
 
 * `A | None` -> `typing.Optional[A]`
