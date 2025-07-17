@@ -28,6 +28,15 @@ build-backend = "multistage_build:backend"
 build-backend = "setuptools.build_meta"
 ```
 
+## Python compatibility
+
+`retrofy` can be used with Python 3.9+, and can produce code (and wheels) which are
+compatible with Python 3.7.
+It is imperative that you test the produced wheels with the target versions, as there
+may be syntax which is not yet handled in retrofy, resulting in a SyntaxError on your
+desired Python version.
+
+
 ## Available transformations
 
 For all transformations, an `import typing` will be injected where necessary
