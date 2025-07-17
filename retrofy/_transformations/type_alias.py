@@ -61,19 +61,12 @@ class PEP695Transformer(cst.CSTTransformer):
                 ),
             )
 
-        # Choose the right function reference based on import style
-        if self.needs_generic_import:
-            # Use direct name when imported from typing
-            type_var_func = cst.Name("TypeVar")
-        else:
-            # Use attribute access when using typing.TypeVar
-            type_var_func = cst.Attribute(
+        # Always use typing.TypeVar
+        type_var_call = cst.Call(
+            func=cst.Attribute(
                 value=cst.Name("typing"),
                 attr=cst.Name("TypeVar"),
-            )
-
-        type_var_call = cst.Call(
-            func=type_var_func,
+            ),
             args=type_var_args,
         )
 
@@ -135,6 +128,7 @@ class PEP695Transformer(cst.CSTTransformer):
                                 ),
                             )
 
+                        # Always use typing.TypeVar
                         type_var_call = cst.Call(
                             func=cst.Attribute(
                                 value=cst.Name("typing"),
@@ -172,16 +166,11 @@ class PEP695Transformer(cst.CSTTransformer):
                 # Generic type alias - annotate with TypeAlias
                 self.needs_typing_import = True
 
-                # Choose the right annotation based on import style
-                if self.needs_generic_import:
-                    # Use direct name when imported from typing
-                    type_alias_annotation = cst.Name("TypeAlias")
-                else:
-                    # Use attribute access when using typing.TypeAlias
-                    type_alias_annotation = cst.Attribute(
-                        value=cst.Name("typing"),
-                        attr=cst.Name("TypeAlias"),
-                    )
+                # Always use typing.TypeAlias
+                type_alias_annotation = cst.Attribute(
+                    value=cst.Name("typing"),
+                    attr=cst.Name("TypeAlias"),
+                )
 
                 type_alias_assign = cst.AnnAssign(
                     target=cst.Name(name),
@@ -251,16 +240,11 @@ class PEP695Transformer(cst.CSTTransformer):
                     ),
                 )
 
-            # Create Generic[T, U, ...] arg
-            if self.needs_generic_import:
-                # Use direct name when imported from typing
-                generic_base = cst.Name("Generic")
-            else:
-                # Use attribute access when using typing.Generic
-                generic_base = cst.Attribute(
-                    value=cst.Name("typing"),
-                    attr=cst.Name("Generic"),
-                )
+            # Create Generic[T, U, ...] arg - always use typing.Generic
+            generic_base = cst.Attribute(
+                value=cst.Name("typing"),
+                attr=cst.Name("Generic"),
+            )
 
             generic_arg = cst.Arg(
                 value=cst.Subscript(
@@ -337,7 +321,7 @@ class PEP695Transformer(cst.CSTTransformer):
         if not self.needs_typing_import:
             return updated_node
 
-        # Check if typing is already imported
+        # Check if "import typing" is already present (we need this specific import)
         has_typing_import = False
         for stmt in updated_node.body:
             if isinstance(stmt, cst.SimpleStatementLine):
@@ -351,40 +335,18 @@ class PEP695Transformer(cst.CSTTransformer):
                                 ):
                                     has_typing_import = True
                                     break
-                    elif isinstance(simple_stmt, cst.ImportFrom):
-                        if (
-                            isinstance(simple_stmt.module, cst.Name)
-                            and simple_stmt.module.value == "typing"
-                        ):
-                            has_typing_import = True
-                            break
 
         if has_typing_import:
             return updated_node
 
-        # Add typing import at the beginning
-        # If we need Generic, import it along with typing
-        if self.needs_generic_import:
-            typing_import = cst.SimpleStatementLine(
-                body=[
-                    cst.ImportFrom(
-                        module=cst.Name("typing"),
-                        names=[
-                            cst.ImportAlias(name=cst.Name("Generic")),
-                            cst.ImportAlias(name=cst.Name("TypeAlias")),
-                            cst.ImportAlias(name=cst.Name("TypeVar")),
-                        ],
-                    ),
-                ],
-            )
-        else:
-            typing_import = cst.SimpleStatementLine(
-                body=[
-                    cst.Import(
-                        names=[cst.ImportAlias(name=cst.Name("typing"))],
-                    ),
-                ],
-            )
+        # Always add "import typing" since we use typing.TypeVar and typing.TypeAlias
+        typing_import = cst.SimpleStatementLine(
+            body=[
+                cst.Import(
+                    names=[cst.ImportAlias(name=cst.Name("typing"))],
+                ),
+            ],
+        )
 
         # Find the right place to insert the import (after __future__ imports if any)
         insert_pos = 0

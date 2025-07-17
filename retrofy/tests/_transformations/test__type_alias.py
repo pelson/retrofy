@@ -113,6 +113,7 @@ def test_type_alias_with_from_typing_import():
     """)
 
     expected = textwrap.dedent("""
+    import typing
     from typing import List
     T = typing.TypeVar("T")
     GenericList: typing.TypeAlias = List[T]
@@ -229,9 +230,9 @@ def test_generic_class_simple():
     """)
 
     expected = textwrap.dedent("""
-    from typing import Generic, TypeAlias, TypeVar
-    T = TypeVar("T")
-    class ClassA(Generic[T]):
+    import typing
+    T = typing.TypeVar("T")
+    class ClassA(typing.Generic[T]):
         def method1(self) -> T:
             pass
     """)
@@ -250,9 +251,9 @@ def test_generic_class_with_bound():
     """)
 
     expected = textwrap.dedent("""
-    from typing import Generic, TypeAlias, TypeVar
-    T = TypeVar("T", bound=str)
-    class ClassA(Generic[T]):
+    import typing
+    T = typing.TypeVar("T", bound=str)
+    class ClassA(typing.Generic[T]):
         def method1(self) -> T:
             pass
     """)
@@ -290,9 +291,9 @@ def test_integration_generic_class_with_converters():
     """)
 
     expected = textwrap.dedent("""
-    from typing import Generic, TypeAlias, TypeVar
-    T = TypeVar("T", bound=str)
-    class ClassA(Generic[T]):
+    import typing
+    T = typing.TypeVar("T", bound=str)
+    class ClassA(typing.Generic[T]):
         def method1(self) -> T:
             pass
     """)

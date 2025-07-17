@@ -228,7 +228,7 @@ def test_dict_comprehension_short_circuit():
 def test_nested_comprehension():
     case_source = "[z for x in data for y in items if (z := f(x, y)) > 0]"
     expected = (
-        "[z for x, y, z in ([x, y, f(x, y)] for x in data for y in items if z > 0)]"
+        "[z for x, y, z in ([x, y, f(x, y)] for x in data for y in items) if z > 0]"
     )
     module = cst.parse_module(case_source)
     result = _converters.convert_walrus_operator(module)
@@ -258,7 +258,7 @@ def test_nested_dict_comprehension():
     )
     # This is a complex case - for now, we'll accept the non-short-circuiting behavior
     # A full fix would require more sophisticated comprehension transformation
-    expected = "{k: v for x, y, z, v in ([x, y, f(x, y), g(z)] for x in data for y in items if z and v)}"  # noqa: E501
+    expected = "{k: v for x, y, z, v in ([x, y, f(x, y), g(z)] for x in data for y in items) if z and v}"  # noqa: E501
     module = cst.parse_module(case_source)
     result = _converters.convert_walrus_operator(module)
     assert result.code == expected
@@ -266,7 +266,7 @@ def test_nested_dict_comprehension():
 
 def test_nested_set_comprehension():
     case_source = "{z for x in data for y in items if (z := f(x, y)) > threshold}"
-    expected = "{z for x, y, z in ([x, y, f(x, y)] for x in data for y in items if z > threshold)}"
+    expected = "{z for x, y, z in ([x, y, f(x, y)] for x in data for y in items) if z > threshold}"
     module = cst.parse_module(case_source)
     result = _converters.convert_walrus_operator(module)
     assert result.code == expected

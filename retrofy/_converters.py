@@ -1,4 +1,5 @@
 import dataclasses
+import typing
 
 import libcst as cst
 
@@ -41,28 +42,76 @@ class TypingTransformer(cst.CSTTransformer):
 
     def leave_Module(self, node: cst.Module, updated_node: cst.Module) -> cst.Module:
         if self._require_typing:
-            new_stmts = []
-            new_stmts.append(  # TODO: Only do this in a safe place (e.g. after import __future__).
-                cst.SimpleStatementLine(
-                    [
-                        cst.Import(
-                            [
-                                cst.ImportAlias(
-                                    cst.Name("typing"),
-                                ),
-                            ],
-                        ),
-                    ],
-                    trailing_whitespace=cst.TrailingWhitespace(
-                        newline=cst.Newline(),
+            # Find the correct position to insert the typing import
+            # It should be after any docstrings and __future__ imports
+            insert_position = self._find_typing_import_position(updated_node.body)
+
+            typing_import = cst.SimpleStatementLine(
+                [
+                    cst.Import(
+                        [
+                            cst.ImportAlias(
+                                cst.Name("typing"),
+                            ),
+                        ],
                     ),
+                ],
+                trailing_whitespace=cst.TrailingWhitespace(
+                    newline=cst.Newline(),
                 ),
             )
-            for stmt in updated_node.body:
-                new_stmts.append(stmt)
+
+            new_stmts = list(updated_node.body)
+            new_stmts.insert(insert_position, typing_import)
 
             return dataclasses.replace(updated_node, body=tuple(new_stmts))
         return updated_node
+
+    def _find_typing_import_position(
+        self,
+        body: typing.Tuple[cst.BaseStatement, ...],
+    ) -> int:
+        """Find the correct position to insert the typing import."""
+        position = 0
+
+        # Skip module docstrings
+        if body and isinstance(body[0], cst.SimpleStatementLine):
+            if (
+                len(body[0].body) == 1
+                and isinstance(body[0].body[0], cst.Expr)
+                and isinstance(body[0].body[0].value, cst.SimpleString)
+            ):
+                position = 1
+
+        # Skip __future__ imports
+        for i in range(position, len(body)):
+            stmt = body[i]
+            if isinstance(stmt, cst.SimpleStatementLine):
+                for substmt in stmt.body:
+                    if (
+                        isinstance(substmt, cst.ImportFrom)
+                        and substmt.module
+                        and isinstance(substmt.module, cst.Attribute)
+                        and substmt.module.attr.value == "__future__"
+                    ):
+                        position = i + 1
+                        break
+                    elif (
+                        isinstance(substmt, cst.ImportFrom)
+                        and substmt.module
+                        and isinstance(substmt.module, cst.Name)
+                        and substmt.module.value == "__future__"
+                    ):
+                        position = i + 1
+                        break
+                else:
+                    # If we didn't find a __future__ import in this statement, stop looking
+                    break
+            else:
+                # If we hit a non-simple statement, stop looking
+                break
+
+        return position
 
 
 def convert_union(module: cst.Module) -> cst.Module:
