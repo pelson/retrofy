@@ -1,7 +1,6 @@
 import textwrap
 
 import libcst as cst
-import pytest
 
 from retrofy import _converters
 
@@ -28,7 +27,6 @@ def test_union():
     assert result.code == expected
 
 
-@pytest.mark.xpass
 def test_union__future__():
     test_case_source = textwrap.dedent("""
     from __future__ import annotations

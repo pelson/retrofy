@@ -1,0 +1,25 @@
+[build-system]
+requires = ["multistage-build", "setuptools", "retrofy"]
+build-backend = "multistage_build:backend"
+
+[tool.multistage-build]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "retrofy-test-project"
+version = "0.1"
+description = "A project full of the latest and greatest Python (syntax) features"
+# The syntax in the repository is Python 3.13+, but we use retrofy to support older versions.
+requires-python = ">=3.7"
+
+[project.optional-dependencies]
+test = [
+  "pytest",
+]
+dev = [
+  # Include the "test" and "doc" dependencies in the dev dependencies.
+  "example-project[doc,test]",
+]
+
+[tool.setuptools.packages.find]
+include = ["example_project", "example_project.*"]

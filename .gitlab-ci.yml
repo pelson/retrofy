@@ -25,6 +25,32 @@ test_wheel:
     - .acc_py_wheel_test
     - .acc_py_run_on_potential_release_candidates
 
+# Build a wheel for retrofy's integration test project.
+build_integration_test_wheel:
+  stage: test
+  extends: .acc_py_build_wheel
+  needs: [build_wheel]
+  variables:
+    project_name: example_project
+    distribution_name: retrofy_test_project
+    project_root: ./example-project
+  script:
+    - cd ${project_root}
+    - mkdir -p dist-unrepaired/
+    - python -m pip install build setuptools ../
+    # This dist directory is not published to automatically (a good thing).
+    - python -m build --skip-dependency-check --wheel --outdir dist/ .
+
+example_project_integration_tests:
+  variables:
+    project_name: example_project
+    distribution_name: retrofy_test_project
+    project_root: ./example-project
+  extends:
+    - .acc_py_wheel_test
+    - .acc_py_run_on_potential_release_candidates
+  needs: [build_integration_test_wheel]
+
 # Release the source distribution and the wheel to the acc-py package index, only on git tag.
 publish:
   extends: .acc_py_publish
