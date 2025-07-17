@@ -138,7 +138,9 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
     ) -> cst.ListComp:
         """Transform list comprehension with walrus assignments."""
         return self._generic_comprehension_transform(
-            node, assignments, is_short_circuit=True,
+            node,
+            assignments,
+            is_short_circuit=True,
         )
 
     def _transform_nested_list_comprehension(
@@ -191,7 +193,9 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
     ) -> cst.SetComp:
         """Transform set comprehension with walrus assignments."""
         return self._generic_comprehension_transform(
-            node, assignments, is_short_circuit=True,
+            node,
+            assignments,
+            is_short_circuit=True,
         )
 
     def _transform_dict_comprehension(
@@ -201,7 +205,9 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
     ) -> cst.DictComp:
         """Transform dict comprehension with walrus assignments."""
         return self._generic_comprehension_transform(
-            node, assignments, is_short_circuit=True,
+            node,
+            assignments,
+            is_short_circuit=True,
         )
 
     def _combine_targets(
@@ -485,21 +491,25 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
         )
 
     def _extract_first_condition_from_and(
-        self, condition: cst.BaseExpression,
+        self,
+        condition: cst.BaseExpression,
     ) -> cst.BaseExpression | None:
         """Extract the first condition from an AND expression."""
         if isinstance(condition, cst.BooleanOperation) and isinstance(
-            condition.operator, cst.And,
+            condition.operator,
+            cst.And,
         ):
             return condition.left
         return None
 
     def _extract_second_condition_from_and(
-        self, condition: cst.BaseExpression,
+        self,
+        condition: cst.BaseExpression,
     ) -> cst.BaseExpression | None:
         """Extract the second condition from an AND expression."""
         if isinstance(condition, cst.BooleanOperation) and isinstance(
-            condition.operator, cst.And,
+            condition.operator,
+            cst.And,
         ):
             return condition.right
         return None
