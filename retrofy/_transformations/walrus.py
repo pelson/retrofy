@@ -177,12 +177,19 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
         # Build nested generator expression
         nested_gen = self._build_nested_generator(for_clauses, all_values)
 
+        # Collect if clauses from the original nested comprehension
+        # These need to be moved to the outer comprehension since walrus variables
+        # will be in scope there
+        outer_ifs = []
+        for for_clause in for_clauses:
+            outer_ifs.extend(for_clause.ifs)
+
         # Update the comprehension with flattened structure
         return node.with_changes(
             for_in=cst.CompFor(
                 target=new_target,
                 iter=nested_gen,
-                ifs=(),  # Conditions are preserved in the nested generator
+                ifs=outer_ifs,  # Move if clauses to outer comprehension where walrus variables are in scope
             ),
         )
 
@@ -246,12 +253,14 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
 
         # Build the generator preserving the original nested structure
         # Start from the innermost and build outward
+        # NOTE: We remove if clauses from the inner generator because walrus variables
+        # won't be in scope there. The if clauses should be moved to the outer comprehension.
         current_gen = None
         for i in range(len(for_clauses) - 1, -1, -1):
             current_gen = cst.CompFor(
                 target=for_clauses[i].target,
                 iter=for_clauses[i].iter,
-                ifs=for_clauses[i].ifs,
+                ifs=(),  # Remove if clauses from inner generator - they'll be handled by outer comprehension
                 inner_for_in=current_gen,
             )
 
@@ -291,12 +300,19 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
         # Build nested generator expression
         nested_gen = self._build_nested_generator(for_clauses, all_values)
 
+        # Collect if clauses from the original nested comprehension
+        # These need to be moved to the outer comprehension since walrus variables
+        # will be in scope there
+        outer_ifs = []
+        for for_clause in for_clauses:
+            outer_ifs.extend(for_clause.ifs)
+
         # Update the comprehension with flattened structure
         return node.with_changes(
             for_in=cst.CompFor(
                 target=new_target,
                 iter=nested_gen,
-                ifs=(),  # Conditions are preserved in the nested generator
+                ifs=outer_ifs,  # Move if clauses to outer comprehension where walrus variables are in scope
             ),
         )
 
@@ -334,12 +350,19 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
         # Build nested generator expression
         nested_gen = self._build_nested_generator(for_clauses, all_values)
 
+        # Collect if clauses from the original nested comprehension
+        # These need to be moved to the outer comprehension since walrus variables
+        # will be in scope there
+        outer_ifs = []
+        for for_clause in for_clauses:
+            outer_ifs.extend(for_clause.ifs)
+
         # Update the comprehension with flattened structure
         return node.with_changes(
             for_in=cst.CompFor(
                 target=new_target,
                 iter=nested_gen,
-                ifs=(),  # Conditions are preserved in the nested generator
+                ifs=outer_ifs,  # Move if clauses to outer comprehension where walrus variables are in scope
             ),
         )
 
