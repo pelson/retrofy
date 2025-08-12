@@ -3,7 +3,7 @@ import typing
 
 import libcst as cst
 
-from ._transformations import type_alias, walrus
+from ._transformations import match_statement, type_alias, walrus
 
 
 class TypingTransformer(cst.CSTTransformer):
@@ -153,6 +153,10 @@ def convert_walrus_operator(module: cst.Module) -> cst.Module:
 
 def convert_type_alias(module: cst.Module) -> cst.Module:
     return module.visit(type_alias.PEP695Transformer())
+
+
+def convert_match_statement(module: cst.Module) -> cst.Module:
+    return module.visit(match_statement.MatchStatementTransformer())
 
 
 def convert(code: str) -> str:
