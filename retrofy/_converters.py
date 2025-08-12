@@ -164,5 +164,6 @@ def convert(code: str) -> str:
     mod = convert_sequence_subscript(mod)
     mod = convert_walrus_operator(mod)
     mod = convert_type_alias(mod)
+    mod = convert_match_statement(mod)
     mod = convert_union(mod)
     return mod.code

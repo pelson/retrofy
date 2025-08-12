@@ -4,6 +4,8 @@ from typing import List, Optional, Tuple, Union
 
 import libcst as cst
 
+from .import_utils import ImportManager
+
 
 class VariableSubstituter(cst.CSTTransformer):
     """Substitute variable names with expressions in CST nodes."""
@@ -51,6 +53,10 @@ class MatchStatementTransformer(cst.CSTTransformer):
     - Star patterns require complex slicing logic
     - Class patterns require explicit isinstance checks
     """
+
+    def __init__(self):
+        super().__init__()
+        self.import_manager = ImportManager()
 
     def leave_Match(
         self,
@@ -111,6 +117,14 @@ class MatchStatementTransformer(cst.CSTTransformer):
                     result = case_stmt
 
         return result or cst.SimpleStatementLine([cst.Expr(subject)])
+
+    def leave_Module(
+        self,
+        original_node: cst.Module,
+        updated_node: cst.Module,
+    ) -> cst.Module:
+        """Apply import management."""
+        return self.import_manager.apply_imports(updated_node)
 
     def _build_case_condition(
         self,
@@ -266,6 +280,7 @@ class MatchStatementTransformer(cst.CSTTransformer):
 
             if not actual_elements:
                 # Empty sequence: case [] or case (): -> if isinstance(subject, collections.abc.Sequence) and not isinstance(subject, str) and len(subject) == 0:
+                self.import_manager.require_import("collections.abc")
                 isinstance_check = cst.BooleanOperation(
                     left=cst.Call(
                         cst.Name("isinstance"),
@@ -390,6 +405,7 @@ class MatchStatementTransformer(cst.CSTTransformer):
             assignments = []
 
             # isinstance check - match any Sequence except strings
+            self.import_manager.require_import("collections.abc")
             isinstance_check = cst.BooleanOperation(
                 left=cst.Call(
                     cst.Name("isinstance"),

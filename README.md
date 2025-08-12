@@ -39,12 +39,25 @@ desired Python version.
 
 ## Available transformations
 
-For all transformations, an `import typing` will be injected where necessary
+For all transformations, necessary imports (`typing`, `collections.abc`, etc.) will be injected where necessary
 and appropriate.
 
 * `A | B` -> `typing.Union[A, B]`
 
 * PEP-572 - walrus operator
+
+* PEP-636 - match statements (structural pattern matching):
+  * Literal patterns: `case 42:` -> `if value == 42:`
+  * Variable binding: `case x:` -> `x = value`
+  * Sequence patterns: `case [x, y]:` -> `if isinstance(value, collections.abc.Sequence) and not isinstance(value, str) and len(value) == 2: x, y = value`
+  * Mapping patterns: `case {"key": value}:` -> `if isinstance(value, dict) and "key" in value: value = value["key"]`
+  * Class patterns: `case Point(x=0, y=y):` -> `if isinstance(value, Point) and value.x == 0: y = value.y`
+  * Guard clauses: `case x if x > 0:` -> `if x > 0: x = value`
+  * OR patterns: `case 1 | 2:` -> `if value in (1, 2):`
+  * Wildcard patterns: `case _:` -> `else:`
+  * Star patterns: `case [x, *rest]:` -> `if len(value) >= 1: x = value[0]; rest = value[1:]`
+  * As patterns: `case [x, y] as point:` -> `if len(value) == 2: point = value; x, y = value`
+  * Complex nested patterns with full recursive support
 
 * PEP-695 - type statements, generic classes, and generic functions:
   * Type statements:

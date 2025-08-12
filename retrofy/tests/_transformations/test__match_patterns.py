@@ -96,6 +96,7 @@ def test_sequence_matching_tuple():
     """)
 
     expected = textwrap.dedent("""
+    import collections.abc
     if point == (0, 0):
         print("Origin")
     elif isinstance(point, collections.abc.Sequence) and not isinstance(point, str) and len(point) == 2 and point[0] == 0:
@@ -129,6 +130,7 @@ def test_sequence_matching_list():
     """)
 
     expected = textwrap.dedent("""
+    import collections.abc
     if isinstance(items, collections.abc.Sequence) and not isinstance(items, str) and len(items) == 0:
         print("Empty")
     elif len(items) == 1:
@@ -273,6 +275,7 @@ def test_nested_patterns():
     """)
 
     expected = textwrap.dedent("""
+    import collections.abc
     if isinstance(data, dict) and "users" in data and isinstance(data["users"], collections.abc.Sequence) and not isinstance(data["users"], str) and len(data["users"]) == 1 and isinstance(data["users"][0], dict) and "name" in data["users"][0] and "active" in data["users"][0] and data["users"][0]["active"] == True:
         name = data["users"][0]["name"]
         return name
@@ -329,6 +332,7 @@ def test_wildcard_patterns():
     """)
 
     expected = textwrap.dedent("""
+    import collections.abc
     if isinstance(value, collections.abc.Sequence) and not isinstance(value, str) and len(value) == 3:
         x = value[0]
         z = value[2]
