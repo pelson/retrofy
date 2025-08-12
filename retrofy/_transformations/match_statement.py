@@ -5,6 +5,24 @@ from typing import List, Optional, Tuple, Union
 import libcst as cst
 
 
+class VariableSubstituter(cst.CSTTransformer):
+    """Substitute variable names with expressions in CST nodes."""
+
+    def __init__(self, substitutions: dict[str, cst.BaseExpression]):
+        super().__init__()
+        self.substitutions = substitutions
+
+    def leave_Name(
+        self,
+        original_node: cst.Name,
+        updated_node: cst.Name,
+    ) -> cst.BaseExpression:
+        """Replace variable names with their substitutions."""
+        if updated_node.value in self.substitutions:
+            return self.substitutions[updated_node.value]
+        return updated_node
+
+
 class MatchStatementTransformer(cst.CSTTransformer):
     """
     Transform match statements to compatible if/elif/else syntax.
@@ -121,7 +139,13 @@ class MatchStatementTransformer(cst.CSTTransformer):
                     right=guard,
                 )
             else:
-                condition = guard
+                # For simple variable binding + guard, substitute the subject for the variable
+                # in the guard condition to avoid undefined variable errors
+                condition = self._substitute_variables_in_guard(
+                    guard,
+                    assignments,
+                    subject,
+                )
 
         # If no condition (e.g., simple variable binding), treat as else
         if condition is None:
@@ -583,40 +607,9 @@ class MatchStatementTransformer(cst.CSTTransformer):
         )
         conditions.append(isinstance_check)
 
-        # Handle both positional and keyword patterns
+        # Handle positional patterns first
         for i, element in enumerate(pattern.patterns):
-            if isinstance(element, cst.MatchKeywordElement):
-                # Keyword pattern: Point(x=value)
-                attr_name = element.keyword
-                value_pattern = element.pattern
-
-                attr_access = cst.Attribute(subject, attr_name)
-
-                if isinstance(value_pattern, (cst.MatchValue, cst.MatchSingleton)):
-                    # Check attribute value
-                    attr_check = cst.Comparison(
-                        left=attr_access,
-                        comparisons=[
-                            cst.ComparisonTarget(
-                                operator=cst.Equal(),
-                                comparator=value_pattern.value,
-                            ),
-                        ],
-                    )
-                    conditions.append(attr_check)
-                elif (
-                    isinstance(value_pattern, cst.MatchAs)
-                    and value_pattern.pattern is None
-                    and value_pattern.name
-                ):
-                    # Bind attribute to variable
-                    assignment = cst.Assign(
-                        [cst.AssignTarget(value_pattern.name)],
-                        attr_access,
-                    )
-                    assignments.append(assignment)
-
-            elif isinstance(element, cst.MatchSequenceElement):
+            if isinstance(element, cst.MatchSequenceElement):
                 # Positional pattern: Point(x, 0)
                 # For positional patterns, we need to map to specific attributes
                 # This is problematic because we don't know the attribute names
@@ -653,6 +646,41 @@ class MatchStatementTransformer(cst.CSTTransformer):
                         )
                         assignments.append(assignment)
 
+        # Handle keyword patterns
+        for element in pattern.kwds:
+            if isinstance(element, cst.MatchKeywordElement):
+                # Keyword pattern: Point(x=value)
+                attr_name = (
+                    element.key
+                )  # Note: it's 'key' not 'keyword' for MatchKeywordElement
+                value_pattern = element.pattern
+
+                attr_access = cst.Attribute(subject, attr_name)
+
+                if isinstance(value_pattern, (cst.MatchValue, cst.MatchSingleton)):
+                    # Check attribute value
+                    attr_check = cst.Comparison(
+                        left=attr_access,
+                        comparisons=[
+                            cst.ComparisonTarget(
+                                operator=cst.Equal(),
+                                comparator=value_pattern.value,
+                            ),
+                        ],
+                    )
+                    conditions.append(attr_check)
+                elif (
+                    isinstance(value_pattern, cst.MatchAs)
+                    and value_pattern.pattern is None
+                    and value_pattern.name
+                ):
+                    # Bind attribute to variable
+                    assignment = cst.Assign(
+                        [cst.AssignTarget(value_pattern.name)],
+                        attr_access,
+                    )
+                    assignments.append(assignment)
+
         # Combine conditions
         if conditions:
             combined_condition = conditions[0]
@@ -663,16 +691,40 @@ class MatchStatementTransformer(cst.CSTTransformer):
                     right=cond,
                 )
 
-            # Add parentheses around complex conditions for readability
-            if len(conditions) > 1:
-                combined_condition = combined_condition.with_changes(
-                    lpar=[cst.LeftParen()],
-                    rpar=[cst.RightParen()],
-                )
-
             return combined_condition, assignments
 
         return None, assignments
+
+    def _substitute_variables_in_guard(
+        self,
+        guard: cst.BaseExpression,
+        assignments: List[cst.BaseSmallStatement],
+        subject: cst.BaseExpression,
+    ) -> cst.BaseExpression:
+        """
+        Substitute variables from assignments with the subject in guard conditions.
+
+        For example, if we have:
+        - guard: y > 0
+        - assignments: [y = x]
+        - subject: x
+
+        Then substitute y with x in the guard to get: x > 0
+        """
+        if not assignments:
+            return guard
+
+        # Create a mapping of variable names to the subject
+        var_substitutions = {}
+        for assignment in assignments:
+            if isinstance(assignment, cst.Assign):
+                for target in assignment.targets:
+                    if isinstance(target.target, cst.Name):
+                        var_substitutions[target.target.value] = subject
+
+        # Use a transformer to substitute variables
+        substituter = VariableSubstituter(var_substitutions)
+        return guard.visit(substituter)
 
     def _combine_assignments_and_body(
         self,

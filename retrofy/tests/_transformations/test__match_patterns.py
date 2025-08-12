@@ -212,10 +212,10 @@ def test_or_patterns_with_variables():
     # OR patterns with different variable bindings are translated by expanding
     # them into separate if/elif conditions:
     expected = textwrap.dedent("""
-    if (isinstance(value, Point) and value.y == 0):
+    if isinstance(value, Point) and value.y == 0:
         x = value.x
         print(f"On axis at {x}")
-    elif (isinstance(value, Point) and value.x == 0):
+    elif isinstance(value, Point) and value.x == 0:
         x = value.y
         print(f"On axis at {x}")
     """)
@@ -225,9 +225,6 @@ def test_or_patterns_with_variables():
     assert result.code == expected
 
 
-@pytest.mark.skip(
-    reason="Guard clauses lose semantic scoping guarantees - match statements have consistent variable binding that cannot be replicated in if/elif chains",
-)
 def test_guard_clauses():
     """Test guard clauses with if conditions - demonstrates scoping limitations."""
     test_case_source = textwrap.dedent("""
@@ -240,33 +237,28 @@ def test_guard_clauses():
             return "zero"
     """)
 
-    # The test expects nested if/else structure to mimic match scoping:
+    # Guard clauses use the subject directly in conditions, then bind variables in bodies:
     expected = textwrap.dedent("""
-    y = x
-    if y > 0:
+    if x > 0:
+        y = x
         return f"positive {y}"
+    elif x < 0:
+        y = x
+        return f"negative {y}"
     else:
         y = x
-        if y < 0:
-            return f"negative {y}"
-        else:
-            y = x
-            return "zero"
+        return "zero"
     """)
 
-    # Problems with this translation:
-    # 1. Variable 'y' is rebound multiple times unnecessarily
-    # 2. Loses the clean pattern matching semantics
-    # 3. More complex nesting than the original match statement
-    # 4. Cannot guarantee exhaustive checking
+    # This translation is correct:
+    # 1. Uses the match subject (x) directly in guard conditions
+    # 2. Variable binding happens in the body after the condition passes
+    # 3. No undefined variable errors
     module = cst.parse_module(test_case_source)
     result = _converters.convert_match_statement(module)
     assert result.code == expected
 
 
-@pytest.mark.skip(
-    reason="Class pattern matching becomes verbose with explicit isinstance checks and loses pattern-based dispatch elegance",
-)
 def test_class_pattern_matching():
     """Test class pattern matching with attributes - shows verbosity of translation."""
     test_case_source = textwrap.dedent("""
@@ -349,9 +341,6 @@ def test_nested_patterns():
     assert result.code == expected
 
 
-@pytest.mark.skip(
-    reason="Mapping patterns require verbose isinstance and key checking, losing the elegance of pattern matching",
-)
 def test_mapping_patterns():
     """Test dictionary/mapping patterns - shows verbosity issues."""
     test_case_source = textwrap.dedent("""
@@ -365,12 +354,10 @@ def test_mapping_patterns():
     """)
 
     expected = textwrap.dedent("""
-    if (isinstance(request, dict) and "action" in request and
-        request["action"] == "get" and "resource" in request):
+    if isinstance(request, dict) and "action" in request and request["action"] == "get" and "resource" in request:
         resource = request["resource"]
         return f"Getting {resource}"
-    elif (isinstance(request, dict) and "action" in request and
-          request["action"] == "post" and "resource" in request and "data" in request):
+    elif isinstance(request, dict) and "action" in request and request["action"] == "post" and "resource" in request and "data" in request:
         resource = request["resource"]
         data = request["data"]
         return f"Posting to {resource}: {data}"
