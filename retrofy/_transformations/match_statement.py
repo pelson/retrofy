@@ -265,8 +265,33 @@ class MatchStatementTransformer(cst.CSTTransformer):
                     actual_elements.append(elem)
 
             if not actual_elements:
-                # Empty sequence: case [] or case (): -> if len(subject) == 0:
-                condition = cst.Comparison(
+                # Empty sequence: case [] or case (): -> if isinstance(subject, collections.abc.Sequence) and not isinstance(subject, str) and len(subject) == 0:
+                isinstance_check = cst.BooleanOperation(
+                    left=cst.Call(
+                        cst.Name("isinstance"),
+                        [
+                            cst.Arg(subject),
+                            cst.Arg(
+                                cst.Attribute(
+                                    cst.Attribute(
+                                        cst.Name("collections"),
+                                        cst.Name("abc"),
+                                    ),
+                                    cst.Name("Sequence"),
+                                ),
+                            ),
+                        ],
+                    ),
+                    operator=cst.And(),
+                    right=cst.UnaryOperation(
+                        cst.Not(),
+                        cst.Call(
+                            cst.Name("isinstance"),
+                            [cst.Arg(subject), cst.Arg(cst.Name("str"))],
+                        ),
+                    ),
+                )
+                length_check = cst.Comparison(
                     left=cst.Call(cst.Name("len"), [cst.Arg(subject)]),
                     comparisons=[
                         cst.ComparisonTarget(
@@ -274,6 +299,11 @@ class MatchStatementTransformer(cst.CSTTransformer):
                             comparator=cst.Integer("0"),
                         ),
                     ],
+                )
+                condition = cst.BooleanOperation(
+                    left=isinstance_check,
+                    operator=cst.And(),
+                    right=length_check,
                 )
                 return condition, []
 
@@ -359,6 +389,31 @@ class MatchStatementTransformer(cst.CSTTransformer):
             conditions = []
             assignments = []
 
+            # isinstance check - match any Sequence except strings
+            isinstance_check = cst.BooleanOperation(
+                left=cst.Call(
+                    cst.Name("isinstance"),
+                    [
+                        cst.Arg(subject),
+                        cst.Arg(
+                            cst.Attribute(
+                                cst.Attribute(cst.Name("collections"), cst.Name("abc")),
+                                cst.Name("Sequence"),
+                            ),
+                        ),
+                    ],
+                ),
+                operator=cst.And(),
+                right=cst.UnaryOperation(
+                    cst.Not(),
+                    cst.Call(
+                        cst.Name("isinstance"),
+                        [cst.Arg(subject), cst.Arg(cst.Name("str"))],
+                    ),
+                ),
+            )
+            conditions.append(isinstance_check)
+
             # Length check
             length_check = cst.Comparison(
                 left=cst.Call(cst.Name("len"), [cst.Arg(subject)]),
@@ -396,6 +451,15 @@ class MatchStatementTransformer(cst.CSTTransformer):
                     # Variable binding: x = point[0]
                     assignment = cst.Assign([cst.AssignTarget(elem.name)], subscript)
                     assignments.append(assignment)
+                else:
+                    # Complex nested pattern - recursively process it
+                    elem_condition, elem_assignments = self._pattern_to_condition(
+                        subscript,
+                        elem,
+                    )
+                    if elem_condition:
+                        conditions.append(elem_condition)
+                    assignments.extend(elem_assignments)
 
             # Combine all conditions
             if len(conditions) == 1:

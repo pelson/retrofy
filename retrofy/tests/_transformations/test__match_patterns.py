@@ -1,37 +1,6 @@
-"""
-Tests for match statement to pre-Python 3.10 syntax conversion.
-
-This test suite demonstrates both the patterns that CAN be translated to legacy syntax
-and the patterns that CANNOT be correctly translated, highlighting the fundamental
-limitations of trying to backport match statements.
-
-WORKING PATTERNS (should pass):
-- test_literal_matching_simple: Basic literal matching
-- test_literal_matching_multiple_types: Different literal types
-- test_variable_binding_simple: Simple variable binding
-- test_sequence_matching_tuple: Tuple pattern matching
-- test_sequence_matching_list: List pattern matching
-- test_or_patterns_simple: Simple OR patterns with literals
-- test_or_patterns_with_variables: OR patterns with different variable bindings
-- test_wildcard_patterns: Wildcard and capture patterns
-- test_as_patterns: As patterns for value capture
-
-PROBLEMATIC PATTERNS (marked as skipped with explanations):
-- test_guard_clauses: Guard clauses lose scoping guarantees
-- test_class_pattern_matching: Becomes verbose with isinstance checks
-- test_nested_patterns: Extremely verbose nested destructuring
-- test_mapping_patterns: Verbose dictionary pattern matching
-- test_complex_nested_with_guards: Fundamentally broken control flow
-- test_star_patterns_advanced: Complex slicing logic
-
-The skipped tests show why match statements cannot be cleanly backported and
-demonstrate the limitations that would arise in any translation attempt.
-"""
-
 import textwrap
 
 import libcst as cst
-import pytest
 
 from retrofy import _converters
 
@@ -129,10 +98,10 @@ def test_sequence_matching_tuple():
     expected = textwrap.dedent("""
     if point == (0, 0):
         print("Origin")
-    elif len(point) == 2 and point[0] == 0:
+    elif isinstance(point, collections.abc.Sequence) and not isinstance(point, str) and len(point) == 2 and point[0] == 0:
         y = point[1]
         print(f"Y={y}")
-    elif len(point) == 2 and point[1] == 0:
+    elif isinstance(point, collections.abc.Sequence) and not isinstance(point, str) and len(point) == 2 and point[1] == 0:
         x = point[0]
         print(f"X={x}")
     elif len(point) == 2:
@@ -160,7 +129,7 @@ def test_sequence_matching_list():
     """)
 
     expected = textwrap.dedent("""
-    if len(items) == 0:
+    if isinstance(items, collections.abc.Sequence) and not isinstance(items, str) and len(items) == 0:
         print("Empty")
     elif len(items) == 1:
         x = items[0]
@@ -250,10 +219,6 @@ def test_guard_clauses():
         return "zero"
     """)
 
-    # This translation is correct:
-    # 1. Uses the match subject (x) directly in guard conditions
-    # 2. Variable binding happens in the body after the condition passes
-    # 3. No undefined variable errors
     module = cst.parse_module(test_case_source)
     result = _converters.convert_match_statement(module)
     assert result.code == expected
@@ -290,19 +255,11 @@ def test_class_pattern_matching():
             print(f"X={x}, Y={y}")
     """)
 
-    # Issues with this translation:
-    # 1. Very verbose isinstance checks repeated everywhere
-    # 2. Manual attribute access instead of pattern destructuring
-    # 3. No automatic exhaustiveness checking
-    # 4. Loses the declarative nature of pattern matching
     module = cst.parse_module(test_case_source)
     result = _converters.convert_match_statement(module)
     assert result.code == expected
 
 
-@pytest.mark.skip(
-    reason="Nested pattern destructuring becomes extremely verbose and error-prone with manual type/structure checking",
-)
 def test_nested_patterns():
     """Test nested pattern destructuring - demonstrates why deep patterns are problematic."""
     test_case_source = textwrap.dedent("""
@@ -316,26 +273,15 @@ def test_nested_patterns():
     """)
 
     expected = textwrap.dedent("""
-    if (isinstance(data, dict) and "users" in data and
-        isinstance(data["users"], list) and len(data["users"]) >= 1 and
-        isinstance(data["users"][0], dict) and "name" in data["users"][0] and
-        "active" in data["users"][0] and data["users"][0]["active"] is True):
+    if isinstance(data, dict) and "users" in data and isinstance(data["users"], collections.abc.Sequence) and not isinstance(data["users"], str) and len(data["users"]) == 1 and isinstance(data["users"][0], dict) and "name" in data["users"][0] and "active" in data["users"][0] and data["users"][0]["active"] == True:
         name = data["users"][0]["name"]
         return name
-    elif (isinstance(data, dict) and "users" in data and
-          isinstance(data["users"], list) and len(data["users"]) == 0):
+    elif isinstance(data, dict) and "users" in data and isinstance(data["users"], collections.abc.Sequence) and not isinstance(data["users"], str) and len(data["users"]) == 0:
         return "No users"
     elif isinstance(data, dict) and "users" in data:
         users = data["users"]
         return f"{len(users)} users"
     """)
-
-    # Major problems with nested pattern translation:
-    # 1. Extremely verbose and hard to read
-    # 2. Error-prone manual type/structure checking
-    # 3. Loses the declarative nature of pattern matching
-    # 4. No safety guarantees about data structure validity
-    # 5. Order-dependent conditions that could miss cases
     module = cst.parse_module(test_case_source)
     result = _converters.convert_match_statement(module)
     assert result.code == expected
@@ -365,13 +311,6 @@ def test_mapping_patterns():
         action = request["action"]
         return f"Unknown action: {action}"
     """)
-
-    # Issues with mapping pattern translation:
-    # 1. Repetitive isinstance(dict) checks
-    # 2. Manual key existence checking
-    # 3. Verbose condition chaining
-    # 4. No automatic handling of missing keys
-    # 5. Loses structural pattern matching benefits
     module = cst.parse_module(test_case_source)
     result = _converters.convert_match_statement(module)
     assert result.code == expected
@@ -390,7 +329,7 @@ def test_wildcard_patterns():
     """)
 
     expected = textwrap.dedent("""
-    if len(value) == 3:
+    if isinstance(value, collections.abc.Sequence) and not isinstance(value, str) and len(value) == 3:
         x = value[0]
         z = value[2]
         return x + z
@@ -435,9 +374,6 @@ def test_complex_nested_with_guards():
     assert result.code == expected
 
 
-@pytest.mark.skip(
-    reason="Star patterns require complex slicing logic and lose the elegance of automatic unpacking",
-)
 def test_star_patterns_advanced():
     """Test star patterns - shows complexity of manual slicing."""
     test_case_source = textwrap.dedent("""
@@ -451,27 +387,20 @@ def test_star_patterns_advanced():
     """)
 
     expected = textwrap.dedent("""
-    if len(sequence) >= 2:
+    if len(sequence) >= 2 and len(sequence[1:-1]) > 2:
         first = sequence[0]
         middle = sequence[1:-1]
         last = sequence[-1]
-        if len(middle) > 2:
-            return middle[1]
-    if True:  # [*all] matches any sequence
-        all = list(sequence)
+        return middle[1]
+    elif len(sequence) >= 0:
+        all = sequence[0:]
         return all
-    if len(sequence) >= 1:
-        prefix = sequence[:-1]
+    elif len(sequence) >= 1:
+        prefix = sequence[0:-1]
         last_two = sequence[-1]
         return prefix, last_two
     """)
 
-    # Problems with star pattern translation:
-    # 1. Complex manual slicing logic that's error-prone
-    # 2. Multiple length checks needed for safety
-    # 3. Guard conditions interact poorly with complex unpacking
-    # 4. Edge cases around empty sequences are hard to handle correctly
-    # 5. Loses the automatic unpacking semantics of match statements
     module = cst.parse_module(test_case_source)
     result = _converters.convert_match_statement(module)
     assert result.code == expected
