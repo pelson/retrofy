@@ -58,6 +58,41 @@ class MatchStatementTransformer(cst.CSTTransformer):
         super().__init__()
         self.import_manager = ImportManager()
 
+    def _create_optimized_isinstance_check(
+        self,
+        subject: cst.BaseExpression,
+        positive_type: cst.BaseExpression,
+        negative_types: list[cst.BaseExpression],
+    ) -> cst.BaseExpression:
+        """Create an optimized isinstance check using tuple for negative types."""
+        positive_check = cst.Call(
+            cst.Name("isinstance"),
+            [cst.Arg(subject), cst.Arg(positive_type)],
+        )
+
+        if not negative_types:
+            return positive_check
+
+        if len(negative_types) == 1:
+            negative_check = cst.Call(
+                cst.Name("isinstance"),
+                [cst.Arg(subject), cst.Arg(negative_types[0])],
+            )
+        else:
+            # Use tuple for multiple types
+            tuple_elements = [cst.Element(typ) for typ in negative_types]
+            tuple_expr = cst.Tuple(tuple_elements)
+            negative_check = cst.Call(
+                cst.Name("isinstance"),
+                [cst.Arg(subject), cst.Arg(tuple_expr)],
+            )
+
+        return cst.BooleanOperation(
+            left=positive_check,
+            operator=cst.And(),
+            right=cst.UnaryOperation(cst.Not(), negative_check),
+        )
+
     def leave_Match(
         self,
         original_node: cst.Match,
@@ -279,32 +314,21 @@ class MatchStatementTransformer(cst.CSTTransformer):
                     actual_elements.append(elem)
 
             if not actual_elements:
-                # Empty sequence: case [] or case (): -> if isinstance(subject, collections.abc.Sequence) and not isinstance(subject, str) and len(subject) == 0:
+                # Empty sequence: case [] or case (): -> if isinstance(subject, collections.abc.Sequence) and not isinstance(subject, (str, collections.abc.Mapping)) and len(subject) == 0:
                 self.import_manager.require_import("collections.abc")
-                isinstance_check = cst.BooleanOperation(
-                    left=cst.Call(
-                        cst.Name("isinstance"),
-                        [
-                            cst.Arg(subject),
-                            cst.Arg(
-                                cst.Attribute(
-                                    cst.Attribute(
-                                        cst.Name("collections"),
-                                        cst.Name("abc"),
-                                    ),
-                                    cst.Name("Sequence"),
-                                ),
-                            ),
-                        ],
+                isinstance_check = self._create_optimized_isinstance_check(
+                    subject,
+                    cst.Attribute(
+                        cst.Attribute(cst.Name("collections"), cst.Name("abc")),
+                        cst.Name("Sequence"),
                     ),
-                    operator=cst.And(),
-                    right=cst.UnaryOperation(
-                        cst.Not(),
-                        cst.Call(
-                            cst.Name("isinstance"),
-                            [cst.Arg(subject), cst.Arg(cst.Name("str"))],
+                    [
+                        cst.Name("str"),
+                        cst.Attribute(
+                            cst.Attribute(cst.Name("collections"), cst.Name("abc")),
+                            cst.Name("Mapping"),
                         ),
-                    ),
+                    ],
                 )
                 length_check = cst.Comparison(
                     left=cst.Call(cst.Name("len"), [cst.Arg(subject)]),
@@ -367,7 +391,24 @@ class MatchStatementTransformer(cst.CSTTransformer):
             )
 
             if all_variables:
-                # All variables: case (x, y): -> if len(point) == 2: x, y = point
+                # All variables: case (x, y): -> if isinstance(subject, collections.abc.Sequence) and not isinstance(subject, (str, collections.abc.Mapping)) and len(subject) == 2: x, y = subject
+                self.import_manager.require_import("collections.abc")
+
+                isinstance_check = self._create_optimized_isinstance_check(
+                    subject,
+                    cst.Attribute(
+                        cst.Attribute(cst.Name("collections"), cst.Name("abc")),
+                        cst.Name("Sequence"),
+                    ),
+                    [
+                        cst.Name("str"),
+                        cst.Attribute(
+                            cst.Attribute(cst.Name("collections"), cst.Name("abc")),
+                            cst.Name("Mapping"),
+                        ),
+                    ],
+                )
+
                 length_check = cst.Comparison(
                     left=cst.Call(cst.Name("len"), [cst.Arg(subject)]),
                     comparisons=[
@@ -376,6 +417,12 @@ class MatchStatementTransformer(cst.CSTTransformer):
                             comparator=cst.Integer(str(len(actual_elements))),
                         ),
                     ],
+                )
+
+                combined_check = cst.BooleanOperation(
+                    left=isinstance_check,
+                    operator=cst.And(),
+                    right=length_check,
                 )
 
                 # Create tuple unpacking assignment
@@ -398,35 +445,27 @@ class MatchStatementTransformer(cst.CSTTransformer):
                     )
                     assignment = cst.Assign([cst.AssignTarget(target_tuple)], subject)
 
-                return length_check, [assignment]
+                return combined_check, [assignment]
 
             # Mixed pattern: some literals, some variables
             conditions = []
             assignments = []
 
-            # isinstance check - match any Sequence except strings
+            # isinstance check - match any Sequence except strings and mappings
             self.import_manager.require_import("collections.abc")
-            isinstance_check = cst.BooleanOperation(
-                left=cst.Call(
-                    cst.Name("isinstance"),
-                    [
-                        cst.Arg(subject),
-                        cst.Arg(
-                            cst.Attribute(
-                                cst.Attribute(cst.Name("collections"), cst.Name("abc")),
-                                cst.Name("Sequence"),
-                            ),
-                        ),
-                    ],
+            isinstance_check = self._create_optimized_isinstance_check(
+                subject,
+                cst.Attribute(
+                    cst.Attribute(cst.Name("collections"), cst.Name("abc")),
+                    cst.Name("Sequence"),
                 ),
-                operator=cst.And(),
-                right=cst.UnaryOperation(
-                    cst.Not(),
-                    cst.Call(
-                        cst.Name("isinstance"),
-                        [cst.Arg(subject), cst.Arg(cst.Name("str"))],
+                [
+                    cst.Name("str"),
+                    cst.Attribute(
+                        cst.Attribute(cst.Name("collections"), cst.Name("abc")),
+                        cst.Name("Mapping"),
                     ),
-                ),
+                ],
             )
             conditions.append(isinstance_check)
 
@@ -519,6 +558,24 @@ class MatchStatementTransformer(cst.CSTTransformer):
 
         # Calculate minimum length requirement
         min_length = len(elements) - 1  # All elements except the star
+
+        # Add isinstance check for Sequence (excluding str and Mapping)
+        self.import_manager.require_import("collections.abc")
+        isinstance_check = self._create_optimized_isinstance_check(
+            subject,
+            cst.Attribute(
+                cst.Attribute(cst.Name("collections"), cst.Name("abc")),
+                cst.Name("Sequence"),
+            ),
+            [
+                cst.Name("str"),
+                cst.Attribute(
+                    cst.Attribute(cst.Name("collections"), cst.Name("abc")),
+                    cst.Name("Mapping"),
+                ),
+            ],
+        )
+
         length_check = cst.Comparison(
             left=cst.Call(cst.Name("len"), [cst.Arg(subject)]),
             comparisons=[
@@ -527,6 +584,13 @@ class MatchStatementTransformer(cst.CSTTransformer):
                     comparator=cst.Integer(str(min_length)),
                 ),
             ],
+        )
+
+        # Combine isinstance and length checks
+        combined_check = cst.BooleanOperation(
+            left=isinstance_check,
+            operator=cst.And(),
+            right=length_check,
         )
 
         assignments = []
@@ -599,7 +663,7 @@ class MatchStatementTransformer(cst.CSTTransformer):
                 assignment = cst.Assign([cst.AssignTarget(elem.name)], subscript)
                 assignments.append(assignment)
 
-        return length_check, assignments
+        return combined_check, assignments
 
     def _handle_mapping_pattern(
         self,
@@ -610,10 +674,19 @@ class MatchStatementTransformer(cst.CSTTransformer):
         conditions = []
         assignments = []
 
-        # isinstance check
+        # isinstance check - match any Mapping per PEP-622
+        self.import_manager.require_import("collections.abc")
         isinstance_check = cst.Call(
             cst.Name("isinstance"),
-            [cst.Arg(subject), cst.Arg(cst.Name("dict"))],
+            [
+                cst.Arg(subject),
+                cst.Arg(
+                    cst.Attribute(
+                        cst.Attribute(cst.Name("collections"), cst.Name("abc")),
+                        cst.Name("Mapping"),
+                    ),
+                ),
+            ],
         )
         conditions.append(isinstance_check)
 

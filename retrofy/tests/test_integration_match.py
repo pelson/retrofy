@@ -19,10 +19,11 @@ def test_match_statement_integration():
     """)
 
     expected = textwrap.dedent("""
+    import collections.abc
     def handle_value(value):
         if value == 42:
             return "answer"
-        elif len(value) == 2:
+        elif isinstance(value, collections.abc.Sequence) and not isinstance(value, (str, collections.abc.Mapping)) and len(value) == 2:
             x, y = value
             return f"pair: {x}, {y}"
         else:
@@ -49,9 +50,9 @@ def test_match_statement_with_collections_import():
     expected = textwrap.dedent("""
     import collections.abc
     def process_items(items):
-        if isinstance(items, collections.abc.Sequence) and not isinstance(items, str) and len(items) == 0:
+        if isinstance(items, collections.abc.Sequence) and not isinstance(items, (str, collections.abc.Mapping)) and len(items) == 0:
             return "empty"
-        elif isinstance(items, collections.abc.Sequence) and not isinstance(items, str) and len(items) == 2 and items[1] == 0:
+        elif isinstance(items, collections.abc.Sequence) and not isinstance(items, (str, collections.abc.Mapping)) and len(items) == 2 and items[1] == 0:
             x = items[0]
             return f"has zero: {x}"
         else:
@@ -80,7 +81,7 @@ def test_match_statement_with_existing_future_imports():
     import collections.abc
 
     def process_data(data):
-        if isinstance(data, collections.abc.Sequence) and not isinstance(data, str) and len(data) == 0:
+        if isinstance(data, collections.abc.Sequence) and not isinstance(data, (str, collections.abc.Mapping)) and len(data) == 0:
             return "empty"
         else:
             return "not empty"
