@@ -227,12 +227,13 @@ class MatchStatementTransformer(cst.CSTTransformer):
             return condition, []
 
         elif isinstance(pattern, cst.MatchSingleton):
-            # Singleton pattern: case True/False/None: -> if subject == True:
+            # Singleton pattern: case True/False/None: -> if subject is True:
+            # Use 'is' for singletons to match Python's match statement semantics
             condition = cst.Comparison(
                 left=subject,
                 comparisons=[
                     cst.ComparisonTarget(
-                        operator=cst.Equal(),
+                        operator=cst.Is(),
                         comparator=pattern.value,
                     ),
                 ],
@@ -689,6 +690,19 @@ class MatchStatementTransformer(cst.CSTTransformer):
             ],
         )
         conditions.append(isinstance_check)
+
+        # If this is an empty mapping pattern ({}), add length check
+        if not pattern.elements:
+            length_check = cst.Comparison(
+                left=cst.Call(cst.Name("len"), [cst.Arg(subject)]),
+                comparisons=[
+                    cst.ComparisonTarget(
+                        operator=cst.Equal(),
+                        comparator=cst.Integer("0"),
+                    ),
+                ],
+            )
+            conditions.append(length_check)
 
         # Check each key-value pair
         for element in pattern.elements:

@@ -3,6 +3,7 @@ import textwrap
 from typing import Any, Dict
 
 import libcst as cst
+import pytest
 
 from retrofy import _converters
 
@@ -516,7 +517,7 @@ def test_nested_patterns():
     expected = textwrap.dedent("""
     import collections.abc
     def analyze_data(data):
-        if isinstance(data, collections.abc.Mapping) and "users" in data and isinstance(data["users"], collections.abc.Sequence) and not isinstance(data["users"], (str, collections.abc.Mapping)) and len(data["users"]) == 1 and isinstance(data["users"][0], collections.abc.Mapping) and "name" in data["users"][0] and "active" in data["users"][0] and data["users"][0]["active"] == True:
+        if isinstance(data, collections.abc.Mapping) and "users" in data and isinstance(data["users"], collections.abc.Sequence) and not isinstance(data["users"], (str, collections.abc.Mapping)) and len(data["users"]) == 1 and isinstance(data["users"][0], collections.abc.Mapping) and "name" in data["users"][0] and "active" in data["users"][0] and data["users"][0]["active"] is True:
             name = data["users"][0]["name"]
             return f"Active user: {name}"
         elif isinstance(data, collections.abc.Mapping) and "users" in data and isinstance(data["users"], collections.abc.Sequence) and not isinstance(data["users"], (str, collections.abc.Mapping)) and len(data["users"]) == 0:
@@ -605,4 +606,1019 @@ def test_comprehensive_pattern_execution_converted_only():
     # ADDITIONAL EXECUTION VALIDATION on Python 3.10+ (if available)
     if sys.version_info >= (3, 10):
         original_results = execute_code_with_results(original_code)
+        assert original_results == converted_results
+
+
+def test_as_patterns_simple():
+    """Test basic as patterns for capturing matched values."""
+    test_case_source = textwrap.dedent("""
+    def process_value(value):
+        match value:
+            case (1 | 2 | 3) as num:
+                return f"Small number: {num}"
+            case ("hello" | "hi") as greeting:
+                return f"Greeting: {greeting}"
+            case _ as anything:
+                return f"Other: {anything}"
+    """)
+
+    expected = textwrap.dedent("""
+    def process_value(value):
+        if value in (1, 2, 3):
+            num = value
+            return f"Small number: {num}"
+        elif value in ("hello", "hi"):
+            greeting = value
+            return f"Greeting: {greeting}"
+        else:
+            anything = value
+            return f"Other: {anything}"
+    """)
+
+    # STRING VALIDATION: Test exact code generation
+    module = cst.parse_module(test_case_source)
+    result = _converters.convert_match_statement(module)
+    assert result.code == expected
+
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    result1 = process_value(2)
+    result2 = process_value("hello")
+    result3 = process_value(42)
+    """)
+
+    converted_code = _converters.convert(test_source_with_calls)
+    converted_results = execute_code_with_results(converted_code)
+
+    # Verify converted code produces expected results on all Python versions
+    assert converted_results["result1"] == "Small number: 2"
+    assert converted_results["result2"] == "Greeting: hello"
+    assert converted_results["result3"] == "Other: 42"
+
+    # EQUIVALENCE VALIDATION: Compare with original (Python 3.10+ only)
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results == converted_results
+
+
+@pytest.mark.xfail(strict=True, reason="Nested as patterns not yet implemented")
+def test_nested_as_patterns():
+    """Test as patterns nested within other patterns."""
+    test_case_source = textwrap.dedent("""
+    def analyze_point(data):
+        match data:
+            case {"point": (x, y) as coords} if x > 0 and y > 0:
+                return f"Positive quadrant: {coords}"
+            case {"point": coords as (x, y)}:
+                return f"Point at: {coords} -> ({x}, {y})"
+            case _:
+                return "Not a point"
+    """)
+
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    result1 = analyze_point({"point": (3, 4)})
+    result2 = analyze_point({"point": (-1, 2)})
+    result3 = analyze_point({"data": "other"})
+    """)
+
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results["result1"] == "Positive quadrant: (3, 4)"
+        assert original_results["result2"] == "Point at: (-1, 2) -> (-1, 2)"
+        assert original_results["result3"] == "Not a point"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Value patterns (dotted names) not yet implemented",
+)
+def test_value_patterns_constants():
+    """Test value patterns using dotted names for constants."""
+    test_case_source = textwrap.dedent("""
+    import math
+
+    def classify_angle(angle):
+        match angle:
+            case math.pi:
+                return "π radians"
+            case math.pi / 2:
+                return "π/2 radians"
+            case 0:
+                return "Zero"
+            case _:
+                return "Other angle"
+    """)
+
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    import math
+    result1 = classify_angle(math.pi)
+    result2 = classify_angle(math.pi / 2)
+    result3 = classify_angle(0)
+    result4 = classify_angle(1.5)
+    """)
+
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results["result1"] == "π radians"
+        assert original_results["result2"] == "π/2 radians"
+        assert original_results["result3"] == "Zero"
+        assert original_results["result4"] == "Other angle"
+
+
+def test_group_patterns():
+    """Test parenthesized group patterns."""
+    test_case_source = textwrap.dedent("""
+    def check_complex_condition(data):
+        match data:
+            case (1 | 2) if data > 1:
+                return "Two"
+            case (1 | 2):
+                return "One"
+            case ((3 | 4) | (5 | 6)):
+                return "Mid range"
+            case _:
+                return "Other"
+    """)
+
+    expected = textwrap.dedent("""
+    def check_complex_condition(data):
+        if data in (1, 2) and data > 1:
+            return "Two"
+        elif data in (1, 2):
+            return "One"
+        elif data in (3, 4):
+            return "Mid range"
+        elif data in (5, 6):
+            return "Mid range"
+        else:
+            return "Other"
+    """)
+
+    # STRING VALIDATION: Test exact code generation
+    module = cst.parse_module(test_case_source)
+    result = _converters.convert_match_statement(module)
+    assert result.code == expected
+
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    result1 = check_complex_condition(2)
+    result2 = check_complex_condition(1)
+    result3 = check_complex_condition(4)
+    result4 = check_complex_condition(10)
+    """)
+
+    converted_code = _converters.convert(test_source_with_calls)
+    converted_results = execute_code_with_results(converted_code)
+
+    # Verify converted code produces expected results on all Python versions
+    assert converted_results["result1"] == "Two"
+    assert converted_results["result2"] == "One"
+    assert converted_results["result3"] == "Mid range"
+    assert converted_results["result4"] == "Other"
+
+    # EQUIVALENCE VALIDATION: Compare with original (Python 3.10+ only)
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results == converted_results
+
+
+@pytest.mark.xfail(strict=True, reason="**rest not handled properly yet")
+def test_mapping_patterns_with_rest():
+    """Test mapping patterns with **rest to capture remaining items."""
+    test_case_source = textwrap.dedent("""
+    def process_config(config):
+        match config:
+            case {"name": name, "version": version, **extras}:
+                return f"App {name} v{version} with extras: {extras}"
+            case {"name": name, **rest}:
+                return f"App {name} with config: {rest}"
+            case _:
+                return "Invalid config"
+    """)
+
+    expected = textwrap.dedent("""
+    import collections.abc
+    def process_config(config):
+        if isinstance(config, collections.abc.Mapping) and "name" in config and "version" in config:
+            name = config["name"]
+            version = config["version"]
+            return f"App {name} v{version} with extras: {extras}"
+        elif isinstance(config, collections.abc.Mapping) and "name" in config:
+            name = config["name"]
+            return f"App {name} with config: {rest}"
+        else:
+            return "Invalid config"
+    """)
+
+    # STRING VALIDATION: Test exact code generation
+    module = cst.parse_module(test_case_source)
+    result = _converters.convert_match_statement(module)
+    assert result.code == expected
+
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    result1 = process_config({"name": "myapp", "version": "1.0", "debug": True, "port": 8080})
+    result2 = process_config({"name": "myapp", "author": "me"})
+    result3 = process_config({"invalid": True})
+    """)
+
+    converted_code = _converters.convert(test_source_with_calls)
+    converted_results = execute_code_with_results(converted_code)
+
+    # Verify converted code produces expected results on all Python versions
+    assert (
+        converted_results["result1"]
+        == "App myapp v1.0 with extras: {'debug': True, 'port': 8080}"
+    )
+    assert converted_results["result2"] == "App myapp with config: {'author': 'me'}"
+    assert converted_results["result3"] == "Invalid config"
+
+    # EQUIVALENCE VALIDATION: Compare with original (Python 3.10+ only)
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results == converted_results
+
+
+@pytest.mark.xfail(strict=True, reason="*files not handled properly yet")
+def test_mixed_sequence_patterns():
+    """Test sequence patterns mixing literals and variables."""
+    test_case_source = textwrap.dedent("""
+    def parse_command(cmd):
+        match cmd:
+            case ["git", "add", *files]:
+                return f"Adding files: {files}"
+            case ["git", "commit", "-m", message]:
+                return f"Committing: {message}"
+            case ["git", action, *args]:
+                return f"Git {action} with args: {args}"
+            case [program, *args] if len(args) > 0:
+                return f"Running {program} with {len(args)} args"
+            case [program]:
+                return f"Running {program} with no args"
+            case _:
+                return "Not a command"
+    """)
+
+    expected = textwrap.dedent("""
+    import collections.abc
+    def parse_command(cmd):
+        if isinstance(cmd, collections.abc.Sequence) and not isinstance(cmd, (str, collections.abc.Mapping)) and len(cmd) >= 2:
+            files = cmd[2:]
+            return f"Adding files: {files}"
+        elif isinstance(cmd, collections.abc.Sequence) and not isinstance(cmd, (str, collections.abc.Mapping)) and len(cmd) == 4 and cmd[0] == "git" and cmd[1] == "commit" and cmd[2] == "-m":
+            message = cmd[3]
+            return f"Committing: {message}"
+        elif isinstance(cmd, collections.abc.Sequence) and not isinstance(cmd, (str, collections.abc.Mapping)) and len(cmd) >= 2:
+            action = cmd[1]
+            args = cmd[2:]
+            return f"Git {action} with args: {args}"
+        elif isinstance(cmd, collections.abc.Sequence) and not isinstance(cmd, (str, collections.abc.Mapping)) and len(cmd) >= 1 and len(cmd[1:]) > 0:
+            program = cmd[0]
+            args = cmd[1:]
+            return f"Running {program} with {len(args)} args"
+        elif isinstance(cmd, collections.abc.Sequence) and not isinstance(cmd, (str, collections.abc.Mapping)) and len(cmd) == 1:
+            program = cmd[0]
+            return f"Running {program} with no args"
+        else:
+            return "Not a command"
+    """)
+
+    # STRING VALIDATION: Test exact code generation
+    module = cst.parse_module(test_case_source)
+    result = _converters.convert_match_statement(module)
+    print(result.code)
+    assert result.code == expected
+
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    result1 = parse_command(["git", "add", "file1.py", "file2.py"])
+    result2 = parse_command(["git", "commit", "-m", "Initial commit"])
+    result3 = parse_command(["git", "status"])
+    result4 = parse_command(["python", "script.py", "--verbose"])
+    result5 = parse_command(["ls"])
+    result6 = parse_command("not a list")
+    """)
+
+    converted_code = _converters.convert(test_source_with_calls)
+    converted_results = execute_code_with_results(converted_code)
+
+    # Verify converted code produces expected results on all Python versions
+    assert converted_results["result1"] == "Adding files: ['file1.py', 'file2.py']"
+    assert converted_results["result2"] == "Committing: Initial commit"
+    assert converted_results["result3"] == "Git status with args: []"
+    assert converted_results["result4"] == "Running python with 2 args"
+    assert converted_results["result5"] == "Running ls with no args"
+    assert converted_results["result6"] == "Not a command"
+
+    # EQUIVALENCE VALIDATION: Compare with original (Python 3.10+ only)
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results == converted_results
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Complex nested class patterns not yet implemented",
+)
+def test_nested_class_patterns():
+    """Test complex nested class pattern matching."""
+    test_case_source = textwrap.dedent("""
+    class Container:
+        def __init__(self, items):
+            self.items = items
+
+    def analyze_container(data):
+        match data:
+            case Container(items=[Point(x=0, y=y), *rest]):
+                return f"Container starts with y-axis point {y}, has {len(rest)} more"
+            case Container(items=[Point(x=x, y=0), Point(x=x2, y=y2)]):
+                return f"Container with x-axis point ({x}, 0) and point ({x2}, {y2})"
+            case Container(items=[]):
+                return "Empty container"
+            case Container(items=items):
+                return f"Container with {len(items)} items"
+            case _:
+                return "Not a container"
+    """)
+
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    class Container:
+        def __init__(self, items):
+            self.items = items
+
+    result1 = analyze_container(Container([Point(0, 5), Point(1, 1)]))
+    result2 = analyze_container(Container([Point(3, 0), Point(2, 4)]))
+    result3 = analyze_container(Container([]))
+    result4 = analyze_container(Container([1, 2, 3]))
+    result5 = analyze_container("not a container")
+    """)
+
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert (
+            original_results["result1"]
+            == "Container starts with y-axis point 5, has 1 more"
+        )
+        assert (
+            original_results["result2"]
+            == "Container with x-axis point (3, 0) and point (2, 4)"
+        )
+        assert original_results["result3"] == "Empty container"
+        assert original_results["result4"] == "Container with 3 items"
+        assert original_results["result5"] == "Not a container"
+
+    assert False
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Complex OR patterns with as not yet implemented",
+)
+def test_or_patterns_with_as():
+    """Test OR patterns combined with as patterns."""
+    test_case_source = textwrap.dedent("""
+    def process_number_or_string(value):
+        match value:
+            case (int() | float()) as number if number > 0:
+                return f"Positive number: {number}"
+            case (int() | float()) as number:
+                return f"Non-positive number: {number}"
+            case (str() | bytes()) as text:
+                return f"Text data: {text}"
+            case _ as other:
+                return f"Other type: {type(other).__name__}"
+    """)
+
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    result1 = process_number_or_string(42)
+    result2 = process_number_or_string(-5)
+    result3 = process_number_or_string(3.14)
+    result4 = process_number_or_string("hello")
+    result5 = process_number_or_string([1, 2, 3])
+    """)
+
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results["result1"] == "Positive number: 42"
+        assert original_results["result2"] == "Non-positive number: -5"
+        assert original_results["result3"] == "Positive number: 3.14"
+        assert original_results["result4"] == "Text data: hello"
+        assert original_results["result5"] == "Other type: list"
+
+    assert False
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Complex mixed pattern combinations not yet implemented",
+)
+def test_mixed_pattern_combinations():
+    """Test complex combinations of different pattern types."""
+    test_case_source = textwrap.dedent("""
+    def complex_matcher(data):
+        match data:
+            case {"type": "point", "coords": (x, y) as coords} if x == y:
+                return f"Diagonal point: {coords}"
+            case {"type": "point", "coords": Point(x=x, y=y)} as point_data:
+                return f"Point object: ({x}, {y}) from {point_data}"
+            case {"items": [*items]} if all(isinstance(i, (int, float)) for i in items):
+                return f"Numeric items: {sum(items)}"
+            case {"nested": {"deep": value}} | {"alt": {"deep": value}}:
+                return f"Deep value: {value}"
+            case _:
+                return "No match"
+    """)
+
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    result1 = complex_matcher({"type": "point", "coords": (3, 3)})
+    result2 = complex_matcher({"type": "point", "coords": Point(2, 4)})
+    result3 = complex_matcher({"items": [1, 2, 3, 4, 5]})
+    result4 = complex_matcher({"nested": {"deep": "treasure"}})
+    result5 = complex_matcher({"alt": {"deep": "treasure"}})
+    result6 = complex_matcher({"nothing": "matches"})
+    """)
+
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results["result1"] == "Diagonal point: (3, 3)"
+        assert "Point object: (2, 4)" in original_results["result2"]
+        assert original_results["result3"] == "Numeric items: 15"
+        assert original_results["result4"] == "Deep value: treasure"
+        assert original_results["result5"] == "Deep value: treasure"
+        assert original_results["result6"] == "No match"
+
+    assert False
+
+
+def test_literal_matching_multiple_types():
+    """Test literal patterns with different types including None, True, False."""
+    test_case_source = textwrap.dedent("""
+    def check_literal(value):
+        match value:
+            case True:
+                return "Boolean True"
+            case False:
+                return "Boolean False"
+            case None:
+                return "None value"
+            case 0:
+                return "Zero integer"
+            case 0.0:
+                return "Zero float"
+            case "":
+                return "Empty string"
+            case []:
+                return "Empty list"
+            case {}:
+                return "Empty dict"
+            case _:
+                return f"Other: {value}"
+    """)
+
+    expected = textwrap.dedent("""
+    import collections.abc
+    def check_literal(value):
+        if value is True:
+            return "Boolean True"
+        elif value is False:
+            return "Boolean False"
+        elif value is None:
+            return "None value"
+        elif value == 0:
+            return "Zero integer"
+        elif value == 0.0:
+            return "Zero float"
+        elif value == "":
+            return "Empty string"
+        elif isinstance(value, collections.abc.Sequence) and not isinstance(value, (str, collections.abc.Mapping)) and len(value) == 0:
+            return "Empty list"
+        elif isinstance(value, collections.abc.Mapping) and len(value) == 0:
+            return "Empty dict"
+        else:
+            return f"Other: {value}"
+    """)
+
+    # STRING VALIDATION: Test exact code generation
+    module = cst.parse_module(test_case_source)
+    result = _converters.convert_match_statement(module)
+    assert result.code == expected
+
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    result1 = check_literal(True)
+    result2 = check_literal(False)
+    result3 = check_literal(None)
+    result4 = check_literal(0)
+    result5 = check_literal(0.0)
+    result6 = check_literal("")
+    result7 = check_literal([])
+    result8 = check_literal({})
+    result9 = check_literal(42)
+    """)
+
+    converted_code = _converters.convert(test_source_with_calls)
+    converted_results = execute_code_with_results(converted_code)
+
+    # Verify converted code produces expected results on all Python versions
+    assert converted_results["result1"] == "Boolean True"
+    assert converted_results["result2"] == "Boolean False"
+    assert converted_results["result3"] == "None value"
+    assert converted_results["result4"] == "Zero integer"
+    assert (
+        converted_results["result5"] == "Zero integer"
+    )  # 0.0 matches case 0: due to equality
+    assert converted_results["result6"] == "Empty string"
+    assert converted_results["result7"] == "Empty list"
+    assert converted_results["result8"] == "Empty dict"
+    assert converted_results["result9"] == "Other: 42"
+
+    # EQUIVALENCE VALIDATION: Compare with original (Python 3.10+ only)
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results == converted_results
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Positional class patterns with __match_args__ not yet implemented",
+)
+def test_positional_class_patterns():
+    """Test positional class pattern matching using __match_args__."""
+    test_case_source = textwrap.dedent("""
+    class Point:
+        __match_args__ = ("x", "y")
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+
+    def describe_point_positional(point):
+        match point:
+            case Point(0, 0):
+                return "Origin"
+            case Point(0, y):
+                return f"Y-axis: {y}"
+            case Point(x, 0):
+                return f"X-axis: {x}"
+            case Point(x, y):
+                return f"Point: {x}, {y}"
+            case _:
+                return "Not a point"
+    """)
+
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    class Point:
+        __match_args__ = ("x", "y")
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+
+    result1 = describe_point_positional(Point(0, 0))
+    result2 = describe_point_positional(Point(0, 5))
+    result3 = describe_point_positional(Point(3, 0))
+    result4 = describe_point_positional(Point(2, 4))
+    result5 = describe_point_positional("not a point")
+    """)
+
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results["result1"] == "Origin"
+        assert original_results["result2"] == "Y-axis: 5"
+        assert original_results["result3"] == "X-axis: 3"
+        assert original_results["result4"] == "Point: 2, 4"
+        assert original_results["result5"] == "Not a point"
+
+    assert False
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Mixed positional and keyword class patterns not yet implemented",
+)
+def test_mixed_positional_keyword_patterns():
+    """Test mixing positional and keyword arguments in class patterns."""
+    test_case_source = textwrap.dedent("""
+    class Point:
+        __match_args__ = ("x", "y")
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+
+    def analyze_point_mixed(point):
+        match point:
+            case Point(0, y=y):  # Mix: first positional, second keyword
+                return f"Y-axis (mixed): {y}"
+            case Point(x, y=0):  # Mix: first positional, second keyword
+                return f"X-axis (mixed): {x}"
+            case Point(x=x, y=y):  # All keywords
+                return f"Point (keywords): {x}, {y}"
+            case Point(x, y):  # All positional
+                return f"Point (positional): {x}, {y}"
+            case _:
+                return "Not a point"
+    """)
+
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    class Point:
+        __match_args__ = ("x", "y")
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+
+    result1 = analyze_point_mixed(Point(0, 5))
+    result2 = analyze_point_mixed(Point(3, 0))
+    result3 = analyze_point_mixed(Point(2, 4))
+    """)
+
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results["result1"] == "Y-axis (mixed): 5"
+        assert original_results["result2"] == "X-axis (mixed): 3"
+        assert original_results["result3"] in [
+            "Point (keywords): 2, 4",
+            "Point (positional): 2, 4",
+        ]
+
+    assert False
+
+
+@pytest.mark.xfail(strict=True, reason="Enum value patterns not yet implemented")
+def test_enum_patterns():
+    """Test matching enum values as patterns."""
+    test_case_source = textwrap.dedent("""
+    from enum import Enum
+
+    class Color(Enum):
+        RED = 0
+        GREEN = 1
+        BLUE = 2
+
+    def describe_color(color):
+        match color:
+            case Color.RED:
+                return "I see red!"
+            case Color.GREEN:
+                return "Grass is green"
+            case Color.BLUE:
+                return "I'm feeling blue"
+            case _:
+                return "Unknown color"
+    """)
+
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    from enum import Enum
+
+    class Color(Enum):
+        RED = 0
+        GREEN = 1
+        BLUE = 2
+
+    result1 = describe_color(Color.RED)
+    result2 = describe_color(Color.GREEN)
+    result3 = describe_color(Color.BLUE)
+    result4 = describe_color("red")
+    """)
+
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results["result1"] == "I see red!"
+        assert original_results["result2"] == "Grass is green"
+        assert original_results["result3"] == "I'm feeling blue"
+        assert original_results["result4"] == "Unknown color"
+
+    assert False
+
+
+@pytest.mark.xfail(strict=True, reason="Dataclass patterns not yet implemented")
+def test_dataclass_patterns():
+    """Test pattern matching with dataclasses."""
+    test_case_source = textwrap.dedent("""
+    from dataclasses import dataclass
+
+    @dataclass
+    class Point:
+        x: int
+        y: int
+
+    def where_is(point):
+        match point:
+            case Point(x=0, y=0):
+                return "Origin"
+            case Point(x=0, y=y):
+                return f"Y={y}"
+            case Point(x=x, y=0):
+                return f"X={x}"
+            case Point():
+                return "Somewhere else"
+            case _:
+                return "Not a point"
+    """)
+
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    from dataclasses import dataclass
+
+    @dataclass
+    class Point:
+        x: int
+        y: int
+
+    result1 = where_is(Point(0, 0))
+    result2 = where_is(Point(0, 5))
+    result3 = where_is(Point(3, 0))
+    result4 = where_is(Point(2, 4))
+    result5 = where_is("not a point")
+    """)
+
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results["result1"] == "Origin"
+        assert original_results["result2"] == "Y=5"
+        assert original_results["result3"] == "X=3"
+        assert original_results["result4"] == "Somewhere else"
+        assert original_results["result5"] == "Not a point"
+
+    assert False
+
+
+def test_empty_class_patterns():
+    """Test class patterns without any attribute constraints."""
+    test_case_source = textwrap.dedent("""
+    def classify_object(obj):
+        match obj:
+            case Point():  # Matches any Point instance
+                return "It's a Point"
+            case list():   # Matches any list
+                return "It's a list"
+            case dict():   # Matches any dict
+                return "It's a dict"
+            case str():    # Matches any string
+                return "It's a string"
+            case _:
+                return "Something else"
+    """)
+
+    expected = textwrap.dedent("""
+    def classify_object(obj):
+        if isinstance(obj, Point):  # Matches any Point instance
+            return "It's a Point"
+        elif isinstance(obj, list):   # Matches any list
+            return "It's a list"
+        elif isinstance(obj, dict):   # Matches any dict
+            return "It's a dict"
+        elif isinstance(obj, str):    # Matches any string
+            return "It's a string"
+        else:
+            return "Something else"
+    """)
+
+    # STRING VALIDATION: Test exact code generation
+    module = cst.parse_module(test_case_source)
+    result = _converters.convert_match_statement(module)
+    print(result.code)
+    assert result.code == expected
+
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    result1 = classify_object(Point(1, 2))
+    result2 = classify_object([1, 2, 3])
+    result3 = classify_object({"key": "value"})
+    result4 = classify_object("hello")
+    result5 = classify_object(42)
+    """)
+
+    converted_code = _converters.convert(test_source_with_calls)
+    converted_results = execute_code_with_results(converted_code)
+
+    assert converted_results["result1"] == "It's a Point"
+    assert converted_results["result2"] == "It's a list"
+    assert converted_results["result3"] == "It's a dict"
+    assert converted_results["result4"] == "It's a string"
+    assert converted_results["result5"] == "Something else"
+
+    # EQUIVALENCE VALIDATION: Compare with original (Python 3.10+ only)
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results == converted_results
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Complex nested sequence patterns not yet implemented",
+)
+def test_nested_sequence_point_patterns():
+    """Test complex nested patterns with sequences and points from PEP 636."""
+    test_case_source = textwrap.dedent("""
+    def analyze_points(points):
+        match points:
+            case []:
+                return "No points"
+            case [Point(0, 0)]:
+                return "The origin"
+            case [Point(x, y)]:
+                return f"Single point {x}, {y}"
+            case [Point(0, y1), Point(0, y2)]:
+                return f"Two on the Y axis at {y1}, {y2}"
+            case [Point(x1, y1), Point(x2, y2)] if x1 == x2:
+                return f"Two points on vertical line x={x1}: ({x1}, {y1}), ({x2}, {y2})"
+            case [Point(x1, y1), Point(x2, y2)]:
+                return f"Two points: ({x1}, {y1}), ({x2}, {y2})"
+            case _:
+                return "Complex or invalid points"
+    """)
+
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    result1 = analyze_points([])
+    result2 = analyze_points([Point(0, 0)])
+    result3 = analyze_points([Point(3, 4)])
+    result4 = analyze_points([Point(0, 2), Point(0, 5)])
+    result5 = analyze_points([Point(3, 2), Point(3, 8)])
+    result6 = analyze_points([Point(1, 2), Point(4, 5)])
+    result7 = analyze_points([Point(1, 1), Point(2, 2), Point(3, 3)])
+    """)
+
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results["result1"] == "No points"
+        assert original_results["result2"] == "The origin"
+        assert original_results["result3"] == "Single point 3, 4"
+        assert original_results["result4"] == "Two on the Y axis at 2, 5"
+        assert (
+            original_results["result5"]
+            == "Two points on vertical line x=3: (3, 2), (3, 8)"
+        )
+        assert original_results["result6"] == "Two points: (1, 2), (4, 5)"
+        assert original_results["result7"] == "Complex or invalid points"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Guard conditions with diagonal check not yet implemented",
+)
+def test_guard_diagonal_patterns():
+    """Test guard conditions for diagonal point checking from PEP 636."""
+    test_case_source = textwrap.dedent("""
+    def check_diagonal(point):
+        match point:
+            case Point(x, y) if x == y:
+                return f"Y=X at {x}"
+            case Point(x, y):
+                return f"Not on the diagonal: ({x}, {y})"
+            case _:
+                return "Not a point"
+    """)
+
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    result1 = check_diagonal(Point(3, 3))
+    result2 = check_diagonal(Point(2, 5))
+    result3 = check_diagonal("not a point")
+    """)
+
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results["result1"] == "Y=X at 3"
+        assert original_results["result2"] == "Not on the diagonal: (2, 5)"
+        assert original_results["result3"] == "Not a point"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Tuple unpacking pattern produces tuple, not list",
+)
+def test_tuple_unpacking_no_parens():
+    """Test tuple pattern matching without parentheses as mentioned in PEP 636."""
+    test_case_source = textwrap.dedent("""
+    def process_tuple_variants(data):
+        match data:
+            case action, obj:  # Equivalent to (action, obj)
+                return f"Action: {action}, Object: {obj}"
+            case single_item,:  # Single item tuple
+                return f"Single: {single_item}"
+            case first, *rest:  # First item and rest
+                return f"First: {first}, Rest: {rest}"
+            case _:
+                return "No match"
+    """)
+
+    expected = textwrap.dedent("""
+    import collections.abc
+    def process_tuple_variants(data):
+        if isinstance(data, collections.abc.Sequence) and not isinstance(data, (str, collections.abc.Mapping)) and len(data) == 2:  # Equivalent to (action, obj)
+            action, obj = data
+            return f"Action: {action}, Object: {obj}"
+        elif isinstance(data, collections.abc.Sequence) and not isinstance(data, (str, collections.abc.Mapping)) and len(data) == 1:  # Single item tuple
+            single_item = data[0]
+            return f"Single: {single_item}"
+        elif isinstance(data, collections.abc.Sequence) and not isinstance(data, (str, collections.abc.Mapping)) and len(data) >= 1:  # First item and rest
+            first = data[0]
+            rest = data[1:]
+            return f"First: {first}, Rest: {rest}"
+        else:
+            return "No match"
+    """)
+
+    # STRING VALIDATION: Test exact code generation
+    module = cst.parse_module(test_case_source)
+    result = _converters.convert_match_statement(module)
+    assert result.code == expected
+
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    result1 = process_tuple_variants(("go", "north"))
+    result2 = process_tuple_variants(("quit",))
+    result3 = process_tuple_variants(("drop", "sword", "shield", "potion"))
+    result4 = process_tuple_variants("string")
+    """)
+
+    converted_code = _converters.convert(test_source_with_calls)
+    converted_results = execute_code_with_results(converted_code)
+
+    assert converted_results["result1"] == "Action: go, Object: north"
+    assert converted_results["result2"] == "Single: quit"
+    assert (
+        converted_results["result3"]
+        == "First: drop, Rest: ('sword', 'shield', 'potion')"
+    )
+    assert converted_results["result4"] == "No match"
+
+    # EQUIVALENCE VALIDATION: Compare with original (Python 3.10+ only)
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results == converted_results
+
+
+def test_builtin_type_patterns():
+    """Test pattern matching against built-in types like int(), str(), list()."""
+    test_case_source = textwrap.dedent("""
+    def classify_builtin_type(value):
+        match value:
+            case int() if value > 0:
+                return f"Positive integer: {value}"
+            case int():
+                return f"Non-positive integer: {value}"
+            case str() if len(value) > 5:
+                return f"Long string: {value}"
+            case str():
+                return f"Short string: {value}"
+            case list() if len(value) == 0:
+                return "Empty list"
+            case list():
+                return f"List with {len(value)} items"
+            case dict():
+                return f"Dictionary with {len(value)} keys"
+            case _:
+                return f"Other type: {type(value).__name__}"
+    """)
+
+    expected = textwrap.dedent("""
+    def classify_builtin_type(value):
+        if isinstance(value, int) and value > 0:
+            return f"Positive integer: {value}"
+        elif isinstance(value, int):
+            return f"Non-positive integer: {value}"
+        elif isinstance(value, str) and len(value) > 5:
+            return f"Long string: {value}"
+        elif isinstance(value, str):
+            return f"Short string: {value}"
+        elif isinstance(value, list) and len(value) == 0:
+            return "Empty list"
+        elif isinstance(value, list):
+            return f"List with {len(value)} items"
+        elif isinstance(value, dict):
+            return f"Dictionary with {len(value)} keys"
+        else:
+            return f"Other type: {type(value).__name__}"
+    """)
+
+    # STRING VALIDATION: Test exact code generation
+    module = cst.parse_module(test_case_source)
+    result = _converters.convert_match_statement(module)
+    assert result.code == expected
+
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    result1 = classify_builtin_type(42)
+    result2 = classify_builtin_type(-5)
+    result3 = classify_builtin_type("hello world")
+    result4 = classify_builtin_type("hi")
+    result5 = classify_builtin_type([])
+    result6 = classify_builtin_type([1, 2, 3])
+    result7 = classify_builtin_type({"a": 1, "b": 2})
+    result8 = classify_builtin_type(3.14)
+    """)
+
+    converted_code = _converters.convert(test_source_with_calls)
+    converted_results = execute_code_with_results(converted_code)
+
+    # Verify converted code produces expected results on all Python versions
+    assert converted_results["result1"] == "Positive integer: 42"
+    assert converted_results["result2"] == "Non-positive integer: -5"
+    assert converted_results["result3"] == "Long string: hello world"
+    assert converted_results["result4"] == "Short string: hi"
+    assert converted_results["result5"] == "Empty list"
+    assert converted_results["result6"] == "List with 3 items"
+    assert converted_results["result7"] == "Dictionary with 2 keys"
+    assert converted_results["result8"] == "Other type: float"
+
+    # EQUIVALENCE VALIDATION: Compare with original (Python 3.10+ only)
+    if sys.version_info >= (3, 10):
+        original_results = execute_code_with_results(test_source_with_calls)
         assert original_results == converted_results
