@@ -132,20 +132,21 @@ class MatchStatementTransformer(cst.CSTTransformer):
 
         # Add guard condition if present
         if guard:
+            # Always substitute variables in guard to avoid undefined variable errors
+            substituted_guard = self._substitute_variables_in_guard(
+                guard,
+                assignments,
+                subject,
+            )
+
             if condition:
                 condition = cst.BooleanOperation(
                     left=condition,
                     operator=cst.And(),
-                    right=guard,
+                    right=substituted_guard,
                 )
             else:
-                # For simple variable binding + guard, substitute the subject for the variable
-                # in the guard condition to avoid undefined variable errors
-                condition = self._substitute_variables_in_guard(
-                    guard,
-                    assignments,
-                    subject,
-                )
+                condition = substituted_guard
 
         # If no condition (e.g., simple variable binding), treat as else
         if condition is None:
@@ -577,6 +578,16 @@ class MatchStatementTransformer(cst.CSTTransformer):
                         cst.Subscript(subject, [cst.SubscriptElement(key)]),
                     )
                     assignments.append(assignment)
+                else:
+                    # Nested pattern - recursively process it
+                    nested_subject = cst.Subscript(subject, [cst.SubscriptElement(key)])
+                    nested_condition, nested_assignments = self._pattern_to_condition(
+                        nested_subject,
+                        value_pattern,
+                    )
+                    if nested_condition:
+                        conditions.append(nested_condition)
+                    assignments.extend(nested_assignments)
 
         # Combine all conditions
         if conditions:
@@ -714,13 +725,14 @@ class MatchStatementTransformer(cst.CSTTransformer):
         if not assignments:
             return guard
 
-        # Create a mapping of variable names to the subject
+        # Create a mapping of variable names to their assigned values
         var_substitutions = {}
         for assignment in assignments:
             if isinstance(assignment, cst.Assign):
                 for target in assignment.targets:
                     if isinstance(target.target, cst.Name):
-                        var_substitutions[target.target.value] = subject
+                        # Use the assignment value, not just the subject
+                        var_substitutions[target.target.value] = assignment.value
 
         # Use a transformer to substitute variables
         substituter = VariableSubstituter(var_substitutions)
