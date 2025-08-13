@@ -594,62 +594,37 @@ class MatchStatementTransformer(cst.CSTTransformer):
             right=length_check,
         )
 
-        # Add literal pattern checks for elements before star
-        for i in range(star_index):
-            elem = elements[i]
-            if isinstance(elem, cst.MatchValue):
-                # Add literal value check: subject[i] == value
-                subscript = cst.Subscript(
-                    subject,
-                    [cst.SubscriptElement(cst.Integer(str(i)))],
-                )
-                value_check = cst.Comparison(
-                    left=subscript,
-                    comparisons=[
-                        cst.ComparisonTarget(
-                            operator=cst.Equal(),
-                            comparator=elem.value,
-                        ),
-                    ],
-                )
-                combined_check = cst.BooleanOperation(
-                    left=combined_check,
-                    operator=cst.And(),
-                    right=value_check,
-                )
-            elif isinstance(elem, cst.MatchSingleton):
-                # Add singleton check: subject[i] is value
-                subscript = cst.Subscript(
-                    subject,
-                    [cst.SubscriptElement(cst.Integer(str(i)))],
-                )
-                singleton_check = cst.Comparison(
-                    left=subscript,
-                    comparisons=[
-                        cst.ComparisonTarget(
-                            operator=cst.Is(),
-                            comparator=elem.value,
-                        ),
-                    ],
-                )
-                combined_check = cst.BooleanOperation(
-                    left=combined_check,
-                    operator=cst.And(),
-                    right=singleton_check,
-                )
+        # Note: Literal pattern checks for elements before star are now handled
+        # by the recursive pattern processing below to avoid duplication
 
         assignments = []
 
-        # Assign elements before star
+        # Handle elements before star
         for i in range(star_index):
             elem = elements[i]
+            subscript = cst.Subscript(
+                subject,
+                [cst.SubscriptElement(cst.Integer(str(i)))],
+            )
+
             if isinstance(elem, cst.MatchAs) and elem.pattern is None and elem.name:
-                subscript = cst.Subscript(
-                    subject,
-                    [cst.SubscriptElement(cst.Integer(str(i)))],
-                )
+                # Simple variable binding: x = subject[i]
                 assignment = cst.Assign([cst.AssignTarget(elem.name)], subscript)
                 assignments.append(assignment)
+            else:
+                # Complex nested pattern - recursively process it
+                elem_condition, elem_assignments = self._pattern_to_condition(
+                    subscript,
+                    elem,
+                )
+                if elem_condition:
+                    # Combine with the existing combined_check
+                    combined_check = cst.BooleanOperation(
+                        left=combined_check,
+                        operator=cst.And(),
+                        right=elem_condition,
+                    )
+                assignments.extend(elem_assignments)
 
         # Assign star pattern
         star_elem = elements[star_index]
@@ -692,26 +667,42 @@ class MatchStatementTransformer(cst.CSTTransformer):
             assignment = cst.Assign([cst.AssignTarget(star_elem.name)], tuple_expr)
             assignments.append(assignment)
 
-        # Assign elements after star
+        # Handle elements after star
         elements_after_star = len(elements) - star_index - 1
         for i in range(elements_after_star):
             elem = elements[star_index + 1 + i]
-            if isinstance(elem, cst.MatchAs) and elem.pattern is None and elem.name:
-                # Use negative indexing for elements after star
-                negative_index = elements_after_star - i
-                subscript = cst.Subscript(
-                    subject,
-                    [
-                        cst.SubscriptElement(
-                            cst.UnaryOperation(
-                                cst.Minus(),
-                                cst.Integer(str(negative_index)),
-                            ),
+            # Use negative indexing for elements after star
+            negative_index = elements_after_star - i
+            subscript = cst.Subscript(
+                subject,
+                [
+                    cst.SubscriptElement(
+                        cst.UnaryOperation(
+                            cst.Minus(),
+                            cst.Integer(str(negative_index)),
                         ),
-                    ],
-                )
+                    ),
+                ],
+            )
+
+            if isinstance(elem, cst.MatchAs) and elem.pattern is None and elem.name:
+                # Simple variable binding: x = subject[-i]
                 assignment = cst.Assign([cst.AssignTarget(elem.name)], subscript)
                 assignments.append(assignment)
+            else:
+                # Complex nested pattern - recursively process it
+                elem_condition, elem_assignments = self._pattern_to_condition(
+                    subscript,
+                    elem,
+                )
+                if elem_condition:
+                    # Combine with the existing combined_check
+                    combined_check = cst.BooleanOperation(
+                        left=combined_check,
+                        operator=cst.And(),
+                        right=elem_condition,
+                    )
+                assignments.extend(elem_assignments)
 
         return combined_check, assignments
 
@@ -963,6 +954,15 @@ class MatchStatementTransformer(cst.CSTTransformer):
                         attr_access,
                     )
                     assignments.append(assignment)
+                else:
+                    # Complex nested pattern - recursively process it
+                    nested_condition, nested_assignments = self._pattern_to_condition(
+                        attr_access,
+                        value_pattern,
+                    )
+                    if nested_condition:
+                        conditions.append(nested_condition)
+                    assignments.extend(nested_assignments)
 
         # Combine conditions
         if conditions:

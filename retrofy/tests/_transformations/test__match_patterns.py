@@ -23,9 +23,15 @@ def execute_code_with_results(
     code: str,
 ) -> Dict[str, Any]:
     """Execute code and return the final locals() containing results."""
+
     # Create a clean namespace with our test classes
+    class Container:
+        def __init__(self, items):
+            self.items = items
+
     namespace = {
         "Point": Point,
+        "Container": Container,
         "__builtins__": __builtins__,
     }
 
@@ -36,7 +42,7 @@ def execute_code_with_results(
         k: v
         for k, v in namespace.items()
         if (
-            k not in ("Point", "__builtins__", "collections")
+            k not in ("Point", "Container", "__builtins__", "collections")
             and not k.startswith("__")
             and not callable(v)
             and not hasattr(v, "__name__")
@@ -988,10 +994,6 @@ def test_mixed_sequence_patterns():
         assert original_results == converted_results
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Complex nested class patterns not yet implemented",
-)
 def test_nested_class_patterns():
     """Test complex nested class pattern matching."""
     test_case_source = textwrap.dedent("""
@@ -1013,11 +1015,33 @@ def test_nested_class_patterns():
                 return "Not a container"
     """)
 
-    test_source_with_calls = test_case_source + textwrap.dedent("""
+    expected = textwrap.dedent("""
+    import collections.abc
     class Container:
         def __init__(self, items):
             self.items = items
 
+    def analyze_container(data):
+        if isinstance(data, Container) and isinstance(data.items, collections.abc.Sequence) and not isinstance(data.items, (str, collections.abc.Mapping)) and len(data.items) >= 1 and isinstance(data.items[0], Point) and data.items[0].x == 0:
+            y = data.items[0].y
+            rest = list(data.items[1:])
+            return f"Container starts with y-axis point {y}, has {len(rest)} more"
+        elif isinstance(data, Container) and isinstance(data.items, collections.abc.Sequence) and not isinstance(data.items, (str, collections.abc.Mapping)) and len(data.items) == 2 and isinstance(data.items[0], Point) and data.items[0].y == 0 and isinstance(data.items[1], Point):
+            x = data.items[0].x
+            x2 = data.items[1].x
+            y2 = data.items[1].y
+            return f"Container with x-axis point ({x}, 0) and point ({x2}, {y2})"
+        elif isinstance(data, Container) and isinstance(data.items, collections.abc.Sequence) and not isinstance(data.items, (str, collections.abc.Mapping)) and len(data.items) == 0:
+            return "Empty container"
+        elif isinstance(data, Container):
+            items = data.items
+            return f"Container with {len(items)} items"
+        else:
+            return "Not a container"
+    """)
+
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    test_calls = textwrap.dedent("""
     result1 = analyze_container(Container([Point(0, 5), Point(1, 1)]))
     result2 = analyze_container(Container([Point(3, 0), Point(2, 4)]))
     result3 = analyze_container(Container([]))
@@ -1025,21 +1049,33 @@ def test_nested_class_patterns():
     result5 = analyze_container("not a container")
     """)
 
-    if sys.version_info >= (3, 10):
-        original_results = execute_code_with_results(test_source_with_calls)
-        assert (
-            original_results["result1"]
-            == "Container starts with y-axis point 5, has 1 more"
-        )
-        assert (
-            original_results["result2"]
-            == "Container with x-axis point (3, 0) and point (2, 4)"
-        )
-        assert original_results["result3"] == "Empty container"
-        assert original_results["result4"] == "Container with 3 items"
-        assert original_results["result5"] == "Not a container"
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    converted_source_with_calls = expected + test_calls
+    converted_results = execute_code_with_results(converted_source_with_calls)
 
-    assert False
+    assert (
+        converted_results["result1"]
+        == "Container starts with y-axis point 5, has 1 more"
+    )
+    assert (
+        converted_results["result2"]
+        == "Container with x-axis point (3, 0) and point (2, 4)"
+    )
+    assert converted_results["result3"] == "Empty container"
+    assert converted_results["result4"] == "Container with 3 items"
+    assert converted_results["result5"] == "Not a container"
+
+    if sys.version_info >= (3, 10):
+        if sys.version_info >= (3, 10):
+            # STRING VALIDATION: Test exact code generation
+            module = cst.parse_module(test_case_source)
+            result = _converters.convert_match_statement(module)
+            assert result.code == expected
+
+            # EQUIVALENCE VALIDATION: Compare with original
+            original_source_with_calls = test_case_source + test_calls
+            original_results = execute_code_with_results(original_source_with_calls)
+            assert original_results == converted_results
 
 
 @pytest.mark.xfail(
