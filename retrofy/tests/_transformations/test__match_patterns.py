@@ -468,10 +468,10 @@ def test_star_patterns():
     def process_sequence(sequence):
         if isinstance(sequence, collections.abc.Sequence) and not isinstance(sequence, (str, collections.abc.Mapping)) and len(sequence) >= 1:
             first = sequence[0]
-            rest = sequence[1:]
+            rest = list(sequence[1:])
             return f"First: {first}, Rest: {rest}"
         elif isinstance(sequence, collections.abc.Sequence) and not isinstance(sequence, (str, collections.abc.Mapping)) and len(sequence) >= 1:
-            prefix = sequence[0:-1]
+            prefix = list(sequence[0:-1])
             last = sequence[-1]
             return f"Prefix: {prefix}, Last: {last}"
         else:
@@ -1573,10 +1573,6 @@ def test_guard_diagonal_patterns():
         assert original_results["result3"] == "Not a point"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Tuple unpacking pattern produces tuple, not list",
-)
 def test_tuple_unpacking_no_parens():
     """Test tuple pattern matching without parentheses as mentioned in PEP 636."""
     test_case_source = textwrap.dedent("""
@@ -1603,7 +1599,7 @@ def test_tuple_unpacking_no_parens():
             return f"Single: {single_item}"
         elif isinstance(data, collections.abc.Sequence) and not isinstance(data, (str, collections.abc.Mapping)) and len(data) >= 1:  # First item and rest
             first = data[0]
-            rest = data[1:]
+            rest = list(data[1:])
             return f"First: {first}, Rest: {rest}"
         else:
             return "No match"
@@ -1629,7 +1625,7 @@ def test_tuple_unpacking_no_parens():
     assert converted_results["result2"] == "Single: quit"
     assert (
         converted_results["result3"]
-        == "First: drop, Rest: ('sword', 'shield', 'potion')"
+        == "First: drop, Rest: ['sword', 'shield', 'potion']"
     )
     assert converted_results["result4"] == "No match"
 

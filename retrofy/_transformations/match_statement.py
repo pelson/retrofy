@@ -640,7 +640,12 @@ class MatchStatementTransformer(cst.CSTTransformer):
                         ),
                     ],
                 )
-            assignment = cst.Assign([cst.AssignTarget(star_elem.name)], slice_expr)
+            # Wrap slice in list() to match Python 3.11+ behavior
+            tuple_expr = cst.Call(
+                cst.Name("list"),
+                [cst.Arg(slice_expr)]
+            )
+            assignment = cst.Assign([cst.AssignTarget(star_elem.name)], tuple_expr)
             assignments.append(assignment)
 
         # Assign elements after star
