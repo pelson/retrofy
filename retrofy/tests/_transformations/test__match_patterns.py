@@ -1139,23 +1139,19 @@ def test_or_patterns_with_as():
         assert original_results == converted_results
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Mixed literal and type OR patterns not yet supported",
-)
 def test_or_pattern_literal_and_type():
     test_case_source = textwrap.dedent("""
     def process_number_or_string(value):
         match value:
-            case (int() | 0) as res:
-                return f"Zero or integer {res}"
+            case (int() | 0 | bool()) as res:
+                return f"Zero or integer or bool {res}"
     """)
 
     expected = textwrap.dedent("""
     def process_number_or_string(value):
-        if isinstance(value, (int)) or value == 0:
+        if isinstance(value, int) or value == 0 or isinstance(value, bool):
             res = value
-            return f"Zero or integer: {res}"
+            return f"Zero or integer or bool {res}"
     """)
 
     # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
@@ -1164,16 +1160,18 @@ def test_or_pattern_literal_and_type():
     result2 = process_number_or_string(0.0)
     result3 = process_number_or_string(None)
     result4 = process_number_or_string(1.0)
+    result5 = process_number_or_string(True)
     """)
 
     converted_code = _converters.convert(test_source_with_calls)
     converted_results = execute_code_with_results(converted_code)
 
     # Verify converted code produces expected results on all Python versions
-    assert converted_results["result1"] == "Zero or integer: 42"
-    assert converted_results["result2"] == "Zero or integer: 0.0"
-    assert converted_results["result3"] == "Zero or integer: None"
+    assert converted_results["result1"] == "Zero or integer or bool 42"
+    assert converted_results["result2"] == "Zero or integer or bool 0.0"
+    assert converted_results["result3"] is None
     assert converted_results["result4"] is None
+    assert converted_results["result5"] == "Zero or integer or bool True"
 
     if sys.version_info >= (3, 10):
         # STRING VALIDATION: Test exact code generation
