@@ -71,6 +71,8 @@ and appropriate.
     * `def func[T](a: T) -> T: ...` -> `T = typing.TypeVar("T"); def func(a: T) -> T: ...`
     * `def func[T: str](a: T) -> T: ...` -> `T = typing.TypeVar("T", bound=str); def func(a: T) -> T: ...`
 
+* dataclasses - the __match_args__ attribute is added to the class (necessary for match statement support)
+
 ## Transformations not yet implemented
 
 * `A | None` -> `typing.Optional[A]`

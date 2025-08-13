@@ -1598,6 +1598,7 @@ def test_nested_sequence_point_patterns():
     class DCPoint:
         x: float
         y: float
+        __match_args__ = ('x', 'y')
 
     def analyze_points(points):
         if isinstance(points, collections.abc.Sequence) and not isinstance(points, (str, collections.abc.Mapping)) and len(points) == 0:
@@ -1657,6 +1658,8 @@ def test_nested_sequence_point_patterns():
         # STRING VALIDATION: Test exact code generation
         module = cst.parse_module(test_case_source)
         result = _converters.convert_match_statement(module)
+        # Note: We also need to convert dataclasses for this one to work in Python 3.9
+        result = _converters.convert_dataclass(result)
         assert result.code == expected
 
         # EQUIVALENCE VALIDATION: Compare with original

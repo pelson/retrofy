@@ -3,7 +3,7 @@ import typing
 
 import libcst as cst
 
-from ._transformations import match_statement, type_alias, walrus
+from ._transformations import dataclass, match_statement, type_alias, walrus
 
 
 class TypingTransformer(cst.CSTTransformer):
@@ -159,11 +159,16 @@ def convert_match_statement(module: cst.Module) -> cst.Module:
     return module.visit(match_statement.MatchStatementTransformer())
 
 
+def convert_dataclass(module: cst.Module) -> cst.Module:
+    return module.visit(dataclass.DataclassTransformer())
+
+
 def convert(code: str) -> str:
     mod = cst.parse_module(code)
     mod = convert_sequence_subscript(mod)
     mod = convert_walrus_operator(mod)
     mod = convert_type_alias(mod)
+    mod = convert_dataclass(mod)
     mod = convert_match_statement(mod)
     mod = convert_union(mod)
     return mod.code
