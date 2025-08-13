@@ -279,16 +279,26 @@ def test_or_patterns_simple():
 def test_or_patterns_with_variables():
     """Test OR patterns with variable bindings - expanded to separate cases."""
     test_case_source = textwrap.dedent("""
+    class XAxisMarker:
+        def __init__(self, x):
+            self.x = x
+
     def axis_point(value):
         match value:
             case Point(x=x, y=0) | Point(x=0, y=x):
                 return f"On axis at {x}"
+            case Point(x=x, y=-1) | XAxisMarker(x=x) if x > 0:
+                return f"On x-axis at x={x}"
             case _:
                 return "Not on axis"
     """)
 
     # OR patterns with different variable bindings are expanded into separate if/elif conditions
     expected = textwrap.dedent("""
+    class XAxisMarker:
+        def __init__(self, x):
+            self.x = x
+
     def axis_point(value):
         if isinstance(value, Point) and value.y == 0:
             x = value.x
@@ -296,6 +306,12 @@ def test_or_patterns_with_variables():
         elif isinstance(value, Point) and value.x == 0:
             x = value.y
             return f"On axis at {x}"
+        elif isinstance(value, Point) and value.y == -1 and value.x > 0:
+            x = value.x
+            return f"On x-axis at x={x}"
+        elif isinstance(value, XAxisMarker) and value.x > 0:
+            x = value.x
+            return f"On x-axis at x={x}"
         else:
             return "Not on axis"
     """)
@@ -304,6 +320,8 @@ def test_or_patterns_with_variables():
     result1 = axis_point(Point(5, 0))
     result2 = axis_point(Point(0, 3))
     result3 = axis_point(Point(2, 4))
+    result4 = axis_point(XAxisMarker(5))
+    result5 = axis_point(Point(6, -1))
     """)
 
     # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
@@ -314,6 +332,8 @@ def test_or_patterns_with_variables():
     assert converted_results["result1"] == "On axis at 5"
     assert converted_results["result2"] == "On axis at 3"
     assert converted_results["result3"] == "Not on axis"
+    assert converted_results["result4"] == "On x-axis at x=5"
+    assert converted_results["result5"] == "On x-axis at x=6"
 
     if sys.version_info >= (3, 10):
         # STRING VALIDATION: Test exact code generation
