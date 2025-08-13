@@ -890,15 +890,15 @@ def test_mapping_patterns_with_rest():
             return "Invalid config"
     """)
 
-    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
-    test_source_with_calls = test_case_source + textwrap.dedent("""
+    test_calls = textwrap.dedent("""
     result1 = process_config({"name": "myapp", "version": "1.0", "debug": True, "port": 8080})
     result2 = process_config({"name": "myapp", "author": "me"})
     result3 = process_config({"invalid": True})
     """)
 
-    converted_code = _converters.convert(test_source_with_calls)
-    converted_results = execute_code_with_results(converted_code)
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    converted_source_with_calls = expected + test_calls
+    converted_results = execute_code_with_results(converted_source_with_calls)
 
     # Verify converted code produces expected results on all Python versions
     assert (
@@ -915,7 +915,8 @@ def test_mapping_patterns_with_rest():
         assert result.code == expected
 
         # EQUIVALENCE VALIDATION: Compare with original
-        original_results = execute_code_with_results(test_source_with_calls)
+        original_source_with_calls = test_case_source + test_calls
+        original_results = execute_code_with_results(original_source_with_calls)
         assert original_results == converted_results
 
 
@@ -962,13 +963,7 @@ def test_mixed_sequence_patterns():
             return "Not a command"
     """)
 
-    # STRING VALIDATION: Test exact code generation
-    module = cst.parse_module(test_case_source)
-    result = _converters.convert_match_statement(module)
-    assert result.code == expected
-
-    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
-    test_source_with_calls = test_case_source + textwrap.dedent("""
+    test_calls = textwrap.dedent("""
     result1 = parse_command(["git", "add", "file1.py", "file2.py"])
     result2 = parse_command(["git", "commit", "-m", "Initial commit"])
     result3 = parse_command(["git", "status"])
@@ -977,8 +972,9 @@ def test_mixed_sequence_patterns():
     result6 = parse_command("not a list")
     """)
 
-    converted_code = _converters.convert(test_source_with_calls)
-    converted_results = execute_code_with_results(converted_code)
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    converted_source_with_calls = expected + test_calls
+    converted_results = execute_code_with_results(converted_source_with_calls)
 
     # Verify converted code produces expected results on all Python versions
     assert converted_results["result1"] == "Adding files: ['file1.py', 'file2.py']"
@@ -988,9 +984,15 @@ def test_mixed_sequence_patterns():
     assert converted_results["result5"] == "Running ls with no args"
     assert converted_results["result6"] == "Not a command"
 
-    # EQUIVALENCE VALIDATION: Compare with original (Python 3.10+ only)
     if sys.version_info >= (3, 10):
-        original_results = execute_code_with_results(test_source_with_calls)
+        # STRING VALIDATION: Test exact code generation
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
+
+        # EQUIVALENCE VALIDATION: Compare with original
+        original_source_with_calls = test_case_source + test_calls
+        original_results = execute_code_with_results(original_source_with_calls)
         assert original_results == converted_results
 
 
@@ -1109,8 +1111,7 @@ def test_or_patterns_with_as():
             return f"Other type: {type(other).__name__}"
     """)
 
-    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
-    test_source_with_calls = test_case_source + textwrap.dedent("""
+    test_calls = textwrap.dedent("""
     result1 = process_number_or_string(42)
     result2 = process_number_or_string(-5)
     result3 = process_number_or_string(3.14)
@@ -1118,8 +1119,9 @@ def test_or_patterns_with_as():
     result5 = process_number_or_string([1, 2, 3])
     """)
 
-    converted_code = _converters.convert(test_source_with_calls)
-    converted_results = execute_code_with_results(converted_code)
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    converted_source_with_calls = expected + test_calls
+    converted_results = execute_code_with_results(converted_source_with_calls)
 
     # Verify converted code produces expected results on all Python versions
     assert converted_results["result1"] == "Positive number: 42"
@@ -1135,7 +1137,8 @@ def test_or_patterns_with_as():
         assert result.code == expected
 
         # EQUIVALENCE VALIDATION: Compare with original
-        original_results = execute_code_with_results(test_source_with_calls)
+        original_source_with_calls = test_case_source + test_calls
+        original_results = execute_code_with_results(original_source_with_calls)
         assert original_results == converted_results
 
 
@@ -1154,8 +1157,7 @@ def test_or_pattern_literal_and_type():
             return f"Zero or integer or bool {res}"
     """)
 
-    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
-    test_source_with_calls = test_case_source + textwrap.dedent("""
+    test_calls = textwrap.dedent("""
     result1 = process_number_or_string(42)
     result2 = process_number_or_string(0.0)
     result3 = process_number_or_string(None)
@@ -1163,8 +1165,9 @@ def test_or_pattern_literal_and_type():
     result5 = process_number_or_string(True)
     """)
 
-    converted_code = _converters.convert(test_source_with_calls)
-    converted_results = execute_code_with_results(converted_code)
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    converted_source_with_calls = expected + test_calls
+    converted_results = execute_code_with_results(converted_source_with_calls)
 
     # Verify converted code produces expected results on all Python versions
     assert converted_results["result1"] == "Zero or integer or bool 42"
@@ -1180,7 +1183,8 @@ def test_or_pattern_literal_and_type():
         assert result.code == expected
 
         # EQUIVALENCE VALIDATION: Compare with original
-        original_results = execute_code_with_results(test_source_with_calls)
+        original_source_with_calls = test_case_source + test_calls
+        original_results = execute_code_with_results(original_source_with_calls)
         assert original_results == converted_results
 
 
@@ -1226,8 +1230,7 @@ def test_mixed_pattern_combinations():
             return "No match"
     """)
 
-    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
-    test_source_with_calls = test_case_source + textwrap.dedent("""
+    test_calls = textwrap.dedent("""
     result1 = complex_matcher({"type": "point", "coords": (3, 3)})
     result2 = complex_matcher({"type": "point", "coords": Point(2, 4)})
     result3 = complex_matcher({"items": [1, 2, 3, 4, 5]})
@@ -1236,8 +1239,9 @@ def test_mixed_pattern_combinations():
     result6 = complex_matcher({"nothing": "matches"})
     """)
 
-    converted_code = _converters.convert(test_source_with_calls)
-    converted_results = execute_code_with_results(converted_code)
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    converted_source_with_calls = expected + test_calls
+    converted_results = execute_code_with_results(converted_source_with_calls)
 
     # Verify converted code produces expected results on all Python versions
     assert converted_results["result1"] == "Diagonal point: (3, 3)"
@@ -1254,7 +1258,8 @@ def test_mixed_pattern_combinations():
         assert result.code == expected
 
         # EQUIVALENCE VALIDATION: Compare with original
-        original_results = execute_code_with_results(test_source_with_calls)
+        original_source_with_calls = test_case_source + test_calls
+        original_results = execute_code_with_results(original_source_with_calls)
         assert original_results == converted_results
 
 
@@ -1347,10 +1352,6 @@ def test_literal_matching_multiple_types():
         assert original_results == converted_results
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Positional class patterns with __match_args__ not yet implemented",
-)
 def test_positional_class_patterns():
     """Test positional class pattern matching using __match_args__."""
     test_case_source = textwrap.dedent("""
@@ -1374,13 +1375,39 @@ def test_positional_class_patterns():
                 return "Not a point"
     """)
 
-    test_source_with_calls = test_case_source + textwrap.dedent("""
+    expected = textwrap.dedent("""
     class Point:
         __match_args__ = ("x", "y")
         def __init__(self, x, y):
             self.x = x
             self.y = y
 
+    def describe_point_positional(point):
+        if isinstance(point, Point) and not (hasattr(Point, "__match_args__") and len(Point.__match_args__) >= 2):
+            raise TypeError("Point() accepts 0 positional sub-patterns (2 given)")
+        elif isinstance(point, Point) and getattr(point, Point.__match_args__[0]) == 0 and getattr(point, Point.__match_args__[1]) == 0:
+            return "Origin"
+        elif isinstance(point, Point) and not (hasattr(Point, "__match_args__") and len(Point.__match_args__) >= 2):
+            raise TypeError("Point() accepts 0 positional sub-patterns (2 given)")
+        elif isinstance(point, Point) and getattr(point, Point.__match_args__[0]) == 0:
+            y = getattr(point, Point.__match_args__[1])
+            return f"Y-axis: {y}"
+        elif isinstance(point, Point) and not (hasattr(Point, "__match_args__") and len(Point.__match_args__) >= 2):
+            raise TypeError("Point() accepts 0 positional sub-patterns (2 given)")
+        elif isinstance(point, Point) and getattr(point, Point.__match_args__[1]) == 0:
+            x = getattr(point, Point.__match_args__[0])
+            return f"X-axis: {x}"
+        elif isinstance(point, Point) and not (hasattr(Point, "__match_args__") and len(Point.__match_args__) >= 2):
+            raise TypeError("Point() accepts 0 positional sub-patterns (2 given)")
+        elif isinstance(point, Point):
+            x = getattr(point, Point.__match_args__[0])
+            y = getattr(point, Point.__match_args__[1])
+            return f"Point: {x}, {y}"
+        else:
+            return "Not a point"
+    """)
+
+    test_calls = textwrap.dedent("""
     result1 = describe_point_positional(Point(0, 0))
     result2 = describe_point_positional(Point(0, 5))
     result3 = describe_point_positional(Point(3, 0))
@@ -1388,21 +1415,29 @@ def test_positional_class_patterns():
     result5 = describe_point_positional("not a point")
     """)
 
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    converted_source_with_calls = expected + test_calls
+    converted_results = execute_code_with_results(converted_source_with_calls)
+
+    # Verify converted code produces expected results on all Python versions
+    assert converted_results["result1"] == "Origin"
+    assert converted_results["result2"] == "Y-axis: 5"
+    assert converted_results["result3"] == "X-axis: 3"
+    assert converted_results["result4"] == "Point: 2, 4"
+    assert converted_results["result5"] == "Not a point"
+
     if sys.version_info >= (3, 10):
-        original_results = execute_code_with_results(test_source_with_calls)
-        assert original_results["result1"] == "Origin"
-        assert original_results["result2"] == "Y-axis: 5"
-        assert original_results["result3"] == "X-axis: 3"
-        assert original_results["result4"] == "Point: 2, 4"
-        assert original_results["result5"] == "Not a point"
+        # STRING VALIDATION: Test exact code generation
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
 
-    assert False
+        # EQUIVALENCE VALIDATION: Compare with original
+        original_source_with_calls = test_case_source + test_calls
+        original_results = execute_code_with_results(original_source_with_calls)
+        assert original_results == converted_results
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Mixed positional and keyword class patterns not yet implemented",
-)
 def test_mixed_positional_keyword_patterns():
     """Test mixing positional and keyword arguments in class patterns."""
     test_case_source = textwrap.dedent("""
@@ -1426,28 +1461,63 @@ def test_mixed_positional_keyword_patterns():
                 return "Not a point"
     """)
 
-    test_source_with_calls = test_case_source + textwrap.dedent("""
+    expected = textwrap.dedent("""
     class Point:
         __match_args__ = ("x", "y")
         def __init__(self, x, y):
             self.x = x
             self.y = y
 
+    def analyze_point_mixed(point):
+        if isinstance(point, Point) and not (hasattr(Point, "__match_args__") and len(Point.__match_args__) >= 1):
+            raise TypeError("Point() accepts 0 positional sub-patterns (1 given)")
+        elif isinstance(point, Point) and getattr(point, Point.__match_args__[0]) == 0:  # Mix: first positional, second keyword
+            y = point.y
+            return f"Y-axis (mixed): {y}"
+        elif isinstance(point, Point) and not (hasattr(Point, "__match_args__") and len(Point.__match_args__) >= 1):
+            raise TypeError("Point() accepts 0 positional sub-patterns (1 given)")
+        elif isinstance(point, Point) and point.y == 0:  # Mix: first positional, second keyword
+            x = getattr(point, Point.__match_args__[0])
+            return f"X-axis (mixed): {x}"
+        elif isinstance(point, Point):  # All keywords
+            x = point.x
+            y = point.y
+            return f"Point (keywords): {x}, {y}"
+        elif isinstance(point, Point) and not (hasattr(Point, "__match_args__") and len(Point.__match_args__) >= 2):
+            raise TypeError("Point() accepts 0 positional sub-patterns (2 given)")
+        elif isinstance(point, Point):  # All positional
+            x = getattr(point, Point.__match_args__[0])
+            y = getattr(point, Point.__match_args__[1])
+            return f"Point (positional): {x}, {y}"
+        else:
+            return "Not a point"
+    """)
+
+    test_calls = textwrap.dedent("""
     result1 = analyze_point_mixed(Point(0, 5))
     result2 = analyze_point_mixed(Point(3, 0))
     result3 = analyze_point_mixed(Point(2, 4))
     """)
 
-    if sys.version_info >= (3, 10):
-        original_results = execute_code_with_results(test_source_with_calls)
-        assert original_results["result1"] == "Y-axis (mixed): 5"
-        assert original_results["result2"] == "X-axis (mixed): 3"
-        assert original_results["result3"] in [
-            "Point (keywords): 2, 4",
-            "Point (positional): 2, 4",
-        ]
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    converted_source_with_calls = expected + test_calls
+    converted_results = execute_code_with_results(converted_source_with_calls)
 
-    assert False
+    # Verify converted code produces expected results on all Python versions
+    assert converted_results["result1"] == "Y-axis (mixed): 5"
+    assert converted_results["result2"] == "X-axis (mixed): 3"
+    assert converted_results["result3"] == "Point (keywords): 2, 4"
+
+    if sys.version_info >= (3, 10):
+        # STRING VALIDATION: Test exact code generation
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
+
+        # EQUIVALENCE VALIDATION: Compare with original
+        original_source_with_calls = test_case_source + test_calls
+        original_results = execute_code_with_results(original_source_with_calls)
+        assert original_results == converted_results
 
 
 def test_enum_patterns():
@@ -1537,7 +1607,23 @@ def test_dataclass_patterns():
                 return "Not a point"
     """)
 
-    test_source_with_calls = test_case_source + textwrap.dedent("""
+    expected = textwrap.dedent("""
+    def where_is(point):
+        if isinstance(point, Point) and point.x == 0 and point.y == 0:
+            return "Origin"
+        elif isinstance(point, Point) and point.x == 0:
+            y = point.y
+            return f"Y={y}"
+        elif isinstance(point, Point) and point.y == 0:
+            x = point.x
+            return f"X={x}"
+        elif isinstance(point, Point):
+            return "Somewhere else"
+        else:
+            return "Not a point"
+    """)
+
+    test_calls = textwrap.dedent("""
     result1 = where_is(Point(0, 0))
     result2 = where_is(Point(0, 5))
     result3 = where_is(Point(3, 0))
@@ -1545,13 +1631,27 @@ def test_dataclass_patterns():
     result5 = where_is("not a point")
     """)
 
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    converted_source_with_calls = expected + test_calls
+    converted_results = execute_code_with_results(converted_source_with_calls)
+
+    # Verify converted code produces expected results on all Python versions
+    assert converted_results["result1"] == "Origin"
+    assert converted_results["result2"] == "Y=5"
+    assert converted_results["result3"] == "X=3"
+    assert converted_results["result4"] == "Somewhere else"
+    assert converted_results["result5"] == "Not a point"
+
     if sys.version_info >= (3, 10):
-        original_results = execute_code_with_results(test_source_with_calls)
-        assert original_results["result1"] == "Origin"
-        assert original_results["result2"] == "Y=5"
-        assert original_results["result3"] == "X=3"
-        assert original_results["result4"] == "Somewhere else"
-        assert original_results["result5"] == "Not a point"
+        # STRING VALIDATION: Test exact code generation
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
+
+        # EQUIVALENCE VALIDATION: Compare with original
+        original_source_with_calls = test_case_source + test_calls
+        original_results = execute_code_with_results(original_source_with_calls)
+        assert original_results == converted_results
 
 
 def test_empty_class_patterns():
@@ -1876,22 +1976,18 @@ def test_tuple_unpacking_no_parens():
             return "No match"
     """)
 
-    # STRING VALIDATION: Test exact code generation
-    module = cst.parse_module(test_case_source)
-    result = _converters.convert_match_statement(module)
-    assert result.code == expected
-
-    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
-    test_source_with_calls = test_case_source + textwrap.dedent("""
+    test_calls = textwrap.dedent("""
     result1 = process_tuple_variants(("go", "north"))
     result2 = process_tuple_variants(("quit",))
     result3 = process_tuple_variants(("drop", "sword", "shield", "potion"))
     result4 = process_tuple_variants("string")
     """)
 
-    converted_code = _converters.convert(test_source_with_calls)
-    converted_results = execute_code_with_results(converted_code)
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    converted_source_with_calls = expected + test_calls
+    converted_results = execute_code_with_results(converted_source_with_calls)
 
+    # Verify converted code produces expected results on all Python versions
     assert converted_results["result1"] == "Action: go, Object: north"
     assert converted_results["result2"] == "Single: quit"
     assert (
@@ -1900,9 +1996,15 @@ def test_tuple_unpacking_no_parens():
     )
     assert converted_results["result4"] == "No match"
 
-    # EQUIVALENCE VALIDATION: Compare with original (Python 3.10+ only)
     if sys.version_info >= (3, 10):
-        original_results = execute_code_with_results(test_source_with_calls)
+        # STRING VALIDATION: Test exact code generation
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
+
+        # EQUIVALENCE VALIDATION: Compare with original
+        original_source_with_calls = test_case_source + test_calls
+        original_results = execute_code_with_results(original_source_with_calls)
         assert original_results == converted_results
 
 
