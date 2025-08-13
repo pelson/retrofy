@@ -740,10 +740,6 @@ def test_nested_as_patterns():
         assert converted_results == original_results
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Value patterns (dotted names) not yet implemented",
-)
 def test_value_patterns_constants():
     """Test value patterns using dotted names for constants."""
     test_case_source = textwrap.dedent("""
@@ -753,8 +749,8 @@ def test_value_patterns_constants():
         match angle:
             case math.pi:
                 return "π radians"
-            case math.pi / 2:
-                return "π/2 radians"
+            # case math.pi / 2:   # Note this would produce a syntax error. Would be good to test this separately.
+            #    return "π radians"
             case 0:
                 return "Zero"
             case _:
@@ -765,7 +761,12 @@ def test_value_patterns_constants():
     import math
 
     def classify_angle(angle):
-        raise NotImplementedError("Value patterns (dotted names) not yet implemented")
+        if angle == math.pi:
+            return "π radians"
+        elif angle == 0:
+            return "Zero"
+        else:
+            return "Other angle"
     """)
 
     test_calls = textwrap.dedent("""
@@ -780,6 +781,10 @@ def test_value_patterns_constants():
     converted_source_with_calls = expected + test_calls
     converted_results = execute_code_with_results(converted_source_with_calls)  # noqa: F841
 
+    assert converted_results["result1"] == "π radians"
+    assert converted_results["result3"] == "Zero"
+    assert converted_results["result4"] == "Other angle"
+
     if sys.version_info >= (3, 10):
         # STRING VALIDATION: Test exact code generation
         module = cst.parse_module(test_case_source)
@@ -789,10 +794,7 @@ def test_value_patterns_constants():
         # EQUIVALENCE VALIDATION: Compare with original
         original_source_with_calls = test_case_source + test_calls
         original_results = execute_code_with_results(original_source_with_calls)
-        assert original_results["result1"] == "π radians"
-        assert original_results["result2"] == "π/2 radians"
-        assert original_results["result3"] == "Zero"
-        assert original_results["result4"] == "Other angle"
+        assert original_results == converted_results
 
 
 def test_group_patterns():
@@ -853,7 +855,6 @@ def test_group_patterns():
         assert original_results == converted_results
 
 
-@pytest.mark.xfail(strict=True, reason="**rest not handled properly yet")
 def test_mapping_patterns_with_rest():
     """Test mapping patterns with **rest to capture remaining items."""
     test_case_source = textwrap.dedent("""
@@ -873,18 +874,15 @@ def test_mapping_patterns_with_rest():
         if isinstance(config, collections.abc.Mapping) and "name" in config and "version" in config:
             name = config["name"]
             version = config["version"]
+            extras = {k: v for (k, v) in config.items() if k not in {"name", "version"}}
             return f"App {name} v{version} with extras: {extras}"
         elif isinstance(config, collections.abc.Mapping) and "name" in config:
             name = config["name"]
+            rest = {k: v for (k, v) in config.items() if k not in {"name"}}
             return f"App {name} with config: {rest}"
         else:
             return "Invalid config"
     """)
-
-    # STRING VALIDATION: Test exact code generation
-    module = cst.parse_module(test_case_source)
-    result = _converters.convert_match_statement(module)
-    assert result.code == expected
 
     # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
     test_source_with_calls = test_case_source + textwrap.dedent("""
@@ -904,8 +902,13 @@ def test_mapping_patterns_with_rest():
     assert converted_results["result2"] == "App myapp with config: {'author': 'me'}"
     assert converted_results["result3"] == "Invalid config"
 
-    # EQUIVALENCE VALIDATION: Compare with original (Python 3.10+ only)
     if sys.version_info >= (3, 10):
+        # STRING VALIDATION: Test exact code generation
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
+
+        # EQUIVALENCE VALIDATION: Compare with original
         original_results = execute_code_with_results(test_source_with_calls)
         assert original_results == converted_results
 

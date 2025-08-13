@@ -753,11 +753,18 @@ class MatchStatementTransformer(cst.CSTTransformer):
             )
             conditions.append(length_check)
 
+        # Collect explicit keys for rest pattern handling
+        explicit_keys = []
+
         # Check each key-value pair
         for element in pattern.elements:
             if isinstance(element, cst.MatchMappingElement):
                 key = element.key
                 value_pattern = element.pattern
+
+                # Store explicit keys for rest pattern
+                if isinstance(key, cst.SimpleString):
+                    explicit_keys.append(key)
 
                 # Check key exists
                 key_check = cst.Comparison(
@@ -804,6 +811,55 @@ class MatchStatementTransformer(cst.CSTTransformer):
                     if nested_condition:
                         conditions.append(nested_condition)
                     assignments.extend(nested_assignments)
+
+        # Handle **rest pattern if present
+        if pattern.rest and isinstance(pattern.rest, cst.Name):
+            # Create a dictionary comprehension to exclude explicit keys
+            # rest = {k: v for k, v in subject.items() if k not in {"explicit", "keys"}}
+
+            # Create set of explicit keys for exclusion
+            if explicit_keys:
+                # Create tuple of explicit keys: ("name", "version", ...)
+                explicit_key_elements = [cst.Element(key) for key in explicit_keys]
+                explicit_key_set = cst.Set(explicit_key_elements)
+            else:
+                # Empty set if no explicit keys
+                explicit_key_set = cst.Call(cst.Name("set"), [])
+
+            # Create dictionary comprehension: {k: v for k, v in subject.items() if k not in explicit_keys}
+            dict_comp = cst.DictComp(
+                key=cst.Name("k"),
+                value=cst.Name("v"),
+                for_in=cst.CompFor(
+                    target=cst.Tuple(
+                        [cst.Element(cst.Name("k")), cst.Element(cst.Name("v"))],
+                    ),
+                    iter=cst.Call(
+                        cst.Attribute(subject, cst.Name("items")),
+                        [],
+                    ),
+                    ifs=[
+                        cst.CompIf(
+                            test=cst.Comparison(
+                                left=cst.Name("k"),
+                                comparisons=[
+                                    cst.ComparisonTarget(
+                                        operator=cst.NotIn(),
+                                        comparator=explicit_key_set,
+                                    ),
+                                ],
+                            ),
+                        ),
+                    ],
+                ),
+            )
+
+            # Assign the rest dictionary
+            rest_assignment = cst.Assign(
+                [cst.AssignTarget(pattern.rest)],
+                dict_comp,
+            )
+            assignments.append(rest_assignment)
 
         # Combine all conditions
         if conditions:
