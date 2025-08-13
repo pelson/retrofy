@@ -594,6 +594,50 @@ class MatchStatementTransformer(cst.CSTTransformer):
             right=length_check,
         )
 
+        # Add literal pattern checks for elements before star
+        for i in range(star_index):
+            elem = elements[i]
+            if isinstance(elem, cst.MatchValue):
+                # Add literal value check: subject[i] == value
+                subscript = cst.Subscript(
+                    subject,
+                    [cst.SubscriptElement(cst.Integer(str(i)))],
+                )
+                value_check = cst.Comparison(
+                    left=subscript,
+                    comparisons=[
+                        cst.ComparisonTarget(
+                            operator=cst.Equal(),
+                            comparator=elem.value,
+                        ),
+                    ],
+                )
+                combined_check = cst.BooleanOperation(
+                    left=combined_check,
+                    operator=cst.And(),
+                    right=value_check,
+                )
+            elif isinstance(elem, cst.MatchSingleton):
+                # Add singleton check: subject[i] is value
+                subscript = cst.Subscript(
+                    subject,
+                    [cst.SubscriptElement(cst.Integer(str(i)))],
+                )
+                singleton_check = cst.Comparison(
+                    left=subscript,
+                    comparisons=[
+                        cst.ComparisonTarget(
+                            operator=cst.Is(),
+                            comparator=elem.value,
+                        ),
+                    ],
+                )
+                combined_check = cst.BooleanOperation(
+                    left=combined_check,
+                    operator=cst.And(),
+                    right=singleton_check,
+                )
+
         assignments = []
 
         # Assign elements before star
@@ -643,7 +687,7 @@ class MatchStatementTransformer(cst.CSTTransformer):
             # Wrap slice in list() to match Python 3.11+ behavior
             tuple_expr = cst.Call(
                 cst.Name("list"),
-                [cst.Arg(slice_expr)]
+                [cst.Arg(slice_expr)],
             )
             assignment = cst.Assign([cst.AssignTarget(star_elem.name)], tuple_expr)
             assignments.append(assignment)
@@ -903,8 +947,20 @@ class MatchStatementTransformer(cst.CSTTransformer):
             if isinstance(assignment, cst.Assign):
                 for target in assignment.targets:
                     if isinstance(target.target, cst.Name):
-                        # Use the assignment value, not just the subject
-                        var_substitutions[target.target.value] = assignment.value
+                        # For star pattern variables assigned as list(slice), use just the slice in guards
+                        if (
+                            isinstance(assignment.value, cst.Call)
+                            and isinstance(assignment.value.func, cst.Name)
+                            and assignment.value.func.value == "list"
+                            and len(assignment.value.args) == 1
+                        ):
+                            # Use the slice expression directly for guard conditions
+                            var_substitutions[target.target.value] = (
+                                assignment.value.args[0].value
+                            )
+                        else:
+                            # Use the assignment value for other variables
+                            var_substitutions[target.target.value] = assignment.value
 
         # Use a transformer to substitute variables
         substituter = VariableSubstituter(var_substitutions)

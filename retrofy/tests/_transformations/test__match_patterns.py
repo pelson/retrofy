@@ -903,7 +903,6 @@ def test_mapping_patterns_with_rest():
         assert original_results == converted_results
 
 
-@pytest.mark.xfail(strict=True, reason="*files not handled properly yet")
 def test_mixed_sequence_patterns():
     """Test sequence patterns mixing literals and variables."""
     test_case_source = textwrap.dedent("""
@@ -926,19 +925,19 @@ def test_mixed_sequence_patterns():
     expected = textwrap.dedent("""
     import collections.abc
     def parse_command(cmd):
-        if isinstance(cmd, collections.abc.Sequence) and not isinstance(cmd, (str, collections.abc.Mapping)) and len(cmd) >= 2:
-            files = cmd[2:]
+        if isinstance(cmd, collections.abc.Sequence) and not isinstance(cmd, (str, collections.abc.Mapping)) and len(cmd) >= 2 and cmd[0] == "git" and cmd[1] == "add":
+            files = list(cmd[2:])
             return f"Adding files: {files}"
         elif isinstance(cmd, collections.abc.Sequence) and not isinstance(cmd, (str, collections.abc.Mapping)) and len(cmd) == 4 and cmd[0] == "git" and cmd[1] == "commit" and cmd[2] == "-m":
             message = cmd[3]
             return f"Committing: {message}"
-        elif isinstance(cmd, collections.abc.Sequence) and not isinstance(cmd, (str, collections.abc.Mapping)) and len(cmd) >= 2:
+        elif isinstance(cmd, collections.abc.Sequence) and not isinstance(cmd, (str, collections.abc.Mapping)) and len(cmd) >= 2 and cmd[0] == "git":
             action = cmd[1]
-            args = cmd[2:]
+            args = list(cmd[2:])
             return f"Git {action} with args: {args}"
         elif isinstance(cmd, collections.abc.Sequence) and not isinstance(cmd, (str, collections.abc.Mapping)) and len(cmd) >= 1 and len(cmd[1:]) > 0:
             program = cmd[0]
-            args = cmd[1:]
+            args = list(cmd[1:])
             return f"Running {program} with {len(args)} args"
         elif isinstance(cmd, collections.abc.Sequence) and not isinstance(cmd, (str, collections.abc.Mapping)) and len(cmd) == 1:
             program = cmd[0]
@@ -950,7 +949,6 @@ def test_mixed_sequence_patterns():
     # STRING VALIDATION: Test exact code generation
     module = cst.parse_module(test_case_source)
     result = _converters.convert_match_statement(module)
-    print(result.code)
     assert result.code == expected
 
     # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
