@@ -264,43 +264,79 @@ class MatchStatementTransformer(cst.CSTTransformer):
                 return inner_condition, inner_assignments
 
         elif isinstance(pattern, cst.MatchOr):
-            # Simple literal OR patterns: case 1 | 2 | 3: -> if subject in (1, 2, 3):
             patterns = [element.pattern for element in pattern.patterns]
 
-            # This should only handle simple literal cases (complex cases are expanded at higher level)
+            # Check if all patterns are literals
             literals = []
+            types = []
+            has_complex_patterns = False
+
             for pat in patterns:
                 if isinstance(pat, (cst.MatchValue, cst.MatchSingleton)):
                     literals.append(pat.value)
+                elif (
+                    isinstance(pat, cst.MatchClass)
+                    and not pat.patterns
+                    and not pat.kwds
+                ):
+                    # Empty class pattern like int(), str(), etc. -> isinstance check
+                    types.append(pat.cls)
                 else:
-                    raise NotImplementedError(
-                        "Complex OR patterns should be expanded into separate cases",
-                    )
+                    has_complex_patterns = True
+                    break
 
-            # All literals - use 'in' comparison
-            if len(literals) == 1:
-                condition = cst.Comparison(
-                    left=subject,
-                    comparisons=[
-                        cst.ComparisonTarget(
-                            operator=cst.Equal(),
-                            comparator=literals[0],
-                        ),
-                    ],
+            if has_complex_patterns:
+                raise NotImplementedError(
+                    "Complex OR patterns should be expanded into separate cases",
                 )
+
+            # Handle pure literal OR patterns: case 1 | 2 | 3: -> if subject in (1, 2, 3):
+            if literals and not types:
+                if len(literals) == 1:
+                    condition = cst.Comparison(
+                        left=subject,
+                        comparisons=[
+                            cst.ComparisonTarget(
+                                operator=cst.Equal(),
+                                comparator=literals[0],
+                            ),
+                        ],
+                    )
+                else:
+                    tuple_elements = [cst.Element(lit) for lit in literals]
+                    tuple_expr = cst.Tuple(tuple_elements)
+                    condition = cst.Comparison(
+                        left=subject,
+                        comparisons=[
+                            cst.ComparisonTarget(
+                                operator=cst.In(),
+                                comparator=tuple_expr,
+                            ),
+                        ],
+                    )
+                return condition, []
+
+            # Handle pure type OR patterns: case int() | float(): -> isinstance(subject, (int, float))
+            elif types and not literals:
+                if len(types) == 1:
+                    condition = cst.Call(
+                        cst.Name("isinstance"),
+                        [cst.Arg(subject), cst.Arg(types[0])],
+                    )
+                else:
+                    tuple_elements = [cst.Element(typ) for typ in types]
+                    tuple_expr = cst.Tuple(tuple_elements)
+                    condition = cst.Call(
+                        cst.Name("isinstance"),
+                        [cst.Arg(subject), cst.Arg(tuple_expr)],
+                    )
+                return condition, []
+
+            # Mixed literals and types - not supported yet
             else:
-                tuple_elements = [cst.Element(lit) for lit in literals]
-                tuple_expr = cst.Tuple(tuple_elements)
-                condition = cst.Comparison(
-                    left=subject,
-                    comparisons=[
-                        cst.ComparisonTarget(
-                            operator=cst.In(),
-                            comparator=tuple_expr,
-                        ),
-                    ],
+                raise NotImplementedError(
+                    "Mixed literal and type OR patterns not yet supported",
                 )
-            return condition, []
 
         elif isinstance(pattern, (cst.MatchSequence, cst.MatchTuple)):
             # Sequence/tuple pattern: case [x, y] or case (x, y): -> if len(subject) == 2: x, y = subject

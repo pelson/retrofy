@@ -1078,10 +1078,6 @@ def test_nested_class_patterns():
             assert original_results == converted_results
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Complex OR patterns with as not yet implemented",
-)
 def test_or_patterns_with_as():
     """Test OR patterns combined with as patterns."""
     test_case_source = textwrap.dedent("""
@@ -1097,6 +1093,23 @@ def test_or_patterns_with_as():
                 return f"Other type: {type(other).__name__}"
     """)
 
+    expected = textwrap.dedent("""
+    def process_number_or_string(value):
+        if isinstance(value, (int, float)) and value > 0:
+            number = value
+            return f"Positive number: {number}"
+        elif isinstance(value, (int, float)):
+            number = value
+            return f"Non-positive number: {number}"
+        elif isinstance(value, (str, bytes)):
+            text = value
+            return f"Text data: {text}"
+        else:
+            other = value
+            return f"Other type: {type(other).__name__}"
+    """)
+
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
     test_source_with_calls = test_case_source + textwrap.dedent("""
     result1 = process_number_or_string(42)
     result2 = process_number_or_string(-5)
@@ -1105,15 +1118,72 @@ def test_or_patterns_with_as():
     result5 = process_number_or_string([1, 2, 3])
     """)
 
-    if sys.version_info >= (3, 10):
-        original_results = execute_code_with_results(test_source_with_calls)
-        assert original_results["result1"] == "Positive number: 42"
-        assert original_results["result2"] == "Non-positive number: -5"
-        assert original_results["result3"] == "Positive number: 3.14"
-        assert original_results["result4"] == "Text data: hello"
-        assert original_results["result5"] == "Other type: list"
+    converted_code = _converters.convert(test_source_with_calls)
+    converted_results = execute_code_with_results(converted_code)
 
-    assert False
+    # Verify converted code produces expected results on all Python versions
+    assert converted_results["result1"] == "Positive number: 42"
+    assert converted_results["result2"] == "Non-positive number: -5"
+    assert converted_results["result3"] == "Positive number: 3.14"
+    assert converted_results["result4"] == "Text data: hello"
+    assert converted_results["result5"] == "Other type: list"
+
+    if sys.version_info >= (3, 10):
+        # STRING VALIDATION: Test exact code generation
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
+
+        # EQUIVALENCE VALIDATION: Compare with original
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results == converted_results
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Mixed literal and type OR patterns not yet supported",
+)
+def test_or_pattern_literal_and_type():
+    test_case_source = textwrap.dedent("""
+    def process_number_or_string(value):
+        match value:
+            case (int() | 0) as res:
+                return f"Zero or integer {res}"
+    """)
+
+    expected = textwrap.dedent("""
+    def process_number_or_string(value):
+        if isinstance(value, (int)) or value == 0:
+            res = value
+            return f"Zero or integer: {res}"
+    """)
+
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    test_source_with_calls = test_case_source + textwrap.dedent("""
+    result1 = process_number_or_string(42)
+    result2 = process_number_or_string(0.0)
+    result3 = process_number_or_string(None)
+    result4 = process_number_or_string(1.0)
+    """)
+
+    converted_code = _converters.convert(test_source_with_calls)
+    converted_results = execute_code_with_results(converted_code)
+
+    # Verify converted code produces expected results on all Python versions
+    assert converted_results["result1"] == "Zero or integer: 42"
+    assert converted_results["result2"] == "Zero or integer: 0.0"
+    assert converted_results["result3"] == "Zero or integer: None"
+    assert converted_results["result4"] is None
+
+    if sys.version_info >= (3, 10):
+        # STRING VALIDATION: Test exact code generation
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
+
+        # EQUIVALENCE VALIDATION: Compare with original
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results == converted_results
 
 
 @pytest.mark.xfail(
