@@ -1184,10 +1184,6 @@ def test_or_pattern_literal_and_type():
         assert original_results == converted_results
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Complex mixed pattern combinations not yet implemented",
-)
 def test_mixed_pattern_combinations():
     """Test complex combinations of different pattern types."""
     test_case_source = textwrap.dedent("""
@@ -1205,6 +1201,32 @@ def test_mixed_pattern_combinations():
                 return "No match"
     """)
 
+    expected = textwrap.dedent("""
+    import collections.abc
+    def complex_matcher(data):
+        if isinstance(data, collections.abc.Mapping) and "type" in data and data["type"] == "point" and "coords" in data and isinstance(data["coords"], collections.abc.Sequence) and not isinstance(data["coords"], (str, collections.abc.Mapping)) and len(data["coords"]) == 2 and data["coords"][0] == data["coords"][1]:
+            coords = data["coords"]
+            x, y = data["coords"]
+            return f"Diagonal point: {coords}"
+        elif isinstance(data, collections.abc.Mapping) and "type" in data and data["type"] == "point" and "coords" in data and isinstance(data["coords"], Point):
+            point_data = data
+            x = data["coords"].x
+            y = data["coords"].y
+            return f"Point object: ({x}, {y}) from {point_data}"
+        elif isinstance(data, collections.abc.Mapping) and "items" in data and isinstance(data["items"], collections.abc.Sequence) and not isinstance(data["items"], (str, collections.abc.Mapping)) and len(data["items"]) >= 0 and all(isinstance(i, (int, float)) for i in data["items"][0:]):
+            items = list(data["items"][0:])
+            return f"Numeric items: {sum(items)}"
+        elif isinstance(data, collections.abc.Mapping) and "nested" in data and isinstance(data["nested"], collections.abc.Mapping) and "deep" in data["nested"]:
+            value = data["nested"]["deep"]
+            return f"Deep value: {value}"
+        elif isinstance(data, collections.abc.Mapping) and "alt" in data and isinstance(data["alt"], collections.abc.Mapping) and "deep" in data["alt"]:
+            value = data["alt"]["deep"]
+            return f"Deep value: {value}"
+        else:
+            return "No match"
+    """)
+
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
     test_source_with_calls = test_case_source + textwrap.dedent("""
     result1 = complex_matcher({"type": "point", "coords": (3, 3)})
     result2 = complex_matcher({"type": "point", "coords": Point(2, 4)})
@@ -1214,16 +1236,26 @@ def test_mixed_pattern_combinations():
     result6 = complex_matcher({"nothing": "matches"})
     """)
 
-    if sys.version_info >= (3, 10):
-        original_results = execute_code_with_results(test_source_with_calls)
-        assert original_results["result1"] == "Diagonal point: (3, 3)"
-        assert "Point object: (2, 4)" in original_results["result2"]
-        assert original_results["result3"] == "Numeric items: 15"
-        assert original_results["result4"] == "Deep value: treasure"
-        assert original_results["result5"] == "Deep value: treasure"
-        assert original_results["result6"] == "No match"
+    converted_code = _converters.convert(test_source_with_calls)
+    converted_results = execute_code_with_results(converted_code)
 
-    assert False
+    # Verify converted code produces expected results on all Python versions
+    assert converted_results["result1"] == "Diagonal point: (3, 3)"
+    assert "Point object: (2, 4)" in converted_results["result2"]
+    assert converted_results["result3"] == "Numeric items: 15"
+    assert converted_results["result4"] == "Deep value: treasure"
+    assert converted_results["result5"] == "Deep value: treasure"
+    assert converted_results["result6"] == "No match"
+
+    if sys.version_info >= (3, 10):
+        # STRING VALIDATION: Test exact code generation
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
+
+        # EQUIVALENCE VALIDATION: Compare with original
+        original_results = execute_code_with_results(test_source_with_calls)
+        assert original_results == converted_results
 
 
 def test_literal_matching_multiple_types():
@@ -1418,7 +1450,6 @@ def test_mixed_positional_keyword_patterns():
     assert False
 
 
-@pytest.mark.xfail(strict=True, reason="Enum value patterns not yet implemented")
 def test_enum_patterns():
     """Test matching enum values as patterns."""
     test_case_source = textwrap.dedent("""
@@ -1441,7 +1472,7 @@ def test_enum_patterns():
                 return "Unknown color"
     """)
 
-    test_source_with_calls = test_case_source + textwrap.dedent("""
+    expected = textwrap.dedent("""
     from enum import Enum
 
     class Color(Enum):
@@ -1449,20 +1480,44 @@ def test_enum_patterns():
         GREEN = 1
         BLUE = 2
 
+    def describe_color(color):
+        if color == Color.RED:
+            return "I see red!"
+        elif color == Color.GREEN:
+            return "Grass is green"
+        elif color == Color.BLUE:
+            return "I'm feeling blue"
+        else:
+            return "Unknown color"
+    """)
+
+    test_calls = textwrap.dedent("""
     result1 = describe_color(Color.RED)
     result2 = describe_color(Color.GREEN)
     result3 = describe_color(Color.BLUE)
     result4 = describe_color("red")
     """)
 
-    if sys.version_info >= (3, 10):
-        original_results = execute_code_with_results(test_source_with_calls)
-        assert original_results["result1"] == "I see red!"
-        assert original_results["result2"] == "Grass is green"
-        assert original_results["result3"] == "I'm feeling blue"
-        assert original_results["result4"] == "Unknown color"
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    converted_source_with_calls = expected + test_calls
+    converted_results = execute_code_with_results(converted_source_with_calls)
 
-    assert False
+    # Verify converted code produces expected results on all Python versions
+    assert converted_results["result1"] == "I see red!"
+    assert converted_results["result2"] == "Grass is green"
+    assert converted_results["result3"] == "I'm feeling blue"
+    assert converted_results["result4"] == "Unknown color"
+
+    if sys.version_info >= (3, 10):
+        # STRING VALIDATION: Test exact code generation
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
+
+        # EQUIVALENCE VALIDATION: Compare with original
+        original_source_with_calls = test_case_source + test_calls
+        original_results = execute_code_with_results(original_source_with_calls)
+        assert original_results == converted_results
 
 
 def test_dataclass_patterns():
