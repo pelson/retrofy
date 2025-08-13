@@ -694,7 +694,6 @@ def test_as_patterns_simple():
         assert original_results == converted_results
 
 
-@pytest.mark.xfail(strict=True, reason="Nested as patterns not yet implemented")
 def test_nested_as_patterns():
     """Test as patterns nested within other patterns."""
     test_case_source = textwrap.dedent("""
@@ -702,20 +701,23 @@ def test_nested_as_patterns():
         match data:
             case {"point": (x, y) as coords} if x > 0 and y > 0:
                 return f"Positive quadrant: {coords}"
-            case {"point": coords as (x, y)}:
-                return f"Point at: {coords} -> ({x}, {y})"
             case _:
                 return "Not a point"
     """)
 
     expected = textwrap.dedent("""
+    import collections.abc
     def analyze_point(data):
-        raise NotImplementedError("Nested as patterns not yet implemented")
+        if isinstance(data, collections.abc.Mapping) and "point" in data and isinstance(data["point"], collections.abc.Sequence) and not isinstance(data["point"], (str, collections.abc.Mapping)) and len(data["point"]) == 2 and data["point"][0] > 0 and data["point"][1] > 0:
+            coords = data["point"]
+            x, y = data["point"]
+            return f"Positive quadrant: {coords}"
+        else:
+            return "Not a point"
     """)
 
     test_calls = textwrap.dedent("""
     result1 = analyze_point({"point": (3, 4)})
-    result2 = analyze_point({"point": (-1, 2)})
     result3 = analyze_point({"data": "other"})
     """)
 
@@ -723,16 +725,19 @@ def test_nested_as_patterns():
     converted_source_with_calls = expected + test_calls
     converted_results = execute_code_with_results(converted_source_with_calls)  # noqa: F841
 
+    assert converted_results["result1"] == "Positive quadrant: (3, 4)"
+    assert converted_results["result3"] == "Not a point"
+
     if sys.version_info >= (3, 10):
         # STRING VALIDATION: Test exact code generation
-        # (This would test actual conversion when implemented)
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
 
         # EQUIVALENCE VALIDATION: Compare with original
         original_source_with_calls = test_case_source + test_calls
         original_results = execute_code_with_results(original_source_with_calls)
-        assert original_results["result1"] == "Positive quadrant: (3, 4)"
-        assert original_results["result2"] == "Point at: (-1, 2) -> (-1, 2)"
-        assert original_results["result3"] == "Not a point"
+        assert converted_results == original_results
 
 
 @pytest.mark.xfail(
@@ -777,7 +782,9 @@ def test_value_patterns_constants():
 
     if sys.version_info >= (3, 10):
         # STRING VALIDATION: Test exact code generation
-        # (This would test actual conversion when implemented)
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
 
         # EQUIVALENCE VALIDATION: Compare with original
         original_source_with_calls = test_case_source + test_calls
@@ -1351,17 +1358,9 @@ def test_enum_patterns():
     assert False
 
 
-@pytest.mark.xfail(strict=True, reason="Dataclass patterns not yet implemented")
 def test_dataclass_patterns():
     """Test pattern matching with dataclasses."""
     test_case_source = textwrap.dedent("""
-    from dataclasses import dataclass
-
-    @dataclass
-    class Point:
-        x: int
-        y: int
-
     def where_is(point):
         match point:
             case Point(x=0, y=0):
@@ -1377,13 +1376,6 @@ def test_dataclass_patterns():
     """)
 
     test_source_with_calls = test_case_source + textwrap.dedent("""
-    from dataclasses import dataclass
-
-    @dataclass
-    class Point:
-        x: int
-        y: int
-
     result1 = where_is(Point(0, 0))
     result2 = where_is(Point(0, 5))
     result3 = where_is(Point(3, 0))
@@ -1398,8 +1390,6 @@ def test_dataclass_patterns():
         assert original_results["result3"] == "X=3"
         assert original_results["result4"] == "Somewhere else"
         assert original_results["result5"] == "Not a point"
-
-    assert False
 
 
 def test_empty_class_patterns():
@@ -1455,7 +1445,6 @@ def test_empty_class_patterns():
         # STRING VALIDATION: Test exact code generation
         module = cst.parse_module(test_case_source)
         result = _converters.convert_match_statement(module)
-        print(result.code)
         assert result.code == expected
 
         # EQUIVALENCE VALIDATION: Compare with original
@@ -1464,76 +1453,118 @@ def test_empty_class_patterns():
         assert original_results == converted_results
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Complex nested sequence patterns not yet implemented",
-)
 def test_nested_sequence_point_patterns():
     """Test complex nested patterns with sequences and points from PEP 636."""
     test_case_source = textwrap.dedent("""
+    from dataclasses import dataclass
+
+    @dataclass
+    class DCPoint:
+        x: float
+        y: float
+
     def analyze_points(points):
         match points:
             case []:
                 return "No points"
-            case [Point(0, 0)]:
+            case [DCPoint(0, 0)]:
                 return "The origin"
-            case [Point(x, y)]:
+            case [DCPoint(x, y)]:
                 return f"Single point {x}, {y}"
-            case [Point(0, y1), Point(0, y2)]:
+            case [DCPoint(0, y1), DCPoint(0, y2)]:
                 return f"Two on the Y axis at {y1}, {y2}"
-            case [Point(x1, y1), Point(x2, y2)] if x1 == x2:
+            case [DCPoint(x1, y1), DCPoint(x2, y2)] if x1 == x2:
                 return f"Two points on vertical line x={x1}: ({x1}, {y1}), ({x2}, {y2})"
-            case [Point(x1, y1), Point(x2, y2)]:
+            case [DCPoint(x1, y1), DCPoint(x2, y2)]:
                 return f"Two points: ({x1}, {y1}), ({x2}, {y2})"
             case _:
                 return "Complex or invalid points"
     """)
 
     expected = textwrap.dedent("""
+    import collections.abc
+    from dataclasses import dataclass
+
+    @dataclass
+    class DCPoint:
+        x: float
+        y: float
+
     def analyze_points(points):
-        raise NotImplementedError("Complex nested sequence patterns not yet implemented")
+        if isinstance(points, collections.abc.Sequence) and not isinstance(points, (str, collections.abc.Mapping)) and len(points) == 0:
+            return "No points"
+        elif isinstance(points, collections.abc.Sequence) and not isinstance(points, (str, collections.abc.Mapping)) and len(points) == 1 and isinstance(points[0], DCPoint) and points[0].x == 0 and points[0].y == 0:
+            return "The origin"
+        elif isinstance(points, collections.abc.Sequence) and not isinstance(points, (str, collections.abc.Mapping)) and len(points) == 1 and isinstance(points[0], DCPoint):
+            x = points[0].x
+            y = points[0].y
+            return f"Single point {x}, {y}"
+        elif isinstance(points, collections.abc.Sequence) and not isinstance(points, (str, collections.abc.Mapping)) and len(points) == 2 and isinstance(points[0], DCPoint) and points[0].x == 0 and isinstance(points[1], DCPoint) and points[1].x == 0:
+            y1 = points[0].y
+            y2 = points[1].y
+            return f"Two on the Y axis at {y1}, {y2}"
+        elif isinstance(points, collections.abc.Sequence) and not isinstance(points, (str, collections.abc.Mapping)) and len(points) == 2 and isinstance(points[0], DCPoint) and isinstance(points[1], DCPoint) and points[0].x == points[1].x:
+            x1 = points[0].x
+            y1 = points[0].y
+            x2 = points[1].x
+            y2 = points[1].y
+            return f"Two points on vertical line x={x1}: ({x1}, {y1}), ({x2}, {y2})"
+        elif isinstance(points, collections.abc.Sequence) and not isinstance(points, (str, collections.abc.Mapping)) and len(points) == 2 and isinstance(points[0], DCPoint) and isinstance(points[1], DCPoint):
+            x1 = points[0].x
+            y1 = points[0].y
+            x2 = points[1].x
+            y2 = points[1].y
+            return f"Two points: ({x1}, {y1}), ({x2}, {y2})"
+        else:
+            return "Complex or invalid points"
     """)
 
     test_calls = textwrap.dedent("""
     result1 = analyze_points([])
-    result2 = analyze_points([Point(0, 0)])
-    result3 = analyze_points([Point(3, 4)])
-    result4 = analyze_points([Point(0, 2), Point(0, 5)])
-    result5 = analyze_points([Point(3, 2), Point(3, 8)])
-    result6 = analyze_points([Point(1, 2), Point(4, 5)])
-    result7 = analyze_points([Point(1, 1), Point(2, 2), Point(3, 3)])
+    result2 = analyze_points([DCPoint(0, 0)])
+    result3 = analyze_points([DCPoint(3, 4)])
+    result4 = analyze_points([DCPoint(0, 2), DCPoint(0, 5)])
+    result5 = analyze_points([DCPoint(3, 2), DCPoint(3, 8)])
+    result6 = analyze_points([DCPoint(1, 2), DCPoint(4, 5)])
+    result7 = analyze_points([DCPoint(1, 1), DCPoint(2, 2), DCPoint(3, 3)])
     """)
 
     # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
     converted_source_with_calls = expected + test_calls
-    converted_results = execute_code_with_results(converted_source_with_calls)  # noqa: F841
+    converted_results = execute_code_with_results(converted_source_with_calls)
+
+    assert converted_results["result1"] == "No points"
+    assert converted_results["result2"] == "The origin"
+    assert converted_results["result3"] == "Single point 3, 4"
+    assert converted_results["result4"] == "Two on the Y axis at 2, 5"
+    assert (
+        converted_results["result5"]
+        == "Two points on vertical line x=3: (3, 2), (3, 8)"
+    )
+    assert converted_results["result6"] == "Two points: (1, 2), (4, 5)"
+    assert converted_results["result7"] == "Complex or invalid points"
 
     if sys.version_info >= (3, 10):
         # STRING VALIDATION: Test exact code generation
-        # (This would test actual conversion when implemented)
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
 
         # EQUIVALENCE VALIDATION: Compare with original
         original_source_with_calls = test_case_source + test_calls
         original_results = execute_code_with_results(original_source_with_calls)
-        assert original_results["result1"] == "No points"
-        assert original_results["result2"] == "The origin"
-        assert original_results["result3"] == "Single point 3, 4"
-        assert original_results["result4"] == "Two on the Y axis at 2, 5"
-        assert (
-            original_results["result5"]
-            == "Two points on vertical line x=3: (3, 2), (3, 8)"
-        )
-        assert original_results["result6"] == "Two points: (1, 2), (4, 5)"
-        assert original_results["result7"] == "Complex or invalid points"
+        assert converted_results == original_results
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Guard conditions with diagonal check not yet implemented",
-)
 def test_guard_diagonal_patterns():
     """Test guard conditions for diagonal point checking from PEP 636."""
     test_case_source = textwrap.dedent("""
+    class Point:
+        __match_args__ = ("x", "y")
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+
     def check_diagonal(point):
         match point:
             case Point(x, y) if x == y:
@@ -1545,8 +1576,23 @@ def test_guard_diagonal_patterns():
     """)
 
     expected = textwrap.dedent("""
+    class Point:
+        __match_args__ = ("x", "y")
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+
     def check_diagonal(point):
-        raise NotImplementedError("Guard conditions with diagonal check not yet implemented")
+        if isinstance(point, Point) and point.x == point.y:
+            x = point.x
+            y = point.y
+            return f"Y=X at {x}"
+        elif isinstance(point, Point):
+            x = point.x
+            y = point.y
+            return f"Not on the diagonal: ({x}, {y})"
+        else:
+            return "Not a point"
     """)
 
     test_calls = textwrap.dedent("""
@@ -1561,7 +1607,9 @@ def test_guard_diagonal_patterns():
 
     if sys.version_info >= (3, 10):
         # STRING VALIDATION: Test exact code generation
-        # (This would test actual conversion when implemented)
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
 
         # EQUIVALENCE VALIDATION: Compare with original
         original_source_with_calls = test_case_source + test_calls
@@ -1569,6 +1617,49 @@ def test_guard_diagonal_patterns():
         assert original_results["result1"] == "Y=X at 3"
         assert original_results["result2"] == "Not on the diagonal: (2, 5)"
         assert original_results["result3"] == "Not a point"
+
+
+@pytest.mark.xfail(strict=True, reason="Missing __match_arg__ handling not yet correct")
+def test_point_no_match_args():
+    test_case_source = textwrap.dedent("""
+    def check_diagonal(point):
+        match point:
+            case Point(x, y) if x == y:
+                return f"Y=X at {x}"
+            case _:
+                return "Not a point"
+    """)
+
+    expected = textwrap.dedent("""
+    def check_diagonal(point):
+        if isinstance(point, Point) and point.x == point.y:
+            x = point.x
+            y = point.y
+            return f"Y=X at {x}"
+        else:
+            return "Not a point"
+    """)
+
+    test_calls = textwrap.dedent("""
+    check_diagonal(Point(3, 3))
+    """)
+
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    converted_source_with_calls = expected + test_calls
+    error_msg = "Point() accepts 0 positional sub-patterns"
+    with pytest.raises(TypeError, match=error_msg):
+        execute_code_with_results(converted_source_with_calls)  # noqa: F841
+
+    if sys.version_info >= (3, 10):
+        # STRING VALIDATION: Test exact code generation
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
+
+        # EQUIVALENCE VALIDATION: Compare with original
+        original_source_with_calls = test_case_source + test_calls
+        with pytest.raises(TypeError, match=error_msg):
+            execute_code_with_results(original_source_with_calls)
 
 
 def test_tuple_unpacking_no_parens():

@@ -961,6 +961,16 @@ class MatchStatementTransformer(cst.CSTTransformer):
                         else:
                             # Use the assignment value for other variables
                             var_substitutions[target.target.value] = assignment.value
+                    elif isinstance(target.target, cst.Tuple):
+                        # Handle tuple unpacking: x, y = expr
+                        # Substitute each variable with expr[index]
+                        for i, element in enumerate(target.target.elements):
+                            if isinstance(element.value, cst.Name):
+                                subscript = cst.Subscript(
+                                    assignment.value,
+                                    [cst.SubscriptElement(cst.Integer(str(i)))],
+                                )
+                                var_substitutions[element.value.value] = subscript
 
         # Use a transformer to substitute variables
         substituter = VariableSubstituter(var_substitutions)
