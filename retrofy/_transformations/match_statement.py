@@ -128,6 +128,8 @@ class MatchStatementTransformer(cst.CSTTransformer):
             else:
                 expanded_cases.append(case)
 
+        # We'll handle __match_args__ validation directly in the if/elif building
+
         # Special case: single case with no conditions (just variable binding)
         if len(expanded_cases) == 1:
             case_stmt = self._build_case_condition(subject, expanded_cases[0])
@@ -136,20 +138,45 @@ class MatchStatementTransformer(cst.CSTTransformer):
                 if isinstance(case_stmt.body, cst.IndentedBlock):
                     return cst.FlattenSentinel(case_stmt.body.body)
 
-        # Build the if/elif/else chain from the end backwards
+        # Build the if/elif/else chain with special handling for class patterns
         result = None
 
         for case in reversed(expanded_cases):
-            case_stmt = self._build_case_condition(subject, case)
+            # Check if this case needs a __match_args__ error check
+            if isinstance(case.pattern, cst.MatchClass) and case.pattern.patterns:
+                # Build the normal case statement first
+                case_stmt = self._build_case_condition(subject, case)
 
-            if result is None:
-                result = case_stmt
+                # Create the error check statement
+                error_stmt = self._build_match_args_error_check(subject, case.pattern)
+
+                # Insert the error check before the normal case
+                if result is None:
+                    # This is the last case, so chain error -> normal case
+                    if isinstance(case_stmt, cst.If):
+                        result = error_stmt.with_changes(orelse=case_stmt)
+                    else:
+                        # case_stmt is Else
+                        result = error_stmt.with_changes(orelse=case_stmt)
+                else:
+                    # Chain: error -> normal case -> rest
+                    if isinstance(case_stmt, cst.If):
+                        chained_case = case_stmt.with_changes(orelse=result)
+                        result = error_stmt.with_changes(orelse=chained_case)
+                    else:
+                        # case_stmt is Else - this shouldn't happen for class patterns
+                        result = error_stmt.with_changes(orelse=result)
             else:
-                if isinstance(case_stmt, cst.If):
-                    result = case_stmt.with_changes(orelse=result)
-                elif isinstance(case_stmt, cst.Else):
-                    # This shouldn't happen - else should be the last case
+                # Normal case handling
+                case_stmt = self._build_case_condition(subject, case)
+
+                if result is None:
                     result = case_stmt
+                else:
+                    if isinstance(case_stmt, cst.If):
+                        result = case_stmt.with_changes(orelse=result)
+                    elif isinstance(case_stmt, cst.Else):
+                        result = case_stmt
 
         return result or cst.SimpleStatementLine([cst.Expr(subject)])
 
@@ -917,44 +944,61 @@ class MatchStatementTransformer(cst.CSTTransformer):
         )
         conditions.append(isinstance_check)
 
+        # For positional patterns, validation is now handled in a separate error case
+        # So we can process patterns normally here
+
         # Handle positional patterns first
         for i, element in enumerate(pattern.patterns):
             if isinstance(element, cst.MatchSequenceElement):
                 # Positional pattern: Point(x, 0)
-                # For positional patterns, we need to map to specific attributes
-                # This is problematic because we don't know the attribute names
-                # For Point class, we'll assume common names: x, y, z, etc.
+                # Use __match_args__ to get the correct attribute name
                 value_pattern = element.value
 
-                # Common attribute names for positional arguments
-                attr_names = ["x", "y", "z", "w"]  # Extend as needed
-                if i < len(attr_names):
-                    attr_name = cst.Name(attr_names[i])
-                    attr_access = cst.Attribute(subject, attr_name)
+                # Access the attribute name from __match_args__[i]
+                match_args_attr = cst.Attribute(pattern.cls, cst.Name("__match_args__"))
+                attr_name_expr = cst.Subscript(
+                    match_args_attr,
+                    [cst.SubscriptElement(cst.Integer(str(i)))],
+                )
 
-                    if isinstance(value_pattern, (cst.MatchValue, cst.MatchSingleton)):
-                        # Check attribute value
-                        attr_check = cst.Comparison(
-                            left=attr_access,
-                            comparisons=[
-                                cst.ComparisonTarget(
-                                    operator=cst.Equal(),
-                                    comparator=value_pattern.value,
-                                ),
-                            ],
-                        )
-                        conditions.append(attr_check)
-                    elif (
-                        isinstance(value_pattern, cst.MatchAs)
-                        and value_pattern.pattern is None
-                        and value_pattern.name
-                    ):
-                        # Bind attribute to variable
-                        assignment = cst.Assign(
-                            [cst.AssignTarget(value_pattern.name)],
-                            attr_access,
-                        )
-                        assignments.append(assignment)
+                # Get the attribute using getattr(subject, __match_args__[i])
+                attr_access = cst.Call(
+                    cst.Name("getattr"),
+                    [cst.Arg(subject), cst.Arg(attr_name_expr)],
+                )
+
+                if isinstance(value_pattern, (cst.MatchValue, cst.MatchSingleton)):
+                    # Check attribute value
+                    attr_check = cst.Comparison(
+                        left=attr_access,
+                        comparisons=[
+                            cst.ComparisonTarget(
+                                operator=cst.Equal(),
+                                comparator=value_pattern.value,
+                            ),
+                        ],
+                    )
+                    conditions.append(attr_check)
+                elif (
+                    isinstance(value_pattern, cst.MatchAs)
+                    and value_pattern.pattern is None
+                    and value_pattern.name
+                ):
+                    # Bind attribute to variable
+                    assignment = cst.Assign(
+                        [cst.AssignTarget(value_pattern.name)],
+                        attr_access,
+                    )
+                    assignments.append(assignment)
+                else:
+                    # Complex nested pattern - recursively process it
+                    nested_condition, nested_assignments = self._pattern_to_condition(
+                        attr_access,
+                        value_pattern,
+                    )
+                    if nested_condition:
+                        conditions.append(nested_condition)
+                    assignments.extend(nested_assignments)
 
         # Handle keyword patterns
         for element in pattern.kwds:
@@ -1089,3 +1133,69 @@ class MatchStatementTransformer(cst.CSTTransformer):
                 return body.with_changes(body=new_body)
             else:
                 return cst.IndentedBlock(assignment_lines)
+
+    def _build_match_args_error_check(
+        self,
+        subject: cst.BaseExpression,
+        pattern: cst.MatchClass,
+    ) -> cst.If:
+        """Build an if statement that checks for __match_args__ errors."""
+        num_positional = len(pattern.patterns)
+        cls_name = getattr(pattern.cls, "value", "UnknownClass")
+
+        # Create condition: isinstance(subject, cls) and not (hasattr(cls, '__match_args__') and len(cls.__match_args__) >= n)
+        isinstance_check = cst.Call(
+            cst.Name("isinstance"),
+            [cst.Arg(subject), cst.Arg(pattern.cls)],
+        )
+
+        hasattr_call = cst.Call(
+            cst.Name("hasattr"),
+            [cst.Arg(pattern.cls), cst.Arg(cst.SimpleString('"__match_args__"'))],
+        )
+
+        match_args_attr = cst.Attribute(pattern.cls, cst.Name("__match_args__"))
+        len_check = cst.Comparison(
+            left=cst.Call(cst.Name("len"), [cst.Arg(match_args_attr)]),
+            comparisons=[
+                cst.ComparisonTarget(
+                    operator=cst.GreaterThanEqual(),
+                    comparator=cst.Integer(str(num_positional)),
+                ),
+            ],
+        )
+
+        valid_match_args = cst.BooleanOperation(
+            left=hasattr_call,
+            operator=cst.And(),
+            right=len_check,
+        )
+
+        invalid_match_args = cst.UnaryOperation(
+            operator=cst.Not(),
+            expression=valid_match_args.with_changes(
+                lpar=[cst.LeftParen()],
+                rpar=[cst.RightParen()],
+            ),
+        )
+
+        error_condition = cst.BooleanOperation(
+            left=isinstance_check,
+            operator=cst.And(),
+            right=invalid_match_args,
+        )
+
+        # Create body: raise TypeError("...")
+        error_msg = (
+            f"{cls_name}() accepts 0 positional sub-patterns ({num_positional} given)"
+        )
+        error_raise = cst.Raise(
+            cst.Call(
+                cst.Name("TypeError"),
+                [cst.Arg(cst.SimpleString(f'"{error_msg}"'))],
+            ),
+        )
+
+        error_body = cst.IndentedBlock([cst.SimpleStatementLine([error_raise])])
+
+        return cst.If(test=error_condition, body=error_body)

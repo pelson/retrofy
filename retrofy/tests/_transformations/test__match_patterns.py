@@ -1602,27 +1602,27 @@ def test_nested_sequence_point_patterns():
     def analyze_points(points):
         if isinstance(points, collections.abc.Sequence) and not isinstance(points, (str, collections.abc.Mapping)) and len(points) == 0:
             return "No points"
-        elif isinstance(points, collections.abc.Sequence) and not isinstance(points, (str, collections.abc.Mapping)) and len(points) == 1 and isinstance(points[0], DCPoint) and points[0].x == 0 and points[0].y == 0:
+        elif isinstance(points, collections.abc.Sequence) and not isinstance(points, (str, collections.abc.Mapping)) and len(points) == 1 and isinstance(points[0], DCPoint) and getattr(points[0], DCPoint.__match_args__[0]) == 0 and getattr(points[0], DCPoint.__match_args__[1]) == 0:
             return "The origin"
         elif isinstance(points, collections.abc.Sequence) and not isinstance(points, (str, collections.abc.Mapping)) and len(points) == 1 and isinstance(points[0], DCPoint):
-            x = points[0].x
-            y = points[0].y
+            x = getattr(points[0], DCPoint.__match_args__[0])
+            y = getattr(points[0], DCPoint.__match_args__[1])
             return f"Single point {x}, {y}"
-        elif isinstance(points, collections.abc.Sequence) and not isinstance(points, (str, collections.abc.Mapping)) and len(points) == 2 and isinstance(points[0], DCPoint) and points[0].x == 0 and isinstance(points[1], DCPoint) and points[1].x == 0:
-            y1 = points[0].y
-            y2 = points[1].y
+        elif isinstance(points, collections.abc.Sequence) and not isinstance(points, (str, collections.abc.Mapping)) and len(points) == 2 and isinstance(points[0], DCPoint) and getattr(points[0], DCPoint.__match_args__[0]) == 0 and isinstance(points[1], DCPoint) and getattr(points[1], DCPoint.__match_args__[0]) == 0:
+            y1 = getattr(points[0], DCPoint.__match_args__[1])
+            y2 = getattr(points[1], DCPoint.__match_args__[1])
             return f"Two on the Y axis at {y1}, {y2}"
-        elif isinstance(points, collections.abc.Sequence) and not isinstance(points, (str, collections.abc.Mapping)) and len(points) == 2 and isinstance(points[0], DCPoint) and isinstance(points[1], DCPoint) and points[0].x == points[1].x:
-            x1 = points[0].x
-            y1 = points[0].y
-            x2 = points[1].x
-            y2 = points[1].y
+        elif isinstance(points, collections.abc.Sequence) and not isinstance(points, (str, collections.abc.Mapping)) and len(points) == 2 and isinstance(points[0], DCPoint) and isinstance(points[1], DCPoint) and getattr(points[0], DCPoint.__match_args__[0]) == getattr(points[1], DCPoint.__match_args__[0]):
+            x1 = getattr(points[0], DCPoint.__match_args__[0])
+            y1 = getattr(points[0], DCPoint.__match_args__[1])
+            x2 = getattr(points[1], DCPoint.__match_args__[0])
+            y2 = getattr(points[1], DCPoint.__match_args__[1])
             return f"Two points on vertical line x={x1}: ({x1}, {y1}), ({x2}, {y2})"
         elif isinstance(points, collections.abc.Sequence) and not isinstance(points, (str, collections.abc.Mapping)) and len(points) == 2 and isinstance(points[0], DCPoint) and isinstance(points[1], DCPoint):
-            x1 = points[0].x
-            y1 = points[0].y
-            x2 = points[1].x
-            y2 = points[1].y
+            x1 = getattr(points[0], DCPoint.__match_args__[0])
+            y1 = getattr(points[0], DCPoint.__match_args__[1])
+            x2 = getattr(points[1], DCPoint.__match_args__[0])
+            y2 = getattr(points[1], DCPoint.__match_args__[1])
             return f"Two points: ({x1}, {y1}), ({x2}, {y2})"
         else:
             return "Complex or invalid points"
@@ -1669,16 +1669,18 @@ def test_guard_diagonal_patterns():
     """Test guard conditions for diagonal point checking from PEP 636."""
     test_case_source = textwrap.dedent("""
     class Point:
-        __match_args__ = ("x", "y")
+        __match_args__ = ("y_attr", "x_attr")
         def __init__(self, x, y):
-            self.x = x
-            self.y = y
+            self.x_attr = x
+            self.y_attr = y
 
     def check_diagonal(point):
         match point:
-            case Point(x, y) if x == y:
+            case Point(y, x) if x > y:
+                return f"Below the y=x curve ({x}, {y})"
+            case Point(y, x) if x == y:
                 return f"Y=X at {x}"
-            case Point(x, y):
+            case Point(y, x):
                 return f"Not on the diagonal: ({x}, {y})"
             case _:
                 return "Not a point"
@@ -1686,19 +1688,29 @@ def test_guard_diagonal_patterns():
 
     expected = textwrap.dedent("""
     class Point:
-        __match_args__ = ("x", "y")
+        __match_args__ = ("y_attr", "x_attr")
         def __init__(self, x, y):
-            self.x = x
-            self.y = y
+            self.x_attr = x
+            self.y_attr = y
 
     def check_diagonal(point):
-        if isinstance(point, Point) and point.x == point.y:
-            x = point.x
-            y = point.y
+        if isinstance(point, Point) and not (hasattr(Point, "__match_args__") and len(Point.__match_args__) >= 2):
+            raise TypeError("Point() accepts 0 positional sub-patterns (2 given)")
+        elif isinstance(point, Point) and getattr(point, Point.__match_args__[1]) > getattr(point, Point.__match_args__[0]):
+            y = getattr(point, Point.__match_args__[0])
+            x = getattr(point, Point.__match_args__[1])
+            return f"Below the y=x curve ({x}, {y})"
+        elif isinstance(point, Point) and not (hasattr(Point, "__match_args__") and len(Point.__match_args__) >= 2):
+            raise TypeError("Point() accepts 0 positional sub-patterns (2 given)")
+        elif isinstance(point, Point) and getattr(point, Point.__match_args__[1]) == getattr(point, Point.__match_args__[0]):
+            y = getattr(point, Point.__match_args__[0])
+            x = getattr(point, Point.__match_args__[1])
             return f"Y=X at {x}"
+        elif isinstance(point, Point) and not (hasattr(Point, "__match_args__") and len(Point.__match_args__) >= 2):
+            raise TypeError("Point() accepts 0 positional sub-patterns (2 given)")
         elif isinstance(point, Point):
-            x = point.x
-            y = point.y
+            y = getattr(point, Point.__match_args__[0])
+            x = getattr(point, Point.__match_args__[1])
             return f"Not on the diagonal: ({x}, {y})"
         else:
             return "Not a point"
@@ -1708,11 +1720,17 @@ def test_guard_diagonal_patterns():
     result1 = check_diagonal(Point(3, 3))
     result2 = check_diagonal(Point(2, 5))
     result3 = check_diagonal("not a point")
+    result4 = check_diagonal(Point(4, 3))
     """)
 
     # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
     converted_source_with_calls = expected + test_calls
     converted_results = execute_code_with_results(converted_source_with_calls)  # noqa: F841
+
+    assert converted_results["result1"] == "Y=X at 3"
+    assert converted_results["result2"] == "Not on the diagonal: (2, 5)"
+    assert converted_results["result3"] == "Not a point"
+    assert converted_results["result4"] == "Below the y=x curve (4, 3)"
 
     if sys.version_info >= (3, 10):
         # STRING VALIDATION: Test exact code generation
@@ -1723,12 +1741,9 @@ def test_guard_diagonal_patterns():
         # EQUIVALENCE VALIDATION: Compare with original
         original_source_with_calls = test_case_source + test_calls
         original_results = execute_code_with_results(original_source_with_calls)
-        assert original_results["result1"] == "Y=X at 3"
-        assert original_results["result2"] == "Not on the diagonal: (2, 5)"
-        assert original_results["result3"] == "Not a point"
+        assert converted_results == original_results
 
 
-@pytest.mark.xfail(strict=True, reason="Missing __match_arg__ handling not yet correct")
 def test_point_no_match_args():
     test_case_source = textwrap.dedent("""
     def check_diagonal(point):
@@ -1741,9 +1756,11 @@ def test_point_no_match_args():
 
     expected = textwrap.dedent("""
     def check_diagonal(point):
-        if isinstance(point, Point) and point.x == point.y:
-            x = point.x
-            y = point.y
+        if isinstance(point, Point) and not (hasattr(Point, "__match_args__") and len(Point.__match_args__) >= 2):
+            raise TypeError("Point() accepts 0 positional sub-patterns (2 given)")
+        elif isinstance(point, Point) and getattr(point, Point.__match_args__[0]) == getattr(point, Point.__match_args__[1]):
+            x = getattr(point, Point.__match_args__[0])
+            y = getattr(point, Point.__match_args__[1])
             return f"Y=X at {x}"
         else:
             return "Not a point"
@@ -1755,7 +1772,7 @@ def test_point_no_match_args():
 
     # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
     converted_source_with_calls = expected + test_calls
-    error_msg = "Point() accepts 0 positional sub-patterns"
+    error_msg = "Point\\(\\) accepts 0 positional sub-patterns"
     with pytest.raises(TypeError, match=error_msg):
         execute_code_with_results(converted_source_with_calls)  # noqa: F841
 
