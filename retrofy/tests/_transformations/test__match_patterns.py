@@ -2086,3 +2086,229 @@ def test_builtin_type_patterns():
         original_source_with_calls = test_case_source + test_calls
         original_results = execute_code_with_results(original_source_with_calls)
         assert original_results == converted_results
+
+
+def test_deeply_nested_as_patterns():
+    """Test as patterns nested within other as patterns."""
+    test_case_source = textwrap.dedent("""
+    def process_nested_data(data):
+        match data:
+            case ([x, y] as coords) as data_wrapper:
+                return f"Coords {coords} in wrapper {data_wrapper}"
+            case {"outer": {"inner": value} as inner_dict} as outer_dict:
+                return f"Inner dict {inner_dict} in outer {outer_dict}"
+            case ({"name": name} as record) as container:
+                return f"Record {record} in container {container}"
+            case _:
+                return "No match"
+    """)
+
+    expected = textwrap.dedent("""
+    import collections.abc
+    def process_nested_data(data):
+        if isinstance(data, collections.abc.Sequence) and not isinstance(data, (str, collections.abc.Mapping)) and len(data) == 2:
+            data_wrapper = data
+            coords = data
+            x, y = data
+            return f"Coords {coords} in wrapper {data_wrapper}"
+        elif isinstance(data, collections.abc.Mapping) and "outer" in data and isinstance(data["outer"], collections.abc.Mapping) and "inner" in data["outer"]:
+            outer_dict = data
+            inner_dict = data["outer"]
+            value = data["outer"]["inner"]
+            return f"Inner dict {inner_dict} in outer {outer_dict}"
+        elif isinstance(data, collections.abc.Mapping) and "name" in data:
+            container = data
+            record = data
+            name = data["name"]
+            return f"Record {record} in container {container}"
+        else:
+            return "No match"
+    """)
+
+    test_calls = textwrap.dedent("""
+    result1 = process_nested_data([3, 4])
+    result2 = process_nested_data({"outer": {"inner": "treasure"}})
+    result3 = process_nested_data({"name": "Alice"})
+    result4 = process_nested_data("no match")
+    """)
+
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    converted_source_with_calls = expected + test_calls
+    converted_results = execute_code_with_results(converted_source_with_calls)
+
+    # Verify converted code produces expected results on all Python versions
+    assert converted_results["result1"] == "Coords [3, 4] in wrapper [3, 4]"
+    assert "Inner dict {'inner': 'treasure'} in outer" in converted_results["result2"]
+    assert "Record {'name': 'Alice'} in container" in converted_results["result3"]
+    assert converted_results["result4"] == "No match"
+
+    if sys.version_info >= (3, 10):
+        # STRING VALIDATION: Test exact code generation
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
+
+        # EQUIVALENCE VALIDATION: Compare with original
+        original_source_with_calls = test_case_source + test_calls
+        original_results = execute_code_with_results(original_source_with_calls)
+        assert original_results == converted_results
+
+
+def test_multiple_as_patterns_different_levels():
+    """Test multiple as patterns at different nesting levels."""
+    test_case_source = textwrap.dedent("""
+    class Point:
+        __match_args__ = ("x", "y")
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+        def __repr__(self):
+            return f"Point({self.x}, {self.y})"
+
+    def analyze_complex_structure(data):
+        match data:
+            case {"items": [item as first, *rest] as item_list} as full_data:
+                return f"First: {first}, List: {item_list}, Full: {full_data}"
+            case Point(x as x_coord, y as y_coord) as point:
+                return f"Point({x_coord}, {y_coord}) = {point}"
+            case {"metadata": {"id": id_val as identifier} as meta} as document:
+                return f"ID: {identifier}, Meta: {meta}, Doc: {document}"
+            case _:
+                return "No match"
+    """)
+
+    expected = textwrap.dedent("""
+    import collections.abc
+    class Point:
+        __match_args__ = ("x", "y")
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+        def __repr__(self):
+            return f"Point({self.x}, {self.y})"
+
+    def analyze_complex_structure(data):
+        if isinstance(data, collections.abc.Mapping) and "items" in data and isinstance(data["items"], collections.abc.Sequence) and not isinstance(data["items"], (str, collections.abc.Mapping)) and len(data["items"]) >= 1:
+            full_data = data
+            item_list = data["items"]
+            first = data["items"][0]
+            item = data["items"][0]
+            rest = list(data["items"][1:])
+            return f"First: {first}, List: {item_list}, Full: {full_data}"
+        elif isinstance(data, Point):
+            point = data
+            x_coord = getattr(data, Point.__match_args__[0])
+            x = getattr(data, Point.__match_args__[0])
+            y_coord = getattr(data, Point.__match_args__[1])
+            y = getattr(data, Point.__match_args__[1])
+            return f"Point({x_coord}, {y_coord}) = {point}"
+        elif isinstance(data, collections.abc.Mapping) and "metadata" in data and isinstance(data["metadata"], collections.abc.Mapping) and "id" in data["metadata"]:
+            document = data
+            meta = data["metadata"]
+            identifier = data["metadata"]["id"]
+            id_val = data["metadata"]["id"]
+            return f"ID: {identifier}, Meta: {meta}, Doc: {document}"
+        else:
+            return "No match"
+    """)
+
+    test_calls = textwrap.dedent("""
+    result1 = analyze_complex_structure({"items": [1, 2, 3]})
+    result2 = analyze_complex_structure(Point(5, 10))
+    result3 = analyze_complex_structure({"metadata": {"id": "doc123"}})
+    result4 = analyze_complex_structure("no match")
+    """)
+
+    # EXECUTION VALIDATION: Test converted code behavior (all Python versions)
+    converted_source_with_calls = expected + test_calls
+    converted_results = execute_code_with_results(converted_source_with_calls)
+
+    # Verify converted code produces expected results on all Python versions
+    assert (
+        "First: 1, List: [1, 2, 3], Full: {'items': [1, 2, 3]}"
+        in converted_results["result1"]
+    )
+    assert "Point(5, 10)" in converted_results["result2"]
+    assert "ID: doc123, Meta: {'id': 'doc123'}" in converted_results["result3"]
+    assert converted_results["result4"] == "No match"
+
+    if sys.version_info >= (3, 10):
+        # STRING VALIDATION: Test exact code generation
+        module = cst.parse_module(test_case_source)
+        result = _converters.convert_match_statement(module)
+        assert result.code == expected
+
+        # EQUIVALENCE VALIDATION: Compare with original
+        original_source_with_calls = test_case_source + test_calls
+        original_results = execute_code_with_results(original_source_with_calls)
+        assert original_results == converted_results
+
+
+def test_as_patterns_with_star_expressions_invalid_syntax():
+    """Test that invalid syntax with as patterns and star expressions produces the same error."""
+    test_case_source = textwrap.dedent("""
+    def process_with_star_as(data):
+        match data:
+            case [first, *middle as mid_items, last]:
+                return f"First: {first}, Middle: {mid_items}, Last: {last}"
+            case [*prefix as pre_items, final] as full_list:
+                return f"Prefix: {pre_items}, Final: {final}, Full: {full_list}"
+            case {"keys": [*values as all_vals]} as data_dict:
+                return f"Values: {all_vals}, Dict: {data_dict}"
+            case _:
+                return "No match"
+    """)
+
+    # Test that both original and converted code produce syntax errors
+    # since "*middle as mid_items" is invalid Python syntax
+
+    # Test that CST parsing fails with a syntax error
+    with pytest.raises(Exception) as exc_info:
+        cst.parse_module(test_case_source)
+
+    # Verify it's a syntax error (could be ParserSyntaxError or SyntaxError depending on version)
+    assert (
+        "Syntax" in str(type(exc_info.value).__name__)
+        or "syntax" in str(exc_info.value).lower()
+    )
+
+    if sys.version_info >= (3, 10):
+        # Test that exec also fails with a syntax error for the original code
+        with pytest.raises(SyntaxError):
+            exec(test_case_source)
+
+
+def test_complex_as_pattern_combinations_invalid_syntax():
+    """Test that complex invalid as pattern combinations produce the same error."""
+    test_case_source = textwrap.dedent("""
+    def handle_complex_as_patterns(data):
+        match data:
+            case {"response": {"data": [{"value": val} as item] as items} as response} as full:
+                return f"Value: {val}, Item: {item}, Items: {items}, Response: {response}, Full: {full}"
+            case ({"x": x_val} | {"y": y_val}) as coord_dict as wrapper:
+                x = x_val if "x" in coord_dict else None
+                y = y_val if "y" in coord_dict else None
+                return f"Coord dict: {coord_dict}, Wrapper: {wrapper}, X: {x}, Y: {y}"
+            case [(*group as elements,) as tuple_group] as list_wrapper:
+                return f"Elements: {elements}, Tuple: {tuple_group}, List: {list_wrapper}"
+            case _:
+                return "No match"
+    """)
+
+    # Test that both original and converted code produce syntax errors
+    # since patterns like "as coord_dict as wrapper" and "*group as elements" are invalid Python syntax
+
+    # Test that CST parsing fails with a syntax error
+    with pytest.raises(Exception) as exc_info:
+        cst.parse_module(test_case_source)
+
+    # Verify it's a syntax error (could be ParserSyntaxError or SyntaxError depending on version)
+    assert (
+        "Syntax" in str(type(exc_info.value).__name__)
+        or "syntax" in str(exc_info.value).lower()
+    )
+
+    if sys.version_info >= (3, 10):
+        # Test that exec also fails with a syntax error for the original code
+        with pytest.raises(SyntaxError):
+            exec(test_case_source)
