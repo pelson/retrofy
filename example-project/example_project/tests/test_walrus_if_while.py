@@ -23,7 +23,7 @@ def test_walrus_in_while():
     stream = io.StringIO(content)
     chunks = []
 
-    while (chunk := stream.read(5)):
+    while chunk := stream.read(5):
         chunks.append(chunk)
 
     assert "".join(chunks) == content

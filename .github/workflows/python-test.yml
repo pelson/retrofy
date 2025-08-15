@@ -1,0 +1,155 @@
+name: python-test
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ 'v*' ]      # Runs tests on normal pushes and release tags
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for setuptools-scm
+
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+
+    - name: Install build dependencies
+      run: |
+        python -m pip install build
+
+    - name: Build wheel and sdist
+      run: python -m build
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: dist
+        path: dist/
+
+  test:
+    needs: build
+    strategy:
+      matrix:
+        include:
+          - python-version: "3.9"
+            os: ubuntu-latest
+          - python-version: "3.10"
+            os: ubuntu-latest
+          - python-version: "3.11"
+            os: ubuntu-latest
+          - python-version: "3.12"
+            os: ubuntu-latest
+          - python-version: "3.13"
+            os: ubuntu-latest
+          - python-version: "3.14"
+            os: ubuntu-latest
+            prerelease: true
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        allow-prereleases: ${{ matrix.prerelease || false }}
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: dist
+        path: dist/
+
+    - name: Install the retrofy wheel
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install pytest
+        # Install the wheel using --find-links to handle multiple platform wheels
+        python -m pip install --find-links dist/ retrofy
+
+    - name: Test with pytest (isolated from source)
+      run: |
+        # Run tests from a different directory to ensure we're testing the installed package
+        mkdir -p not-the-source
+        cd not-the-source
+        python -m pytest --pyargs retrofy -ssvv
+
+  compatibility_test:
+    strategy:
+      matrix:
+        include:
+          # Since this is just running the tests on Python versions that aren't compatible with
+          # retrofy, we don't need to run this against Python versions which are tested above.
+          - python-version: "3.7"
+            os: ubuntu-22.04
+          - python-version: "3.8"
+            os: ubuntu-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        allow-prereleases: ${{ matrix.prerelease || false }}
+
+    - name: Install pytest only
+      run: |
+        python -m pip install pytest libcst
+        echo "__version__ = 'dev'" > ./retrofy/_version.py
+
+    - name: Test compatibility without installing retrofy itself (since it may not be possible to install for older Python versions)
+      run: |
+        python -m pytest ./retrofy/tests/_transformations/test_match_statement.py -ssvv
+
+  pre-commit:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install pre-commit
+
+    - name: pre-commit run
+      run: pre-commit run -a
+
+# TODO: Get this passing (grrr pre-commit mypy-hook passing).
+#  static_analysis:
+#    needs: build
+#    runs-on: ubuntu-latest
+#
+#    steps:
+#    - name: Set up Python 3.13
+#      uses: actions/setup-python@v5
+#      with:
+#        python-version: "3.13"
+#
+#    - uses: actions/checkout@v4
+#
+#    - name: Install dependencies
+#      run: |
+#        python -m pip install --upgrade pip
+#        python -m pip install --editable . --group dev
+#
+#    - name: Run mypy
+#      run: |
+#        python -m mypy ./retrofy
