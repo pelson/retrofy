@@ -88,7 +88,7 @@ jobs:
         # Run tests from a different directory to ensure we're testing the installed package
         mkdir -p not-the-source
         cd not-the-source
-        python -m pytest retrofy -ssvv
+        python -m pytest --pyargs retrofy -ssvv
 
   pre-commit:
     runs-on: ubuntu-latest
@@ -119,6 +119,8 @@ jobs:
       with:
         python-version: "3.13"
 
+    - uses: actions/checkout@v4
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
@@ -126,4 +128,4 @@ jobs:
 
     - name: Run mypy
       run: |
-        python -m mypy -p retrofy
+        python -m mypy ./retrofy
