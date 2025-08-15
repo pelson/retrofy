@@ -90,7 +90,7 @@ jobs:
         cd not-the-source
         python -m pytest retrofy -ssvv
 
-  lint:
+  pre-commit:
     runs-on: ubuntu-latest
 
     steps:
