@@ -3,9 +3,9 @@ name: python-test
 on:
   push:
     branches: [ "main" ]
-    tags: [ 'v*' ]      # Runs tests on normal pushes and release tags
   pull_request:
     branches: [ "main" ]
+  workflow_call:
 
 jobs:
   build:
