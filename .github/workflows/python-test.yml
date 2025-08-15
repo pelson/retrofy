@@ -1,4 +1,4 @@
-# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
+# This workflow builds the package once with modern Python and tests across all supported versions
 # For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
 
 name: Python package
@@ -10,50 +10,120 @@ on:
     branches: [ "main" ]
 
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for setuptools-scm
+
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+
+    - name: Install build dependencies
+      run: |
+        python -m pip install build
+
+    - name: Build wheel and sdist
+      run: python -m build
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: dist
+        path: dist/
+
   test:
+    needs: build
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.7", "3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]
+        include:
+          - python-version: "3.7"
+            os: ubuntu-22.04
+          - python-version: "3.8"
+            os: ubuntu-latest
+          - python-version: "3.9"
+            os: ubuntu-latest
+          - python-version: "3.10"
+            os: ubuntu-latest
+          - python-version: "3.11"
+            os: ubuntu-latest
+          - python-version: "3.12"
+            os: ubuntu-latest
+          - python-version: "3.13"
+            os: ubuntu-latest
+          - python-version: "3.14"
+            os: ubuntu-latest
+            prerelease: true
 
-    runs-on: ${{ matrix.python-version == '3.7' && 'ubuntu-22.04' || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.os }}
 
     steps:
     - uses: actions/checkout@v4
+
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
-    - name: Install dependencies
+        allow-prereleases: ${{ matrix.prerelease || false }}
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: dist
+        path: dist/
+
+    - name: Install the retrofy wheel
       run: |
         python -m pip install --upgrade pip
-        python -m pip install pre-commit --editable .[test]
+        python -m pip install pytest
+        # Install the wheel using --find-links to handle multiple platform wheels
+        python -m pip install --find-links dist/ retrofy
+
+    - name: Test with pytest (isolated from source)
+      run: |
+        # Run tests from a different directory to ensure we're testing the installed package
+        mkdir -p not-the-source
+        cd not-the-source
+        python -m pytest retrofy -ssvv
+
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install pre-commit
+        python -m pip install pre-commit
+
     - name: pre-commit run
-      if: matrix.python-version != '3.7'
-      run: |
-        pre-commit run -a
-    - name: Test with pytest
-      run: |
-        python -m pytest -ssvv .
+      run: pre-commit run -a
 
   static_analysis:
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.7", "3.9", "3.11"]
-
-    runs-on: ${{ matrix.python-version == '3.7' && 'ubuntu-22.04' || 'ubuntu-latest' }}
+    needs: build
+    runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v5
       with:
-        python-version: ${{ matrix.python-version }}
+        python-version: "3.13"
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        python -m pip install mypy --editable .[test]
-    - name: mypy
+        python -m pip install --editable . --group dev
+
+    - name: Run mypy
       run: |
         python -m mypy -p retrofy

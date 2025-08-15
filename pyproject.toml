@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools", "wheel", "setuptools_scm[toml]==7.* "]
+requires = ["setuptools", "wheel", "setuptools_scm[toml]"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "retrofy"
 dynamic = [
-  "version",  # The version is taken directly from the repository, using setuptools-scm.
+  "version",
 ]
 description = "A tool to convert modern Python code to less modern Python versions"
 readme = "README.md"
@@ -29,14 +29,14 @@ dependencies = [
 test = [
   "pytest",
 ]
-doc = [
-]
+
+[dependency-groups]
 dev = [
-  "retrofy[doc,test]",
+  "mypy",
 ]
 
 [project.urls]
-Homepage = "https://gitlab.cern.ch/pelson/retrofy"
+Homepage = "https://github.com/pelson/retrofy"
 
 [tool.setuptools.packages.find]
 include = ["retrofy", "retrofy.*"]
