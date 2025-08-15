@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
 import sys
 import textwrap
 import typing
-from dataclasses import dataclass
 
 import libcst
 import libcst as cst

@@ -1,6 +1,6 @@
+from importlib.abc import MetaPathFinder, SourceLoader
 import sys
 import typing
-from importlib.abc import MetaPathFinder, SourceLoader
 
 from ._converters import convert
 
