@@ -14,9 +14,10 @@ classifiers = [
   "Operating System :: OS Independent",
 ]
 authors = [
-  { name = "Phil Elson", email = "philip.elson@cern.ch" },
+  { name = "Phil Elson", email = "pelson.pub@gmail.com" },
 ]
 requires-python = ">=3.9"
+license = "Apache-2.0"
 
 # The core dependencies of the project.
 dependencies = [
