@@ -13,6 +13,7 @@ jobs:
     uses: ./.github/workflows/python-test.yml
 
   pypi-publish:
+    needs: build-and-test
     runs-on: ubuntu-latest
 
     permissions:
