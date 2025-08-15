@@ -131,7 +131,10 @@ class EnhancedImportManager:
 
     def __init__(self):
         self._import_info: Dict[str, List[ImportInfo]] = {}
-        self._has_sys_import = False
+        self._direct_imports: Dict[
+            str,
+            int,
+        ] = {}  # Track direct imports like 'import typing'
 
     def scan_imports(
         self,
@@ -139,7 +142,7 @@ class EnhancedImportManager:
     ) -> None:
         """Scan module body to detect existing imports and their aliases."""
         self._import_info.clear()
-        self._has_sys_import = False
+        self._direct_imports.clear()
 
         for stmt_idx, stmt in enumerate(body):
             if isinstance(stmt, cst.SimpleStatementLine):
@@ -180,9 +183,9 @@ class EnhancedImportManager:
     def _scan_import(self, import_stmt: cst.Import, stmt_idx: int) -> None:
         """Scan a direct 'import X' statement."""
         for alias in import_stmt.names:
-            if isinstance(alias.name, cst.Name) and alias.name.value == "sys":
-                self._has_sys_import = True
-                break
+            if isinstance(alias.name, cst.Name):
+                module_name = alias.name.value
+                self._direct_imports[module_name] = stmt_idx
 
     def has_import(self, module_name: str, imported_name: str) -> bool:
         """Check if a specific import exists."""
@@ -201,6 +204,10 @@ class EnhancedImportManager:
             if info.imported_name == imported_name:
                 return info.effective_name
         return None
+
+    def has_direct_import(self, module_name: str) -> bool:
+        """Check if a direct import like 'import typing' exists."""
+        return module_name in self._direct_imports
 
     def remove_from_imports(
         self,
@@ -261,19 +268,21 @@ class EnhancedImportManager:
         body: List[cst.BaseStatement],
     ) -> List[cst.BaseStatement]:
         """Ensure sys is imported early in the module."""
-        # Check if sys is already imported in import section
-        early_sys_import = self._check_early_sys_import(body)
-
-        if not early_sys_import:
+        # Check if sys is imported early (before non-import statements)
+        if not self._has_early_direct_import(body, "sys"):
             # Add sys import at the appropriate position
             insert_position = self.find_import_position(body)
-            sys_import = self._create_sys_import()
-            body.insert(insert_position, sys_import)
+            import_stmt = self._create_direct_import("sys")
+            body.insert(insert_position, import_stmt)
 
         return body
 
-    def _check_early_sys_import(self, body: List[cst.BaseStatement]) -> bool:
-        """Check if sys is imported early in the module (before non-import statements)."""
+    def _has_early_direct_import(
+        self,
+        body: List[cst.BaseStatement],
+        module_name: str,
+    ) -> bool:
+        """Check if a direct import exists early in the module (before non-import statements)."""
         for stmt in body:
             if isinstance(stmt, cst.SimpleStatementLine):
                 # Check if this is an import statement
@@ -282,30 +291,46 @@ class EnhancedImportManager:
                     for substmt in stmt.body
                 )
 
-                for substmt in stmt.body:
-                    if isinstance(substmt, cst.Import) and any(
-                        isinstance(alias.name, cst.Name) and alias.name.value == "sys"
-                        for alias in substmt.names
-                    ):
-                        return True
-
-                # If we hit non-import statements, stop looking
-                if not has_imports:
+                if has_imports:
+                    # Check if this statement contains the direct import we're looking for
+                    for substmt in stmt.body:
+                        if isinstance(substmt, cst.Import) and any(
+                            isinstance(alias.name, cst.Name)
+                            and alias.name.value == module_name
+                            for alias in substmt.names
+                        ):
+                            return True
+                else:
+                    # Hit non-import statement, stop looking
                     break
             else:
-                # If we hit a non-simple statement, stop looking
+                # Hit non-simple statement, stop looking
                 break
 
         return False
 
-    def _create_sys_import(self) -> cst.SimpleStatementLine:
-        """Create a sys import statement."""
+    def ensure_direct_import(
+        self,
+        body: List[cst.BaseStatement],
+        module_name: str,
+    ) -> List[cst.BaseStatement]:
+        """Ensure a direct import like 'import typing' is present early in the module."""
+        if not self.has_direct_import(module_name):
+            # Add import at the appropriate position
+            insert_position = self.find_import_position(body)
+            import_stmt = self._create_direct_import(module_name)
+            body.insert(insert_position, import_stmt)
+
+        return body
+
+    def _create_direct_import(self, module_name: str) -> cst.SimpleStatementLine:
+        """Create a direct import statement like 'import typing'."""
         return cst.SimpleStatementLine(
             [
                 cst.Import(
                     [
                         cst.ImportAlias(
-                            cst.Name("sys"),
+                            cst.Name(module_name),
                         ),
                     ],
                 ),
