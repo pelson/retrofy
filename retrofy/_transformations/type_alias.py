@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import libcst as cst
 
+from .import_utils import EnhancedImportManager
+
 
 class PEP695Transformer(cst.CSTTransformer):
     """
@@ -33,6 +35,7 @@ class PEP695Transformer(cst.CSTTransformer):
     """
 
     def __init__(self) -> None:
+        self.import_manager = EnhancedImportManager()
         self.needs_typing_import = False
         self.needs_generic_import = False
         self.type_vars_to_create: list[str] = []
@@ -321,47 +324,11 @@ class PEP695Transformer(cst.CSTTransformer):
         if not self.needs_typing_import:
             return updated_node
 
-        # Check if "import typing" is already present (we need this specific import)
-        has_typing_import = False
-        for stmt in updated_node.body:
-            if isinstance(stmt, cst.SimpleStatementLine):
-                for simple_stmt in stmt.body:
-                    if isinstance(simple_stmt, cst.Import):
-                        for name_item in simple_stmt.names:
-                            if isinstance(name_item, cst.ImportAlias):
-                                if (
-                                    isinstance(name_item.name, cst.Name)
-                                    and name_item.name.value == "typing"
-                                ):
-                                    has_typing_import = True
-                                    break
+        # Scan existing imports
+        self.import_manager.scan_imports(updated_node.body)
 
-        if has_typing_import:
-            return updated_node
-
-        # Always add "import typing" since we use typing.TypeVar and typing.TypeAlias
-        typing_import = cst.SimpleStatementLine(
-            body=[
-                cst.Import(
-                    names=[cst.ImportAlias(name=cst.Name("typing"))],
-                ),
-            ],
-        )
-
-        # Find the right place to insert the import (after __future__ imports if any)
-        insert_pos = 0
-        for i, stmt in enumerate(updated_node.body):
-            if isinstance(stmt, cst.SimpleStatementLine):
-                for simple_stmt in stmt.body:
-                    if isinstance(simple_stmt, cst.ImportFrom):
-                        if (
-                            isinstance(simple_stmt.module, cst.Name)
-                            and simple_stmt.module.value == "__future__"
-                        ):
-                            insert_pos = i + 1
-                            break
-
+        # Add "import typing" using the enhanced import manager
         new_body = list(updated_node.body)
-        new_body.insert(insert_pos, typing_import)
+        new_body = self.import_manager.ensure_direct_import(new_body, "typing")
 
         return updated_node.with_changes(body=new_body)

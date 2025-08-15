@@ -100,7 +100,6 @@ def test_union__future__with_import_already():
     expected = textwrap.dedent("""
     from __future__ import annotations
     import typing
-    import typing
 
     if typing.TYPE_CHECKING:
         c: typing.Union[str, int]

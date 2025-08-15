@@ -1,16 +1,22 @@
 import dataclasses
-import typing
 
 import libcst as cst
 
-from ._transformations import dataclass, match_statement, type_alias, walrus
+from ._transformations import (
+    dataclass,
+    match_statement,
+    type_alias,
+    typing_final,
+    walrus,
+)
+from ._transformations.import_utils import EnhancedImportManager
 
 
 class TypingTransformer(cst.CSTTransformer):
     def __init__(self, scope):
         self._scope = scope
         self._require_typing = False
-        self._has_typing = False  # TODO: We can figure this out.
+        self.import_manager = EnhancedImportManager()
 
     def leave_Annotation(
         self,
@@ -42,76 +48,13 @@ class TypingTransformer(cst.CSTTransformer):
 
     def leave_Module(self, node: cst.Module, updated_node: cst.Module) -> cst.Module:
         if self._require_typing:
-            # Find the correct position to insert the typing import
-            # It should be after any docstrings and __future__ imports
-            insert_position = self._find_typing_import_position(updated_node.body)
+            # Scan existing imports and add typing import if needed
+            self.import_manager.scan_imports(updated_node.body)
+            new_body = list(updated_node.body)
+            new_body = self.import_manager.ensure_direct_import(new_body, "typing")
 
-            typing_import = cst.SimpleStatementLine(
-                [
-                    cst.Import(
-                        [
-                            cst.ImportAlias(
-                                cst.Name("typing"),
-                            ),
-                        ],
-                    ),
-                ],
-                trailing_whitespace=cst.TrailingWhitespace(
-                    newline=cst.Newline(),
-                ),
-            )
-
-            new_stmts = list(updated_node.body)
-            new_stmts.insert(insert_position, typing_import)
-
-            return dataclasses.replace(updated_node, body=tuple(new_stmts))
+            return dataclasses.replace(updated_node, body=tuple(new_body))
         return updated_node
-
-    def _find_typing_import_position(
-        self,
-        body: typing.Tuple[cst.BaseStatement, ...],
-    ) -> int:
-        """Find the correct position to insert the typing import."""
-        position = 0
-
-        # Skip module docstrings
-        if body and isinstance(body[0], cst.SimpleStatementLine):
-            if (
-                len(body[0].body) == 1
-                and isinstance(body[0].body[0], cst.Expr)
-                and isinstance(body[0].body[0].value, cst.SimpleString)
-            ):
-                position = 1
-
-        # Skip __future__ imports
-        for i in range(position, len(body)):
-            stmt = body[i]
-            if isinstance(stmt, cst.SimpleStatementLine):
-                for substmt in stmt.body:
-                    if (
-                        isinstance(substmt, cst.ImportFrom)
-                        and substmt.module
-                        and isinstance(substmt.module, cst.Attribute)
-                        and substmt.module.attr.value == "__future__"
-                    ):
-                        position = i + 1
-                        break
-                    elif (
-                        isinstance(substmt, cst.ImportFrom)
-                        and substmt.module
-                        and isinstance(substmt.module, cst.Name)
-                        and substmt.module.value == "__future__"
-                    ):
-                        position = i + 1
-                        break
-                else:
-                    # If we didn't find a __future__ import in this statement, stop looking
-                    break
-            else:
-                # If we hit a non-simple statement, stop looking
-                break
-
-        return position
 
 
 def convert_union(module: cst.Module) -> cst.Module:
@@ -163,12 +106,17 @@ def convert_dataclass(module: cst.Module) -> cst.Module:
     return module.visit(dataclass.DataclassTransformer())
 
 
+def convert_typing_final(module: cst.Module) -> cst.Module:
+    return module.visit(typing_final.TypingFinalTransformer())
+
+
 def convert(code: str) -> str:
     mod = cst.parse_module(code)
     mod = convert_sequence_subscript(mod)
     mod = convert_walrus_operator(mod)
     mod = convert_type_alias(mod)
     mod = convert_dataclass(mod)
+    mod = convert_typing_final(mod)
     mod = convert_match_statement(mod)
     mod = convert_union(mod)
     return mod.code
