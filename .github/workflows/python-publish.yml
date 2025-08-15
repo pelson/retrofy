@@ -13,6 +13,7 @@ jobs:
     uses: ./.github/workflows/python-test.yml
 
   pypi-publish:
+    needs: build-and-test
     runs-on: ubuntu-latest
 
     permissions:
@@ -29,8 +30,6 @@ jobs:
         with:
           name: dist
           path: dist/
-          run-id: ${{ github.event.workflow_run.id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
