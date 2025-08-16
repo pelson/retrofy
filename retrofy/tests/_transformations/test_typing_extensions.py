@@ -476,19 +476,114 @@ def test_final_with_other_features_v2():
     import typing
 
     if typing.TYPE_CHECKING:
+        if sys.version_info < (3, 8):
+            import typing_extensions
+            typing.final = typing_extensions.final
+        if sys.version_info < (3, 10):
+            import typing_extensions
+            typing.get_args = typing_extensions.get_args
 
         if sys.version_info >= (3, 8):
             from typing import final
         else:
             from typing_extensions import final
 
+        @final
+        @typing.final
+        class MyClass:
+            pass
+
+        def check_type(tp):
+            return typing.get_args(tp)
+    """)
+
+    result = transform_typing_extensions(source)
+    assert result == expected
+
+
+def test_final_with_other_features_v3():
+    source = textwrap.dedent("""
+    if False:
+        import typing
+        bar = typing.final
+
+        from typing import final
+
+        @final
+        @typing.final
+        class MyClass:
+            pass
+
+        def check_type(tp):
+            return typing.get_args(tp)
+    """)
+
+    expected = textwrap.dedent("""
+    import sys
+    if False:
+        import typing
         if sys.version_info < (3, 8):
             import typing_extensions
             typing.final = typing_extensions.final
-
         if sys.version_info < (3, 10):
             import typing_extensions
             typing.get_args = typing_extensions.get_args
+        bar = typing.final
+
+        if sys.version_info >= (3, 8):
+            from typing import final
+        else:
+            from typing_extensions import final
+
+        @final
+        @typing.final
+        class MyClass:
+            pass
+
+        def check_type(tp):
+            return typing.get_args(tp)
+    """)
+
+    result = transform_typing_extensions(source)
+    assert result == expected
+
+
+def test_final_with_other_features_v4():
+    source = textwrap.dedent("""
+    if False:
+        import typing
+        final = 1
+        assert final == 1
+        from typing import final
+        assert final != 1
+
+        @final
+        @typing.final
+        class MyClass:
+            pass
+
+        def check_type(tp):
+            return typing.get_args(tp)
+    """)
+
+    expected = textwrap.dedent("""
+    import sys
+    if False:
+        import typing
+        if sys.version_info < (3, 8):
+            import typing_extensions
+            typing.final = typing_extensions.final
+        if sys.version_info < (3, 10):
+            import typing_extensions
+            typing.get_args = typing_extensions.get_args
+        final = 1
+        assert final == 1
+
+        if sys.version_info >= (3, 8):
+            from typing import final
+        else:
+            from typing_extensions import final
+        assert final != 1
 
         @final
         @typing.final
@@ -504,6 +599,30 @@ def test_final_with_other_features_v2():
     #  Either this is a good thing, in which case we should stop using dedent in our
     #  tests, or we don't produce such lines.
     result = textwrap.dedent(result)
+    assert result == expected
+
+
+@pytest.mark.xfail(strict=True)
+def test_already_in_block():
+    source = textwrap.dedent("""
+    import sys
+    import typing
+    if sys.version_info < (3, 8):
+        if sys.version_info < (3, 8):
+            import typing_extensions
+            typing.final = typing_extensions.final
+
+    @typing.final
+    class MyClass:
+        pass
+
+    """)
+
+    expected = textwrap.dedent("""
+
+    """)
+
+    result = transform_typing_extensions(source)
     assert result == expected
 
 
@@ -561,8 +680,7 @@ def test_final_duplicated_import_in_type_checking():
     assert result == expected
 
 
-@pytest.mark.xfail(strict=True)
-def test_final_with_optimisations():
+def test_final_scoping_rules_0():
     source = textwrap.dedent("""
     from __future__ import annotations
     import typing
@@ -570,18 +688,101 @@ def test_final_with_optimisations():
     if typing.TYPE_CHECKING:
         f = typing.get_args
     """)
-
-    # Note that if the usage of typing.get_args was within a TYPE_CHECKING block, so too
-    # should be the assignment.
     expected = textwrap.dedent("""
     from __future__ import annotations
+    import sys
     import typing
-    if typing.TYPE_CHECKING and sys.version_info < (3, 10):
+
+    if typing.TYPE_CHECKING:
+        if sys.version_info < (3, 10):
+            import typing_extensions
+            typing.get_args = typing_extensions.get_args
+        f = typing.get_args
+    """)
+
+    result = transform_typing_extensions(source)
+    assert result == expected
+
+
+def test_final_scoping_rules_1():
+    source = textwrap.dedent("""
+    from __future__ import annotations
+    import typing
+
+    if typing.TYPE_CHECKING:
+        f = typing.get_args
+
+    if 1 == 2:
+        with typing.get_args:
+            pass
+    """)
+    expected = textwrap.dedent("""
+    from __future__ import annotations
+    import sys
+    import typing
+
+    if sys.version_info < (3, 10):
         import typing_extensions
         typing.get_args = typing_extensions.get_args
 
     if typing.TYPE_CHECKING:
         f = typing.get_args
+
+    if 1 == 2:
+        with typing.get_args:
+            pass
+    """)
+
+    result = transform_typing_extensions(source)
+    assert result == expected
+
+
+def test_final_scoping_rules_2():
+    source = textwrap.dedent("""
+    from __future__ import annotations
+    import typing
+
+    if typing.TYPE_CHECKING:
+        f = typing.get_args
+
+    bar = typing.get_args
+    """)
+    expected = textwrap.dedent("""
+    from __future__ import annotations
+    import sys
+    import typing
+
+    if sys.version_info < (3, 10):
+        import typing_extensions
+        typing.get_args = typing_extensions.get_args
+
+    if typing.TYPE_CHECKING:
+        f = typing.get_args
+
+    bar = typing.get_args
+    """)
+
+    result = transform_typing_extensions(source)
+    assert result == expected
+
+
+def test_final_scoping_rules_4():
+    source = textwrap.dedent("""
+    import typing
+
+    def foo(bar: typing.get_args) -> None:
+        pass
+    """)
+    expected = textwrap.dedent("""
+    import sys
+    import typing
+
+    if sys.version_info < (3, 10):
+        import typing_extensions
+        typing.get_args = typing_extensions.get_args
+
+    def foo(bar: typing.get_args) -> None:
+        pass
     """)
 
     result = transform_typing_extensions(source)
