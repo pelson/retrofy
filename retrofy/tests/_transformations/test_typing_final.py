@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 import libcst as cst
 
-from retrofy._transformations.typing_final import TypingFinalTransformer
+from retrofy._transformations.typing_extensions import transform_typing_extensions
 
 
 def execute_code_with_results(code: str) -> Dict[str, Any]:
@@ -24,9 +24,10 @@ def execute_code_with_results(code: str) -> Dict[str, Any]:
 def transform_typing_final(source_code: str) -> str:
     """Apply typing.final transformation to source code."""
     module = cst.parse_module(source_code)
-    transformer = TypingFinalTransformer()
-    transformed_module = module.visit(transformer)
-    return transformed_module.code
+    return transform_typing_extensions(module.code)
+    # transformer = TypingFinalTransformer()
+    # transformed_module = module.visit(transformer)
+    # return transformed_module.code
 
 
 def test_typing_final_simple():
@@ -46,7 +47,7 @@ def test_typing_final_simple():
     if sys.version_info >= (3, 8):
         from typing import final
     else:
-        final = lambda cls: cls
+        from typing_extensions import final
 
     @final
     class MyClass:
@@ -86,12 +87,11 @@ def test_typing_final_from_typing():
     import sys
     import typing
 
-    if sys.version_info >= (3, 8):
-        from typing import final as __typing_final
-    else:
-        __typing_final = lambda cls: cls
+    if sys.version_info < (3, 8):
+        import typing_extensions
+        typing.final = typing_extensions.final
 
-    @__typing_final
+    @typing.final
     class MyClass:
         pass
     """)
@@ -125,7 +125,7 @@ def test_typing_final_multiple_classes():
     if sys.version_info >= (3, 8):
         from typing import final
     else:
-        final = lambda cls: cls
+        from typing_extensions import final
 
     @final
     class ClassA:
@@ -163,7 +163,7 @@ def test_typing_final_with_existing_sys_import():
     if sys.version_info >= (3, 8):
         from typing import final
     else:
-        final = lambda cls: cls
+        from typing_extensions import final
 
     @final
     class MyClass:
@@ -194,7 +194,7 @@ def test_typing_final_with_future_import():
     if sys.version_info >= (3, 8):
         from typing import final
     else:
-        final = lambda cls: cls
+        from typing_extensions import final
 
     @final
     class MyClass:
@@ -223,7 +223,7 @@ def test_typing_final_manual_alias():
     if sys.version_info >= (3, 8):
         from typing import final
     else:
-        final = lambda cls: cls
+        from typing_extensions import final
 
     foo = final
 
@@ -279,7 +279,7 @@ def test_typing_final_alias():
     if sys.version_info >= (3, 8):
         from typing import final as fi_na_l
     else:
-        fi_na_l = lambda cls: cls
+        from typing_extensions import final as fi_na_l
 
     @fi_na_l
     class MyClass:
@@ -312,7 +312,7 @@ def test_typing_final_with_existing_imports_and_sys():
     if sys.version_info >= (3, 8):
         from typing import final
     else:
-        final = lambda cls: cls
+        from typing_extensions import final
 
     @final
     class MyClass:
@@ -352,7 +352,7 @@ def test_typing_final_mixed_decorators():
     if sys.version_info >= (3, 8):
         from typing import final
     else:
-        final = lambda cls: cls
+        from typing_extensions import final
 
     @final
     @property
@@ -389,7 +389,7 @@ if sys.version_info >= (3, 8):
         if sys.version_info >= (3, 8):
             from typing import final
         else:
-            final = lambda cls: cls
+            from typing_extensions import final
 
         @final
         class MyClass:
