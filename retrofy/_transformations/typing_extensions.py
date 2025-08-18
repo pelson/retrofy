@@ -62,6 +62,10 @@ class TypingAnalysisVisitor(cst.CSTVisitor):
         self.usages: List[UsageInfo] = []
         self.import_statements: List[ImportStatementInfo] = []
         self._scope_stack: List[cst.CSTNode] = []  # Track nested scopes
+        self._typing_import_scopes: Dict[
+            Tuple[cst.CSTNode, ...],
+            bool,
+        ] = {}  # Track where 'import typing' occurs
 
     def visit_Module(self, node: cst.Module) -> None:
         """Scan imports at module level."""
@@ -77,6 +81,26 @@ class TypingAnalysisVisitor(cst.CSTVisitor):
         """Clean up scope stack."""
         if self._scope_stack and self._scope_stack[-1] is original_node:
             self._scope_stack.pop()
+
+    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
+        """Track function scopes."""
+        self._scope_stack.append(node)
+        return True
+
+    def leave_FunctionDef(self, original_node: cst.FunctionDef) -> None:
+        """Clean up function scope stack."""
+        if self._scope_stack and self._scope_stack[-1] is original_node:
+            self._scope_stack.pop()
+
+    def visit_Import(self, node: cst.Import) -> bool:
+        """Track 'import typing' statements and their scopes."""
+        for alias in node.names:
+            if isinstance(alias, cst.ImportAlias) and isinstance(alias.name, cst.Name):
+                if alias.name.value == "typing":
+                    # Record where this 'import typing' statement occurs
+                    current_scope = tuple(self._scope_stack)
+                    self._typing_import_scopes[current_scope] = True
+        return True
 
     def visit_ImportFrom(self, node: cst.ImportFrom) -> bool:
         """Detect typing imports that need transformation."""
@@ -97,57 +121,10 @@ class TypingAnalysisVisitor(cst.CSTVisitor):
                 self._process_typing_import(node, "from_typing")
         return True
 
-    def visit_Subscript(self, node: cst.Subscript) -> bool:
-        """Detect typing.Feature[...] usage."""
-        self._check_typing_dot_usage(node.value)
+    def visit_Attribute(self, node: cst.Attribute) -> bool:
+        """Detect all typing.feature usage regardless of context."""
+        self._check_typing_dot_usage(node)
         return True
-
-    def visit_Call(self, node: cst.Call) -> bool:
-        """Detect typing.feature() function calls."""
-        self._check_typing_dot_usage(node.func)
-        return True
-
-    def visit_Decorator(self, node: cst.Decorator) -> bool:
-        """Detect @typing.feature decorator usage."""
-        self._check_typing_dot_usage(node.decorator)
-        return True
-
-    def visit_Assign(self, node: cst.Assign) -> bool:
-        """Detect assignments like x = typing.feature."""
-        self._check_typing_dot_usage(node.value)
-        return True
-
-    def visit_With(self, node: cst.With) -> bool:
-        """Detect context managers like with typing.feature."""
-        for item in node.items:
-            self._check_typing_dot_usage(item.item)
-        return True
-
-    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
-        """Detect typing usage in function annotations."""
-        # Check parameters
-        for param in node.params.params:
-            if param.annotation:
-                self._check_typing_dot_usage_in_annotation(param.annotation.annotation)
-
-        # Check return annotation
-        if node.returns:
-            self._check_typing_dot_usage_in_annotation(node.returns.annotation)
-
-        return True
-
-    def _check_typing_dot_usage_in_annotation(self, node: cst.BaseExpression) -> None:
-        """Recursively check for typing.feature usage in annotations."""
-        if isinstance(node, cst.Attribute):
-            self._check_typing_dot_usage(node)
-        elif isinstance(node, cst.Subscript):
-            self._check_typing_dot_usage_in_annotation(node.value)
-            for element in node.slice:
-                if isinstance(element, cst.SubscriptElement):
-                    self._check_typing_dot_usage_in_annotation(element.slice.value)
-        elif isinstance(node, cst.BinaryOperation):
-            self._check_typing_dot_usage_in_annotation(node.left)
-            self._check_typing_dot_usage_in_annotation(node.right)
 
     def _detect_from_typing_imports(self) -> None:
         """Detect module-level from typing imports that need transformation."""
@@ -254,6 +231,23 @@ class TypingExtensionsTransformer(cst.CSTTransformer):
             set()
         )
 
+    def _find_typing_import_scope(self) -> Tuple[cst.CSTNode, ...]:
+        """Find the scope where 'import typing' is located.
+
+        Returns the deepest scope that has an 'import typing' statement,
+        or module level if no nested 'import typing' is found.
+        """
+        # Check all tracked typing import scopes, return the deepest one
+        deepest_scope: Tuple[cst.CSTNode, ...] = ()
+        max_depth = -1
+
+        for scope_path in self.analysis._typing_import_scopes.keys():
+            if len(scope_path) > max_depth:
+                max_depth = len(scope_path)
+                deepest_scope = scope_path
+
+        return deepest_scope
+
     def _plan_typing_dot_assignments(
         self,
     ) -> Dict[Tuple[cst.CSTNode, ...], Dict[str, TypingFeature]]:
@@ -266,17 +260,42 @@ class TypingExtensionsTransformer(cst.CSTTransformer):
         # Find all typing_dot usages that need assignment patches
         typing_dot_usages = [u for u in self.usages if u.import_style == "typing_dot"]
 
-        # Group by feature and determine optimal placement
+        if not typing_dot_usages:
+            return dict(assignments)
+
+        # Strategy: Find the optimal placement scope by considering all usages together.
+        # This ensures that features used in the same logical scope get placed together.
+
+        # Find the common scope that can serve all typing_dot usages
+        all_scope_paths = [usage.scope_path for usage in typing_dot_usages]
+        common_scope = self._find_common_scope_path(all_scope_paths)
+
+        # Check if we should use the common scope or the import typing scope
+        import_typing_scope = self._find_typing_import_scope()
+
+        # Only optimize by placing in nested scope for specific cases.
+        # For most cases, use import typing scope for broad accessibility.
+        # The main optimization case is when all usages are inside a single IF block
+        # (like TYPE_CHECKING) where it makes sense to scope the assignments there.
+        if (
+            common_scope  # There is a common nested scope
+            and len(common_scope)
+            > len(import_typing_scope)  # It's deeper than import typing scope
+            and len(common_scope)
+            == 1  # Only one level deep (direct child of import scope)
+            and isinstance(common_scope[0], cst.If)
+        ):  # And it's an IF statement
+            optimal_scope = common_scope
+        else:
+            # Default to import typing scope for broad accessibility
+            optimal_scope = import_typing_scope
+
+        # Group features by their names and place them all at the optimal scope
         feature_groups = defaultdict(list)
         for usage in typing_dot_usages:
             feature_groups[usage.feature.name].append(usage)
 
         for feature_name, usages in feature_groups.items():
-            # For typing_dot usage, we always need assignment patches
-            # The from_typing imports will be handled separately by in-place replacement
-
-            # Need assignment patch - place at optimal scope
-            optimal_scope = self._get_optimal_scope_for_features(usages)
             assignments[optimal_scope][feature_name] = usages[0].feature
 
         return dict(assignments)
@@ -287,27 +306,57 @@ class TypingExtensionsTransformer(cst.CSTTransformer):
     ) -> Tuple[cst.CSTNode, ...]:
         """Determine the optimal scope to place version checks.
 
-        If features are used both at module level and in nested scopes,
-        place the version check at module level. Otherwise, place it in
-        the most specific common scope.
+        For typing_dot usages, prefer the deepest common scope of all usages if they're all nested.
+        For from_typing usages, place at the scope where the import occurs.
         """
         if not features:
             return ()
+
+        # For typing_dot usages, we can optimize placement
+        if all(usage.import_style == "typing_dot" for usage in features):
+            # If all usages are within the same nested scope, place assignments there
+            # instead of at the import typing level
+            if features:
+                # Check if all usages share a common nested scope
+                common_scope = self._find_common_scope_path(
+                    [f.scope_path for f in features],
+                )
+
+                # If we have a common nested scope, use it
+                if common_scope:
+                    return common_scope
+
+            # Otherwise fall back to placing at import typing scope
+            return self._find_typing_import_scope()
 
         # If any usage is at module level, place at module level
         if any(not usage.scope_path for usage in features):
             return ()
 
-        # Find the common scope prefix
+        # Find the common scope prefix for from_typing usages
         if len(features) == 1:
             return features[0].scope_path
 
         # Find common prefix of all scope paths
+        return self._find_common_scope_path([f.scope_path for f in features])
+
+    def _find_common_scope_path(
+        self,
+        scope_paths: List[Tuple[cst.CSTNode, ...]],
+    ) -> Tuple[cst.CSTNode, ...]:
+        """Find the common scope prefix for a list of scope paths."""
+        if not scope_paths:
+            return ()
+
+        if len(scope_paths) == 1:
+            return scope_paths[0]
+
+        # Find common prefix of all scope paths
         common_scope: tuple[typing.Any, ...] = ()
-        min_depth = min(len(f.scope_path) for f in features)
+        min_depth = min(len(path) for path in scope_paths)
         for i in range(min_depth):
-            if all(f.scope_path[i] is features[0].scope_path[i] for f in features):
-                common_scope = common_scope + (features[0].scope_path[i],)
+            if all(path[i] is scope_paths[0][i] for path in scope_paths):
+                common_scope = common_scope + (scope_paths[0][i],)
             else:
                 break
 
@@ -379,8 +428,8 @@ class TypingExtensionsTransformer(cst.CSTTransformer):
                     self._applied_assignments.add(assignment_key)  # type: ignore[arg-type]
                     all_transformations.append((version, "assignment", features))  # type: ignore[arg-type]
 
-        # Sort all transformations by version, with conditional imports before assignments within same version
-        all_transformations.sort(key=lambda x: (x[0], x[1] == "assignment"))
+        # Sort all transformations by type first (assignments, then conditional imports), then by version
+        all_transformations.sort(key=lambda x: (x[1] == "conditional_import", x[0]))
 
         for version, transformation_type, data in all_transformations:  # type: ignore[arg-type]
             if transformation_type == "conditional_import":
@@ -479,7 +528,7 @@ class TypingExtensionsTransformer(cst.CSTTransformer):
                 current_names = self._extract_import_names(import_node)
 
                 # Find all transformable features in this import
-                transformable_features = []
+                transformable_features: List[cst.CSTNode] = []
                 for import_info in self.import_statements:
                     if import_info.replacement_strategy == "in_place":
                         # Only handle nested imports in leave_SimpleStatementLine
@@ -496,10 +545,26 @@ class TypingExtensionsTransformer(cst.CSTTransformer):
                     if current_names == transformable_names:
                         # All imports in this statement are transformable - replace entire statement
                         # Create a synthetic import_info for this transformation
+                        # Use the actual scope path from one of the matching import_info objects
+                        actual_scope_path: Tuple[cst.CSTNode, ...] = (
+                            transformable_features[0] if transformable_features else ()
+                        )
+                        for import_info in self.import_statements:
+                            if (
+                                import_info.replacement_strategy == "in_place"
+                                and import_info.scope_path
+                            ):
+                                for feature in import_info.features:
+                                    if feature.name in current_names:
+                                        actual_scope_path = import_info.scope_path
+                                        break
+                                if actual_scope_path != ():
+                                    break
+
                         synthetic_import_info = ImportStatementInfo(
                             import_node=import_node,
                             features=transformable_features,
-                            scope_path=(),
+                            scope_path=actual_scope_path,
                             replacement_strategy="in_place",
                         )
 
