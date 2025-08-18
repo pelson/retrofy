@@ -58,6 +58,7 @@ def test_literal_from_typing():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_literal_typing_dot():
@@ -84,6 +85,7 @@ def test_literal_typing_dot():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_literal_with_alias():
@@ -110,6 +112,7 @@ def test_literal_with_alias():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_get_args_from_typing():
@@ -137,6 +140,7 @@ def test_get_args_from_typing():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_get_args_typing_dot():
@@ -163,6 +167,7 @@ def test_get_args_typing_dot():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_get_origin_from_typing():
@@ -190,6 +195,7 @@ def test_get_origin_from_typing():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_get_origin_typing_dot():
@@ -216,6 +222,7 @@ def test_get_origin_typing_dot():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_multiple_features_combined():
@@ -244,7 +251,7 @@ def test_multiple_features_combined():
     else:
         from typing_extensions import get_args, get_origin
 
-    def process_data(mode: Literal["read", "write"], tp: Union[str, int]) -> str:
+    def process_data(mode: Literal["read", "write"], tp: Union[str, int]):
         origin = get_origin(tp)
         args = get_args(tp)
         return f"Mode: {mode}, Origin: {origin}, Args: {args}"
@@ -252,6 +259,7 @@ def test_multiple_features_combined():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_mixed_import_styles():
@@ -294,6 +302,7 @@ def test_mixed_import_styles():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_with_future_annotations():
@@ -327,6 +336,7 @@ def test_with_future_annotations():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_multiple_typing_dot_features_same_version():
@@ -358,6 +368,7 @@ def test_multiple_typing_dot_features_same_version():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_final_from_typing():
@@ -386,6 +397,7 @@ def test_final_from_typing():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_final_typing_dot():
@@ -414,6 +426,7 @@ def test_final_typing_dot():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_final_with_other_features():
@@ -460,6 +473,7 @@ def test_final_with_other_features():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_final_with_other_features_v2():
@@ -505,6 +519,7 @@ def test_final_with_other_features_v2():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_final_with_other_features_v3():
@@ -551,6 +566,7 @@ def test_final_with_other_features_v3():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_final_with_other_features_v4():
@@ -599,22 +615,17 @@ def test_final_with_other_features_v4():
     """)
 
     result = transform_typing_extensions(source)
-    # TODO: Fix me - I have to do this because we are generating whitespace on empty lines.
-    #  Either this is a good thing, in which case we should stop using dedent in our
-    #  tests, or we don't produce such lines.
-    result = textwrap.dedent(result)
     assert result == expected
 
 
-@pytest.mark.xfail(strict=True)
 def test_already_in_block():
+    # If we already have appropriate
     source = textwrap.dedent("""
     import sys
     import typing
     if sys.version_info < (3, 8):
-        if sys.version_info < (3, 8):
-            import typing_extensions
-            typing.final = typing_extensions.final
+        import typing_extensions
+        typing.final = typing_extensions.final
 
     @typing.final
     class MyClass:
@@ -622,12 +633,46 @@ def test_already_in_block():
 
     """)
 
-    expected = textwrap.dedent("""
-
-    """)
-
+    expected = source
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
+
+
+def test_not_quite_right_version_check():
+    # If we already have appropriate checking, don't repeat ourselves.
+    source = textwrap.dedent("""
+    import sys
+    import typing
+
+    if sys.version_info < (3, 9):  # Note it should be 3.8.
+        import typing_extensions
+        typing.final = typing_extensions.final
+
+    @typing.final
+    class MyClass:
+        pass
+    """)
+
+    expected = textwrap.dedent("""
+    import sys
+    import typing
+
+    if sys.version_info < (3, 8):
+        import typing_extensions
+        typing.final = typing_extensions.final
+
+    if sys.version_info < (3, 9):  # Note it should be 3.8.
+        import typing_extensions
+        typing.final = typing_extensions.final
+
+    @typing.final
+    class MyClass:
+        pass
+    """)
+    result = transform_typing_extensions(source)
+    assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 @pytest.mark.xfail(strict=True)
@@ -636,6 +681,8 @@ def test_final_duplicated_import_in_type_checking():
     import typing
 
     from typing import final
+
+    final = lambda x: x
 
     if typing.TYPE_CHECKING:
         from typing import final
@@ -652,6 +699,7 @@ def test_final_duplicated_import_in_type_checking():
     expected = textwrap.dedent("""
     import sys
     import typing
+
     if sys.version_info < (3, 8):
         import typing_extensions
         typing.final = typing_extensions.final
@@ -664,6 +712,8 @@ def test_final_duplicated_import_in_type_checking():
         from typing import final
     else:
         from typing_extensions import final
+
+    final = lambda x: x
 
     if typing.TYPE_CHECKING:
         if sys.version_info >= (3, 8):
@@ -682,6 +732,7 @@ def test_final_duplicated_import_in_type_checking():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_final_scoping_rules_0():
@@ -706,6 +757,7 @@ def test_final_scoping_rules_0():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_final_scoping_rules_1():
@@ -739,6 +791,7 @@ def test_final_scoping_rules_1():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_final_scoping_rules_2():
@@ -768,6 +821,7 @@ def test_final_scoping_rules_2():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_final_scoping_rules_4():
@@ -791,6 +845,7 @@ def test_final_scoping_rules_4():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_no_transformation_needed():
@@ -814,6 +869,7 @@ def test_no_transformation_needed():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_while_loop_context():
@@ -853,6 +909,7 @@ def test_while_loop_context():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_with_statement_context():
@@ -890,6 +947,7 @@ def test_with_statement_context():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_for_loop_context():
@@ -929,6 +987,7 @@ def test_for_loop_context():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_try_except_context():
@@ -975,6 +1034,7 @@ def test_try_except_context():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_nested_functions_context():
@@ -1029,6 +1089,7 @@ def test_nested_functions_context():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_class_methods_context():
@@ -1099,6 +1160,7 @@ def test_class_methods_context():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_lambda_functions_context():
@@ -1150,6 +1212,7 @@ def test_lambda_functions_context():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_match_statement_context():
@@ -1196,6 +1259,7 @@ def test_match_statement_context():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_for_else_context():
@@ -1246,6 +1310,7 @@ def test_for_else_context():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_while_else_context():
@@ -1300,6 +1365,7 @@ def test_while_else_context():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_try_else_context():
@@ -1364,6 +1430,7 @@ def test_try_else_context():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_comprehensions_context():
@@ -1418,6 +1485,7 @@ def test_comprehensions_context():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_async_await_context():
@@ -1472,6 +1540,7 @@ def test_async_await_context():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_decorators_context():
@@ -1541,6 +1610,7 @@ def test_decorators_context():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_generator_conditions():
@@ -1583,6 +1653,7 @@ def test_generator_conditions():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_if_conditions():
@@ -1628,6 +1699,7 @@ def test_if_conditions():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_exception_types():
@@ -1665,6 +1737,7 @@ def test_exception_types():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_function_defaults():
@@ -1712,6 +1785,7 @@ def test_function_defaults():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
     # Test execution
     results = execute_code_with_results(result)
@@ -1758,6 +1832,7 @@ def test_class_inheritance():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_with_context_managers():
@@ -1792,6 +1867,7 @@ def test_with_context_managers():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_assert_conditions():
@@ -1827,6 +1903,7 @@ def test_assert_conditions():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_yield_expressions():
@@ -1862,6 +1939,7 @@ def test_yield_expressions():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_raise_statements():
@@ -1894,6 +1972,7 @@ def test_raise_statements():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_ternary_expressions():
@@ -1927,6 +2006,7 @@ def test_ternary_expressions():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_slice_expressions():
@@ -1962,6 +2042,7 @@ def test_slice_expressions():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_loop_targets():
@@ -2001,6 +2082,7 @@ def test_loop_targets():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)
 
 
 def test_invalid_runtime_code():
@@ -2022,3 +2104,4 @@ def test_invalid_runtime_code():
 
     result = transform_typing_extensions(source)
     assert result == expected
+    assert expected == transform_typing_extensions(expected)

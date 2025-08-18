@@ -66,6 +66,9 @@ class TypingAnalysisVisitor(cst.CSTVisitor):
             Tuple[cst.CSTNode, ...],
             bool,
         ] = {}  # Track where 'import typing' occurs
+        self._existing_version_checks: Set[
+            Tuple[Tuple[cst.CSTNode, ...], Tuple[int, int], str]
+        ] = set()  # Track existing version checks: (scope_path, version, type)
 
     def visit_Module(self, node: cst.Module) -> None:
         """Scan imports at module level."""
@@ -73,8 +76,12 @@ class TypingAnalysisVisitor(cst.CSTVisitor):
         self._detect_from_typing_imports()
 
     def visit_If(self, node: cst.If) -> bool:
-        """Track nested scopes."""
+        """Track nested scopes and detect existing version checks."""
         self._scope_stack.append(node)
+
+        # Check if this is an existing version check we should avoid duplicating
+        self._detect_existing_version_check(node)
+
         return True
 
     def leave_If(self, original_node: cst.If) -> None:
@@ -212,6 +219,104 @@ class TypingAnalysisVisitor(cst.CSTVisitor):
                     )
                     self.usages.append(usage)
 
+    def _detect_existing_version_check(self, node: cst.If) -> None:
+        """Detect if this If node is an existing typing_extensions version check."""
+        # Check if this is a sys.version_info comparison
+        if not self._is_version_check(node.test):
+            return
+
+        # Check if it contains typing_extensions assignments or imports
+        version_info = self._extract_version_info(node.test)
+        if not version_info:
+            return
+
+        check_type = self._classify_version_check(node)
+        if check_type:
+            current_scope = tuple(self._scope_stack[:-1])  # Exclude the current If node
+            self._existing_version_checks.add((current_scope, version_info, check_type))
+
+    def _is_version_check(self, test_node: cst.BaseExpression) -> bool:
+        """Check if the test is a sys.version_info comparison."""
+        if not isinstance(test_node, cst.Comparison):
+            return False
+
+        # Check if left side is sys.version_info
+        if not (
+            isinstance(test_node.left, cst.Attribute)
+            and isinstance(test_node.left.value, cst.Name)
+            and test_node.left.value.value == "sys"
+            and test_node.left.attr.value == "version_info"
+        ):
+            return False
+
+        return True
+
+    def _extract_version_info(
+        self,
+        test_node: cst.BaseExpression,
+    ) -> Tuple[int, int] | None:
+        """Extract the version tuple from a version comparison."""
+        if not isinstance(test_node, cst.Comparison):
+            return None
+
+        if len(test_node.comparisons) != 1:
+            return None
+
+        comparison = test_node.comparisons[0]
+        if not isinstance(comparison.comparator, cst.Tuple):
+            return None
+
+        if len(comparison.comparator.elements) != 2:
+            return None
+
+        try:
+            major = int(comparison.comparator.elements[0].value.value)  # type: ignore[attr-defined]
+            minor = int(comparison.comparator.elements[1].value.value)  # type: ignore[attr-defined]
+            return (major, minor)
+        except (AttributeError, ValueError):
+            return None
+
+    def _classify_version_check(self, node: cst.If) -> str | None:
+        """Classify what type of version check this is (assignment or conditional_import)."""
+        # Look at the body to determine the type
+        for stmt in node.body.body:
+            if isinstance(stmt, cst.SimpleStatementLine):
+                for substmt in stmt.body:
+                    if isinstance(substmt, cst.Assign):
+                        # Check if it's a typing.X = typing_extensions.X assignment
+                        if (
+                            isinstance(substmt.value, cst.Attribute)
+                            and isinstance(substmt.value.value, cst.Name)
+                            and substmt.value.value.value == "typing_extensions"
+                        ):
+                            return "assignment"
+                    elif isinstance(substmt, cst.ImportFrom):
+                        # Check if it's importing from typing or typing_extensions
+                        if isinstance(
+                            substmt.module,
+                            cst.Name,
+                        ) and substmt.module.value in ["typing", "typing_extensions"]:
+                            return "conditional_import"
+
+        # Check the else clause too
+        if hasattr(node, "orelse") and node.orelse:
+            if isinstance(node.orelse, cst.Else):
+                for stmt in node.orelse.body.body:
+                    if isinstance(stmt, cst.SimpleStatementLine):
+                        for substmt in stmt.body:
+                            if isinstance(substmt, cst.ImportFrom):
+                                # Check if it's importing from typing or typing_extensions
+                                if isinstance(
+                                    substmt.module,
+                                    cst.Name,
+                                ) and substmt.module.value in [
+                                    "typing",
+                                    "typing_extensions",
+                                ]:
+                                    return "conditional_import"
+
+        return None
+
 
 class TypingExtensionsTransformer(cst.CSTTransformer):
     """Second pass: Transform typing features to use typing_extensions for compatibility."""
@@ -221,6 +326,7 @@ class TypingExtensionsTransformer(cst.CSTTransformer):
         self.import_manager = analysis.import_manager
         self.usages = analysis.usages
         self.import_statements = analysis.import_statements
+        self.existing_version_checks = analysis._existing_version_checks
 
         # Pre-compute the transformation strategy
         self.typing_dot_assignments = self._plan_typing_dot_assignments()
@@ -230,6 +336,9 @@ class TypingExtensionsTransformer(cst.CSTTransformer):
         self._fully_replaced_imports: Set[Tuple[Tuple[cst.CSTNode, ...], frozenset]] = (
             set()
         )
+
+        # Track current scope during transformation
+        self._current_scope_stack: List[cst.CSTNode] = []
 
     def _find_typing_import_scope(self) -> Tuple[cst.CSTNode, ...]:
         """Find the scope where 'import typing' is located.
@@ -362,6 +471,15 @@ class TypingExtensionsTransformer(cst.CSTTransformer):
 
         return common_scope
 
+    def _version_check_exists(
+        self,
+        scope_path: Tuple[cst.CSTNode, ...],
+        version: Tuple[int, int],
+        check_type: str,
+    ) -> bool:
+        """Check if a version check already exists for the given scope, version, and type."""
+        return (scope_path, version, check_type) in self.existing_version_checks
+
     def leave_Module(
         self,
         original_node: cst.Module,
@@ -414,7 +532,9 @@ class TypingExtensionsTransformer(cst.CSTTransformer):
                 from_typing_groups[usage.feature.min_version].append(usage)
 
             for version, usages in from_typing_groups.items():
-                all_transformations.append((version, "conditional_import", usages))
+                # Skip if this conditional import already exists
+                if not self._version_check_exists((), version, "conditional_import"):
+                    all_transformations.append((version, "conditional_import", usages))
 
         # 2. Collect assignment patches for typing_dot usages
         if module_level_assignments:
@@ -424,7 +544,11 @@ class TypingExtensionsTransformer(cst.CSTTransformer):
 
             for version, features in version_groups.items():
                 assignment_key = ((), version)
-                if assignment_key not in self._applied_assignments:
+                # Skip if this assignment already exists or we've already applied it
+                if (
+                    assignment_key not in self._applied_assignments
+                    and not self._version_check_exists((), version, "assignment")
+                ):
                     self._applied_assignments.add(assignment_key)  # type: ignore[arg-type]
                     all_transformations.append((version, "assignment", features))  # type: ignore[arg-type]
 
@@ -491,7 +615,11 @@ class TypingExtensionsTransformer(cst.CSTTransformer):
             features = version_groups[version]
             assignment_key = (current_scope, version)
 
-            if assignment_key not in self._applied_assignments:
+            # Skip if this assignment already exists or we've already applied it
+            if (
+                assignment_key not in self._applied_assignments
+                and not self._version_check_exists(current_scope, version, "assignment")
+            ):
                 self._applied_assignments.add(assignment_key)  # type: ignore[arg-type]
 
                 version_check = self._create_assignment_version_check_for_features(
@@ -507,6 +635,24 @@ class TypingExtensionsTransformer(cst.CSTTransformer):
             return updated_node.with_changes(body=new_body_block)
 
         return updated_node
+
+    def visit_If(self, node: cst.If) -> None:
+        """Track If scopes during transformation."""
+        self._current_scope_stack.append(node)
+
+    def visit_FunctionDef(self, node: cst.FunctionDef) -> None:
+        """Track function scopes during transformation."""
+        self._current_scope_stack.append(node)
+
+    def _is_inside_version_check(self) -> bool:
+        """Check if the current position is already inside a version check."""
+        # Look through the current scope stack to see if we're inside an if statement
+        # that looks like a version check
+        for scope_node in self._current_scope_stack:
+            if isinstance(scope_node, cst.If):
+                if self.analysis._is_version_check(scope_node.test):
+                    return True
+        return False
 
     def leave_SimpleStatementLine(
         self,
@@ -524,6 +670,10 @@ class TypingExtensionsTransformer(cst.CSTTransformer):
                 isinstance(import_node.module, cst.Name)
                 and import_node.module.value == "typing"
             ):
+                # Skip transformation if we're already inside a version check
+                if self._is_inside_version_check():
+                    return updated_node
+
                 # Check if this import contains any transformable features
                 current_names = self._extract_import_names(import_node)
 
@@ -568,12 +718,25 @@ class TypingExtensionsTransformer(cst.CSTTransformer):
                             replacement_strategy="in_place",
                         )
 
+                        # Only remove this import if it would be truly redundant
+                        # For TYPE_CHECKING blocks and other special cases, we should keep the import
+                        # since it might be needed after variable shadowing
+                        features_to_transform = transformable_features
+
                         # Track that we've fully replaced this import to avoid duplication
                         replacement_key = (
                             (),
-                            frozenset(f.name for f in transformable_features),
+                            frozenset(f.name for f in features_to_transform),
                         )
                         self._fully_replaced_imports.add(replacement_key)
+
+                        # Update synthetic_import_info with only the features we need to transform
+                        synthetic_import_info = ImportStatementInfo(
+                            import_node=import_node,
+                            features=features_to_transform,
+                            scope_path=actual_scope_path,
+                            replacement_strategy="in_place",
+                        )
 
                         return self._create_conditional_import_replacement(
                             synthetic_import_info,
