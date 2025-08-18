@@ -6,7 +6,7 @@ from ._transformations import (
     dataclass,
     match_statement,
     type_alias,
-    typing_final,
+    typing_extensions,
     walrus,
 )
 from ._transformations.import_utils import EnhancedImportManager
@@ -106,8 +106,8 @@ def convert_dataclass(module: cst.Module) -> cst.Module:
     return module.visit(dataclass.DataclassTransformer())
 
 
-def convert_typing_final(module: cst.Module) -> cst.Module:
-    return module.visit(typing_final.TypingFinalTransformer())
+def convert_typing_extensions(module: cst.Module) -> cst.Module:
+    return cst.parse_module(typing_extensions.transform_typing_extensions(module.code))
 
 
 def convert(code: str) -> str:
@@ -116,7 +116,7 @@ def convert(code: str) -> str:
     mod = convert_walrus_operator(mod)
     mod = convert_type_alias(mod)
     mod = convert_dataclass(mod)
-    mod = convert_typing_final(mod)
+    mod = convert_typing_extensions(mod)
     mod = convert_match_statement(mod)
     mod = convert_union(mod)
     return mod.code
