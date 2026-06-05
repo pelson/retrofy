@@ -5,6 +5,7 @@ import libcst as cst
 from ._transformations import (
     dataclass,
     match_statement,
+    pep810,
     type_alias,
     typing_extensions,
     walrus,
@@ -110,7 +111,14 @@ def convert_typing_extensions(module: cst.Module) -> cst.Module:
     return cst.parse_module(typing_extensions.transform_typing_extensions(module.code))
 
 
+def convert_lazy_imports(code: str) -> str:
+    return pep810.transform_lazy_imports(code)
+
+
 def convert(code: str) -> str:
+    # PEP 810 ``lazy`` syntax is not parseable by libcst, so the
+    # tokenize-based rewrite must run on the raw source first.
+    code = convert_lazy_imports(code)
     mod = cst.parse_module(code)
     mod = convert_sequence_subscript(mod)
     mod = convert_walrus_operator(mod)
