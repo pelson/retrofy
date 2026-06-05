@@ -83,6 +83,21 @@ jobs:
         cd not-the-source
         python -m pytest --pyargs retrofy -ssvv
 
+    - name: Build example-project (exercises the retrofy build rewrite)
+      run: |
+        python -m pip install build multistage-build
+        cd example-project
+        python -m build --no-isolation --wheel
+
+    - name: Install built example-project wheel
+      run: |
+        python -m pip install example-project/dist/*.whl
+
+    - name: Test example-project from isolation
+      run: |
+        cd not-the-source
+        python -m pytest --pyargs example_project -ssvv
+
   compatibility_test:
     strategy:
       matrix:
