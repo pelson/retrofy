@@ -127,9 +127,18 @@ def _format_lazy_from(stmt_src: str) -> _LazyStmt:
             attr = clause
             alias = clause
         bindings.append(alias)
-        lines.append(
-            f"{alias} = {_LAZY_FROM}({module!r}, {attr!r}, {alias!r})",
-        )
+        if module.startswith("."):
+            # Relative ``lazy from ... import`` needs the calling
+            # module's ``__package__`` so ``importlib.import_module``
+            # can resolve the relative target.
+            lines.append(
+                f"{alias} = {_LAZY_FROM}({module!r}, {attr!r}, {alias!r}, "
+                f"package=__package__)",
+            )
+        else:
+            lines.append(
+                f"{alias} = {_LAZY_FROM}({module!r}, {attr!r}, {alias!r})",
+            )
     return _LazyStmt(bindings=bindings, replacement="\n".join(lines))
 
 
@@ -142,6 +151,9 @@ def _is_statement_start(tokens: List[tokenize.TokenInfo], i: int) -> bool:
             tokenize.DEDENT,
             tokenize.ENCODING,
         ):
+            return True
+        # ``;`` separates simple statements on a single logical line.
+        if t == tokenize.OP and tokens[j].string == ";":
             return True
         if t in (tokenize.NL, tokenize.COMMENT):
             continue
@@ -230,7 +242,12 @@ def _strip_lazy_syntax(source: str) -> Tuple[str, List[str]]:
                     )
 
                 k = j
-                while k < n and tokens[k].type != tokenize.NEWLINE:
+                while k < n:
+                    t = tokens[k]
+                    if t.type == tokenize.NEWLINE:
+                        break
+                    if t.type == tokenize.OP and t.string == ";":
+                        break
                     k += 1
                 stmt_tokens = tokens[j:k]
                 stmt_src = _reconstruct_token_span(stmt_tokens)

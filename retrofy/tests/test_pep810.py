@@ -265,12 +265,12 @@ def test_module_docstring_stays_first() -> None:
     )
 
 
-@pytest.mark.xfail(
-    reason="tokenizer only catches the first `lazy` at statement-start; "
-    "trailing `lazy ...` after a `;` is folded into the first import body",
-    strict=True,
-)
 def test_semicolon_separated_lazy_statements() -> None:
+    # Multiple ``lazy`` statements separated by ``;`` on a single
+    # physical line. The rewriter treats ``;`` as a statement boundary
+    # both when looking for ``lazy`` at the start and when collecting
+    # the trailing tokens of the current ``lazy`` clause, so each
+    # ``lazy`` is rewritten independently.
     _assert_transform(
         """
         lazy import json; lazy import os
@@ -279,33 +279,33 @@ def test_semicolon_separated_lazy_statements() -> None:
         """,
         f"""
         {_RUNTIME_IMPORT}
-        json = _retrofy_lazy_import('json', 'json')
-        os = _retrofy_lazy_import('os', 'os')
+        json = _retrofy_lazy_import('json', 'json'); os = _retrofy_lazy_import('os', 'os')
 
         print(_retrofy_resolve(json), _retrofy_resolve(os))
         """,
     )
 
 
-@pytest.mark.xfail(
-    reason="relative `lazy from . import x` rewrites to "
-    "`_retrofy_lazy_from('.', 'x', 'x')` but the runtime never receives "
-    "the calling module's __package__, so the underlying import_module "
-    "call fails at reify time. The rewriter (or the runtime helper) "
-    "needs to capture __package__ at call time.",
-    strict=True,
-)
 def test_relative_lazy_from() -> None:
-    # We only check the *runtime-call shape* here: the third argument
-    # ought to communicate that this is a relative import so the helper
-    # can resolve it correctly.
-    src = _norm("lazy from . import sibling\n\nsibling.f()\n")
-    out = transform_lazy_imports(src)
-    # The rewriter currently emits ``_retrofy_lazy_from('.', 'sibling', 'sibling')``
-    # — this would have to grow a ``package=__package__`` argument (or the
-    # runtime helper would need to peek at the caller's globals) for the
-    # eventual ``importlib.import_module('.', package)`` to work.
-    assert "package=__package__" in out
+    # Relative ``lazy from`` imports need the calling module's
+    # ``__package__`` so ``importlib.import_module`` can resolve them.
+    _assert_transform(
+        """
+        lazy from . import sibling
+        lazy from .pkg import helper as h
+
+        sibling.f()
+        h()
+        """,
+        f"""
+        {_RUNTIME_IMPORT}
+        sibling = _retrofy_lazy_from('.', 'sibling', 'sibling', package=__package__)
+        h = _retrofy_lazy_from('.pkg', 'helper', 'h', package=__package__)
+
+        _retrofy_resolve(sibling).f()
+        _retrofy_resolve(h)()
+        """,
+    )
 
 
 def test_multiple_lazy_statements() -> None:
