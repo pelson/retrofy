@@ -5,7 +5,6 @@ Test walrus operator short-circuiting behavior.
 import pytest
 
 
-@pytest.mark.xfail(reason="retrofy bug", strict=True)
 def test_short_circuit_and():
     """Test that short-circuiting prevents unnecessary function calls."""
     call_count = 0

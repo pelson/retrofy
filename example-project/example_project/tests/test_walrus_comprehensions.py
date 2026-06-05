@@ -2,8 +2,6 @@
 Test walrus operator in comprehensions.
 """
 
-import pytest
-
 
 def test_walrus_list_comprehension():
     """Test walrus operator in list comprehensions."""
@@ -14,7 +12,6 @@ def test_walrus_list_comprehension():
     assert result == ["hello", "world"]
 
 
-@pytest.mark.xfail(reason="retrofy bug", strict=True)
 def test_walrus_dict_comprehension():
     """Test walrus operator in dict comprehensions."""
     data = ["Hello", "World", "Hi"]
