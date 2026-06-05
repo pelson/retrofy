@@ -199,14 +199,8 @@ jobs:
 
     - name: Test example-project from isolation (editable install)
       run: |
-        # TODO: drop ``--assert=plain`` once the pytest plugin
-        # (feature/editable-testhandling-with-assertion-rewrite-support)
-        # lands. Without it pytest's AssertionRewritingHook claims test
-        # files first, so retrofy's meta-path converter never runs and
-        # the tests see native syntax instead of the retrofy-converted
-        # form that wheel installs ship.
         cd not-the-source
-        /tmp/editable-venv/bin/pytest --pyargs example_project --assert=plain -ssvv
+        /tmp/editable-venv/bin/pytest --pyargs example_project -ssvv
 
   compatibility_test:
     strategy:

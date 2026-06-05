@@ -43,6 +43,11 @@ Homepage = "https://github.com/pelson/retrofy"
 post-build-wheel = "retrofy._pep517_hooks:compatibility_via_rewrite"
 post-build-editable = "retrofy._pep517_hooks:compatibility_via_import_hook"
 
+[project.entry-points.pytest11]
+# Cooperate with pytest's assertion rewriter when test files use
+# post-current-Python syntax that retrofy backports.
+retrofy = "retrofy._pytest_plugin"
+
 [tool.setuptools.packages.find]
 include = ["retrofy", "retrofy.*"]
 
