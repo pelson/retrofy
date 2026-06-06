@@ -85,18 +85,128 @@ jobs:
 
     - name: Build example-project (exercises the retrofy build rewrite)
       run: |
-        python -m pip install build multistage-build
-        cd example-project
-        python -m build --no-isolation --wheel
+        # Build with pip's build isolation (mirrors how end users build
+        # a retrofy project). The build-isolation env's pip resolves
+        # the build-system requires from pyproject (which includes
+        # ``retrofy``); we pin it to the dev version built earlier via
+        # pip's ``--build-constraint`` (env var
+        # ``PIP_BUILD_CONSTRAINT``, added in pip 25.3) so the constraint
+        # applies ONLY in the build env and not in any runtime install
+        # downstream. Without the pin pip would either fail (released
+        # retrofy missing the changes under test) or silently pick the
+        # wrong one.
+        RETROFY_WHL=$(ls dist/retrofy-*-py3-none-any.whl)
+        RETROFY_VERSION=$(basename "$RETROFY_WHL" \
+          | sed -E 's/^retrofy-(.+)-py3-none-any\.whl$/\1/')
+        echo "retrofy==${RETROFY_VERSION}" > /tmp/retrofy-build-constraint.txt
 
-    - name: Install built example-project wheel
+        python -m pip install --upgrade 'pip>=25.3'
+        mkdir -p example-project/dist
+        # Use ``pip wheel`` rather than ``python -m build`` so the
+        # build-isolation env is set up by the outer pip (which is
+        # 25.3+ and so honours ``PIP_BUILD_CONSTRAINT``).
+        # ``python -m build`` instead creates a fresh venv with
+        # ensurepip's bundled pip, which is too old to recognise the
+        # build-constraint and silently ignores the pin.
+        PIP_FIND_LINKS="${{ github.workspace }}/dist" \
+        PIP_BUILD_CONSTRAINT=/tmp/retrofy-build-constraint.txt \
+        PIP_VERBOSE=1 \
+          python -m pip wheel ./example-project --no-deps \
+            --wheel-dir example-project/dist 2>&1 | tee /tmp/build.log
+
+        # Belt-and-braces: confirm the build-isolation env actually
+        # installed the dev retrofy we pinned (the pin would have made
+        # pip fail outright if it couldn't satisfy it, but log the wheel
+        # path explicitly for auditability).
+        if ! grep -F "retrofy-${RETROFY_VERSION}-py3-none-any.whl" /tmp/build.log >/dev/null; then
+          echo "::error::dev retrofy ${RETROFY_VERSION} wheel was not referenced in the build-isolation env"
+          exit 1
+        fi
+        echo "Confirmed dev retrofy ${RETROFY_VERSION} was used in the build env"
+
+    - name: Install built example-project wheel in a fresh venv
       run: |
-        python -m pip install example-project/dist/*.whl
+        # Validate the wheel-install path honestly: a fresh venv with
+        # neither retrofy nor its transitive deps (libcst etc.). The
+        # build-time rewrite (``compatibility_via_rewrite``) bakes the
+        # converted source into the wheel, so a wheel install should
+        # never need retrofy at runtime. Any future converter that
+        # wants a runtime helper has to be designed so the converted
+        # output does not import retrofy — keeping wheel installs
+        # retrofy-free is an invariant of the project, not a temporary
+        # state.
+        python -m venv /tmp/wheel-venv
+        /tmp/wheel-venv/bin/pip install --upgrade pip
+        /tmp/wheel-venv/bin/pip install pytest
+        /tmp/wheel-venv/bin/pip install example-project/dist/*.whl
 
-    - name: Test example-project from isolation
+        # The wheel-install path must not pull retrofy into the runtime
+        # env (the build-time rewrite has already baked the converted
+        # source into the wheel).
+        if /tmp/wheel-venv/bin/pip list --format=freeze | grep -qE '^retrofy=='; then
+          echo "::error::retrofy unexpectedly installed in /tmp/wheel-venv"
+          /tmp/wheel-venv/bin/pip list --format=freeze | grep -E '^retrofy'
+          exit 1
+        fi
+        echo "Confirmed retrofy is NOT installed in /tmp/wheel-venv"
+
+    - name: Test example-project from isolation (wheel install)
       run: |
         cd not-the-source
-        python -m pytest --pyargs example_project -ssvv
+        /tmp/wheel-venv/bin/pytest --pyargs example_project -ssvv
+
+    - name: Install example-project as editable in a fresh venv
+      run: |
+        # Validate the editable install path end-to-end from a clean
+        # slate: a fresh venv with no retrofy pre-installed. The
+        # editable build triggers retrofy's
+        # ``compatibility_via_import_hook`` which writes a ``.pth``
+        # script registering the meta-path converter at Python startup.
+        # Unlike wheel installs, editable installs run the user's
+        # source through retrofy's meta-path loader at import time, so
+        # retrofy itself must be importable at runtime.
+        #
+        # TODO: drop the explicit ``pip install retrofy`` once
+        # retrofy's editable install path declares retrofy as a
+        # runtime requirement. Needs an upstream multistage-build
+        # ``post-prepare-metadata-for-build-editable`` hook used by
+        # retrofy.
+
+        python -m venv /tmp/editable-venv
+        /tmp/editable-venv/bin/pip install --upgrade 'pip>=25.3'
+        /tmp/editable-venv/bin/pip install pytest
+
+        export PIP_FIND_LINKS="${{ github.workspace }}/dist"
+        export PIP_BUILD_CONSTRAINT=/tmp/retrofy-build-constraint.txt
+        /tmp/editable-venv/bin/pip install --editable example-project/
+
+        # Sanity-check the runtime-dep gap is still as documented in
+        # the TODO: today the editable install does NOT pull retrofy
+        # into the runtime env. When the multistage-build upstream fix
+        # lands and retrofy declares ``Requires-Dist: retrofy`` from
+        # ``prepare_metadata_for_build_editable``, this assertion will
+        # fail — at which point the TODO above can be closed and the
+        # manual ``pip install retrofy`` below removed.
+        if /tmp/editable-venv/bin/pip list --format=freeze | grep -qE '^retrofy=='; then
+          echo "::error::retrofy was pulled in by the editable install — TODO above can now be addressed: remove the assertion and the manual install below"
+          exit 1
+        fi
+        echo "Confirmed editable install does NOT pull retrofy; applying manual workaround"
+
+        # Install dev retrofy directly from the wheel — ``pip install
+        # retrofy`` would resolve a released version from PyPI.
+        /tmp/editable-venv/bin/pip install dist/retrofy-*-py3-none-any.whl
+
+    - name: Test example-project from isolation (editable install)
+      run: |
+        # TODO: drop ``--assert=plain`` once the pytest plugin
+        # (feature/editable-testhandling-with-assertion-rewrite-support)
+        # lands. Without it pytest's AssertionRewritingHook claims test
+        # files first, so retrofy's meta-path converter never runs and
+        # the tests see native syntax instead of the retrofy-converted
+        # form that wheel installs ship.
+        cd not-the-source
+        /tmp/editable-venv/bin/pytest --pyargs example_project --assert=plain -ssvv
 
   compatibility_test:
     strategy:
