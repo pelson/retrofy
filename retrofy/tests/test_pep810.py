@@ -5,7 +5,7 @@ The expected output reflects PEP 810's runtime semantics:
 * ``lazy import`` / ``lazy from`` are rewritten as runtime-helper assignments
   whose ``bind_name`` argument records the local name in module globals.
 * Every read of a lazy-bound module global is wrapped with
-  ``_retrofy_resolve(name)`` — a *function* call. The function returns its
+  ``__lazy_resolve__(name)`` — a *function* call. The function returns its
   argument unchanged if it isn't a ``LazyProxy``, so a name that gets
   rebound later (e.g. by a plain ``import`` of the same top-level package)
   continues to work transparently.
@@ -21,11 +21,11 @@ from retrofy._transformations.pep810 import (
 )
 
 _RUNTIME_IMPORT = (
-    "from retrofy._lazy_runtime import ("
-    "lazy_import as _retrofy_lazy_import, "
-    "lazy_import_as as _retrofy_lazy_import_as, "
-    "lazy_from as _retrofy_lazy_from, "
-    "resolve as _retrofy_resolve"
+    "from ._retrofy.lazy_runtime import ("
+    "lazy_import as __lazy_import__, "
+    "lazy_import_as as __lazy_import_as__, "
+    "lazy_from as __lazy_from__, "
+    "resolve as __lazy_resolve__"
     ")"
 )
 
@@ -60,9 +60,9 @@ def test_lazy_import_simple() -> None:
         """,
         f"""
         {_RUNTIME_IMPORT}
-        numpy = _retrofy_lazy_import('numpy', 'numpy')
+        numpy = __lazy_import__('numpy', 'numpy')
 
-        arr = _retrofy_resolve(numpy).array([1, 2, 3])
+        arr = __lazy_resolve__(numpy).array([1, 2, 3])
         """,
     )
 
@@ -76,9 +76,9 @@ def test_lazy_import_as_alias() -> None:
         """,
         f"""
         {_RUNTIME_IMPORT}
-        np = _retrofy_lazy_import_as('numpy', 'np')
+        np = __lazy_import_as__('numpy', 'np')
 
-        arr = _retrofy_resolve(np).array([1, 2, 3])
+        arr = __lazy_resolve__(np).array([1, 2, 3])
         """,
     )
 
@@ -92,9 +92,9 @@ def test_lazy_import_dotted_binds_top() -> None:
         """,
         f"""
         {_RUNTIME_IMPORT}
-        xml = _retrofy_lazy_import('xml.etree.ElementTree', 'xml')
+        xml = __lazy_import__('xml.etree.ElementTree', 'xml')
 
-        tree = _retrofy_resolve(xml).etree.ElementTree.parse('f.xml')
+        tree = __lazy_resolve__(xml).etree.ElementTree.parse('f.xml')
         """,
     )
 
@@ -110,11 +110,11 @@ def test_mixed_lazy_and_eager_same_top_level() -> None:
         """,
         f"""
         {_RUNTIME_IMPORT}
-        xml = _retrofy_lazy_import('xml.etree.ElementTree', 'xml')
+        xml = __lazy_import__('xml.etree.ElementTree', 'xml')
         import xml.dom.minidom
 
-        tree = _retrofy_resolve(xml).etree.ElementTree.parse('f.xml')
-        dom = _retrofy_resolve(xml).dom.minidom.parseString('<a/>')
+        tree = __lazy_resolve__(xml).etree.ElementTree.parse('f.xml')
+        dom = __lazy_resolve__(xml).dom.minidom.parseString('<a/>')
         """,
     )
 
@@ -129,10 +129,10 @@ def test_lazy_from_single_name() -> None:
         """,
         f"""
         {_RUNTIME_IMPORT}
-        Mapping = _retrofy_lazy_from('collections.abc', 'Mapping', 'Mapping')
+        Mapping = __lazy_from__('collections.abc', 'Mapping', 'Mapping')
 
         def f(x):
-            return isinstance(x, _retrofy_resolve(Mapping))
+            return isinstance(x, __lazy_resolve__(Mapping))
         """,
     )
 
@@ -147,11 +147,11 @@ def test_lazy_from_multiple_names_with_alias() -> None:
         """,
         f"""
         {_RUNTIME_IMPORT}
-        List = _retrofy_lazy_from('typing', 'List', 'List')
-        D = _retrofy_lazy_from('typing', 'Dict', 'D')
+        List = __lazy_from__('typing', 'List', 'List')
+        D = __lazy_from__('typing', 'Dict', 'D')
 
-        x: _retrofy_resolve(List)
-        y: _retrofy_resolve(D)
+        x: __lazy_resolve__(List)
+        y: __lazy_resolve__(D)
         """,
     )
 
@@ -168,12 +168,12 @@ def test_local_shadowing_is_not_rewritten() -> None:
         """,
         f"""
         {_RUNTIME_IMPORT}
-        np = _retrofy_lazy_import_as('numpy', 'np')
+        np = __lazy_import_as__('numpy', 'np')
 
         def f(np):
             return np + 1
 
-        outer = _retrofy_resolve(np).array([1])
+        outer = __lazy_resolve__(np).array([1])
         """,
     )
 
@@ -181,8 +181,8 @@ def test_local_shadowing_is_not_rewritten() -> None:
 def test_assignment_lhs_is_not_wrapped() -> None:
     src = _norm("lazy import numpy as np\n")
     out = transform_lazy_imports(src)
-    assert "np = _retrofy_lazy_import_as('numpy', 'np')" in out
-    assert "_retrofy_resolve(np) = " not in out
+    assert "np = __lazy_import_as__('numpy', 'np')" in out
+    assert "__lazy_resolve__(np) = " not in out
 
 
 def test_rebind_in_module_still_wraps_reads() -> None:
@@ -195,10 +195,10 @@ def test_rebind_in_module_still_wraps_reads() -> None:
         """,
         f"""
         {_RUNTIME_IMPORT}
-        np = _retrofy_lazy_import_as('numpy', 'np')
+        np = __lazy_import_as__('numpy', 'np')
 
         np = 42
-        print(_retrofy_resolve(np))
+        print(__lazy_resolve__(np))
         """,
     )
 
@@ -238,9 +238,9 @@ def test_future_import_stays_first() -> None:
         from __future__ import annotations
 
         {_RUNTIME_IMPORT}
-        np = _retrofy_lazy_import_as('numpy', 'np')
+        np = __lazy_import_as__('numpy', 'np')
 
-        x = _retrofy_resolve(np).array([])
+        x = __lazy_resolve__(np).array([])
         """,
     )
 
@@ -258,9 +258,9 @@ def test_module_docstring_stays_first() -> None:
         """Module docstring."""
 
         {_RUNTIME_IMPORT}
-        np = _retrofy_lazy_import_as('numpy', 'np')
+        np = __lazy_import_as__('numpy', 'np')
 
-        x = _retrofy_resolve(np).array([])
+        x = __lazy_resolve__(np).array([])
         ''',
     )
 
@@ -279,9 +279,9 @@ def test_semicolon_separated_lazy_statements() -> None:
         """,
         f"""
         {_RUNTIME_IMPORT}
-        json = _retrofy_lazy_import('json', 'json'); os = _retrofy_lazy_import('os', 'os')
+        json = __lazy_import__('json', 'json'); os = __lazy_import__('os', 'os')
 
-        print(_retrofy_resolve(json), _retrofy_resolve(os))
+        print(__lazy_resolve__(json), __lazy_resolve__(os))
         """,
     )
 
@@ -299,13 +299,40 @@ def test_relative_lazy_from() -> None:
         """,
         f"""
         {_RUNTIME_IMPORT}
-        sibling = _retrofy_lazy_from('.', 'sibling', 'sibling', package=__package__)
-        h = _retrofy_lazy_from('.pkg', 'helper', 'h', package=__package__)
+        sibling = __lazy_from__('.', 'sibling', 'sibling', package=__package__)
+        h = __lazy_from__('.pkg', 'helper', 'h', package=__package__)
 
-        _retrofy_resolve(sibling).f()
-        _retrofy_resolve(h)()
+        __lazy_resolve__(sibling).f()
+        __lazy_resolve__(h)()
         """,
     )
+
+
+def test_helper_names_avoid_collision_with_user_source() -> None:
+    """If the user's source already binds a name that the rewriter
+    would otherwise inject, all four helper names get the same numeric
+    suffix so the generated code can't shadow user code."""
+    src = _norm(
+        """
+        lazy import numpy as np
+
+        # Pre-existing name that the rewriter would clobber.
+        __lazy_import__ = 'user-bound'
+        x = np.array([1])
+        """,
+    )
+    out = transform_lazy_imports(src)
+    # Suffixed forms used everywhere.
+    assert "__lazy_import_2__" in out
+    assert "__lazy_import_as_2__" in out
+    assert "__lazy_resolve_2__" in out
+    # Un-suffixed forms appear only as the user's own binding /
+    # references — never as injected calls.
+    assert "= __lazy_import__(" not in out
+    assert "= __lazy_import_as__(" not in out
+    assert "__lazy_resolve__(" not in out
+    # User's literal binding is preserved verbatim.
+    assert "__lazy_import__ = 'user-bound'" in out
 
 
 def test_multiple_lazy_statements() -> None:
@@ -323,14 +350,14 @@ def test_multiple_lazy_statements() -> None:
         """,
         f"""
         {_RUNTIME_IMPORT}
-        np = _retrofy_lazy_import_as('numpy', 'np')
-        Mapping = _retrofy_lazy_from('collections.abc', 'Mapping', 'Mapping')
-        Iter = _retrofy_lazy_from('collections.abc', 'Iterable', 'Iter')
+        np = __lazy_import_as__('numpy', 'np')
+        Mapping = __lazy_from__('collections.abc', 'Mapping', 'Mapping')
+        Iter = __lazy_from__('collections.abc', 'Iterable', 'Iter')
 
         def f(x):
-            if isinstance(x, _retrofy_resolve(Mapping)):
-                return _retrofy_resolve(np).array(list(x.values()))
-            if isinstance(x, _retrofy_resolve(Iter)):
+            if isinstance(x, __lazy_resolve__(Mapping)):
+                return __lazy_resolve__(np).array(list(x.values()))
+            if isinstance(x, __lazy_resolve__(Iter)):
                 return list(x)
             return None
         """,

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib.resources
 import pathlib
+import posixpath
 import shutil
 import sys
 import zipfile
@@ -15,11 +17,42 @@ else:
     import tomli as tomllib
 
 
+# Marker that ``transform_lazy_imports`` injects into any module it
+# rewrites. The wheel-build hook uses this to identify which converted
+# modules need the ``_retrofy`` sub-package dropped alongside them.
+_LAZY_RUNTIME_IMPORT_MARKER = "from ._retrofy.lazy_runtime import ("
+
+
+class _PayloadCollisionError(RuntimeError):
+    """The wheel already contains a ``_retrofy`` entry in a directory
+    where retrofy needs to inject its runtime helpers. ``_retrofy`` is
+    reserved as the retrofy runtime namespace inside converted
+    packages."""
+
+
 class EditableRuntimeRequirementError(RuntimeError):
     """The project being built editable has not marked ``dependencies``
     as ``dynamic``, so retrofy cannot legitimately inject itself as a
     runtime requirement.
     """
+
+
+def _payload_files() -> dict[str, bytes]:
+    """Return ``{relpath: bytes}`` for the ``_retrofy`` payload that
+    gets dropped into converted packages.
+
+    The payload tree lives at ``retrofy/_payload/_retrofy/`` in the
+    source distribution and is the single canonical home for any
+    runtime helper a converter needs to ship into user code.
+    """
+    root = importlib.resources.files("retrofy._payload._retrofy")
+    out: dict[str, bytes] = {}
+    for entry in root.iterdir():
+        if not entry.is_file():
+            continue
+        if entry.name.endswith(".py"):
+            out[entry.name] = entry.read_bytes()
+    return out
 
 
 def _assert_editable_dependencies_dynamic(source_root: pathlib.Path) -> None:
@@ -130,9 +163,14 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
     shutil.copy(wheel, editable_copy)
 
     has_modifications = False
+    # Directories within the wheel whose converted modules emitted a
+    # ``from ._retrofy.lazy_runtime import (...)`` line. Each one needs
+    # a sibling ``_retrofy/`` sub-package dropped in.
+    lazy_runtime_dirs: set[str] = set()
 
     with zipfile.ZipFile(str(editable_copy), "r") as whl_zip:
         whl = WheelModifier(whl_zip)
+        existing_entries = set(whl_zip.namelist())
 
         for filename in whl_zip.namelist():
             if filename.endswith(".py"):
@@ -142,6 +180,40 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
                     print(f"Converted {filename} to compatibility syntax")
                     whl.write(filename, new_code)
                     has_modifications = True
+                    if _LAZY_RUNTIME_IMPORT_MARKER in new_code:
+                        lazy_runtime_dirs.add(posixpath.dirname(filename))
+
+        if lazy_runtime_dirs:
+            payload = _payload_files()
+            for pkg_dir in sorted(lazy_runtime_dirs):
+                target_dir = f"{pkg_dir}/_retrofy" if pkg_dir else "_retrofy"
+                # ``_retrofy`` is retrofy's reserved namespace inside
+                # converted packages. If a user already ships anything
+                # under that name we'd silently shadow it — refuse to.
+                clash = [
+                    e
+                    for e in existing_entries
+                    if e == target_dir
+                    or e == f"{target_dir}/"
+                    or e.startswith(f"{target_dir}/")
+                ]
+                if clash:
+                    raise _PayloadCollisionError(
+                        f"package directory {pkg_dir!r} already contains a "
+                        f"`_retrofy` entry ({clash[0]!r}); `_retrofy` is "
+                        f"reserved as retrofy's runtime namespace inside "
+                        f"converted packages.",
+                    )
+                for relpath, data in payload.items():
+                    # WheelModifier.write needs a ZipInfo for entries
+                    # not already in the source wheel (which the
+                    # injected payload never is).
+                    whl.write(zipfile.ZipInfo(f"{target_dir}/{relpath}"), data)
+                print(
+                    f"Injected retrofy runtime payload into {target_dir}/",
+                )
+            has_modifications = True
+
         if has_modifications:
             with wheel.open("wb") as whl_fh:
                 whl.write_wheel(whl_fh)

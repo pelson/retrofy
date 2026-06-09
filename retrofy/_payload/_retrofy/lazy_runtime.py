@@ -1,9 +1,15 @@
 """Runtime support for retrofy's PEP 810 (lazy imports) backport.
 
-The rewriter in ``_transformations.pep810`` turns ``lazy import`` and
-``lazy from`` statements into calls to :func:`lazy_import`,
-:func:`lazy_import_as`, and :func:`lazy_from`, and wraps every read of a
-lazy-bound name with :func:`resolve` (exported as ``_retrofy_resolve``).
+This module is the canonical payload that retrofy drops into every
+converted package as ``<pkg>/_retrofy/lazy_runtime.py``. Converted
+modules emit ``from ._retrofy.lazy_runtime import (...)`` so wheel
+installs never reach back to ``retrofy.*`` at runtime.
+
+The rewriter in :mod:`retrofy._transformations.pep810` turns ``lazy
+import`` and ``lazy from`` statements into calls to
+:func:`lazy_import`, :func:`lazy_import_as`, and :func:`lazy_from`,
+and wraps every read of a lazy-bound name with :func:`resolve`
+(aliased as ``__lazy_resolve__`` in the converted module).
 
 :func:`resolve` matches PEP 810 runtime semantics:
 

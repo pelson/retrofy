@@ -1,42 +1,97 @@
 """PEP 810 (lazy imports) backport rewriter.
 
 Phase 1 (tokenize): strip ``lazy`` from ``lazy import`` / ``lazy from``
-statements and replace each with assignments calling runtime helpers in
-:mod:`retrofy._lazy_runtime`. libcst does not yet parse the 3.15
-``lazy`` soft keyword, so this phase must run on the raw source.
+statements and replace each with assignments calling helpers from the
+converted package's sibling ``_retrofy.lazy_runtime`` module. libcst
+does not yet parse the 3.15 ``lazy`` soft keyword, so this phase must
+run on the raw source.
 
 Phase 2 (libcst + ``ScopeProvider``): wrap every read of a lazy-bound
-module global with ``_retrofy_resolve(name)``, leaving locally-shadowed
+module global with ``__lazy_resolve__(name)``, leaving locally-shadowed
 references alone and skipping assignment LHS / ``for`` / ``with as``
 binding targets.
 
 Phase 3: inject the runtime helper import after the preamble
 (shebang / encoding cookie / docstring / ``from __future__`` block).
+The import is a *relative* one — ``from ._retrofy.lazy_runtime import
+...`` — so the converted module never references ``retrofy`` at
+runtime. The wheel-build hook drops a copy of the ``_retrofy``
+sub-package into the converted package; the on-the-fly meta-path
+converter synthesises it for editable / pytest contexts.
+
+Helper names are mangled with dunder underscores
+(``__lazy_import__`` etc.) and numbered (``__lazy_import_2__``) if a
+user's own source already binds the un-suffixed form.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import io
+import re
 import tokenize
 from typing import List, Optional, Set, Tuple
 
 import libcst as cst
 from libcst.metadata import GlobalScope, ScopeProvider
 
-_RUNTIME_MODULE = "retrofy._lazy_runtime"
-_LAZY_IMPORT = "_retrofy_lazy_import"
-_LAZY_IMPORT_AS = "_retrofy_lazy_import_as"
-_LAZY_FROM = "_retrofy_lazy_from"
-_RESOLVE = "_retrofy_resolve"
-_RUNTIME_IMPORT_LINE = (
-    f"from {_RUNTIME_MODULE} import ("
-    f"lazy_import as {_LAZY_IMPORT}, "
-    f"lazy_import_as as {_LAZY_IMPORT_AS}, "
-    f"lazy_from as {_LAZY_FROM}, "
-    f"resolve as {_RESOLVE}"
-    f")\n"
-)
+_RUNTIME_MODULE = "._retrofy.lazy_runtime"
+
+# Base helper names. ``_helper_names`` may append a ``_<n>`` suffix
+# before the trailing ``__`` if the un-suffixed names collide with
+# identifiers already present in the source being converted.
+_BASE_HELPERS = {
+    "lazy_import": "__lazy_import__",
+    "lazy_import_as": "__lazy_import_as__",
+    "lazy_from": "__lazy_from__",
+    "resolve": "__lazy_resolve__",
+}
+
+
+@dataclass
+class _HelperNames:
+    lazy_import: str
+    lazy_import_as: str
+    lazy_from: str
+    resolve: str
+
+    @property
+    def runtime_import_line(self) -> str:
+        return (
+            f"from {_RUNTIME_MODULE} import ("
+            f"lazy_import as {self.lazy_import}, "
+            f"lazy_import_as as {self.lazy_import_as}, "
+            f"lazy_from as {self.lazy_from}, "
+            f"resolve as {self.resolve}"
+            f")\n"
+        )
+
+
+_NAME_RE = re.compile(r"\b[A-Za-z_]\w*\b")
+
+
+def _helper_names(source: str) -> _HelperNames:
+    """Pick non-colliding dunder helper names for *source*.
+
+    All four helpers share the same numeric suffix so the emitted
+    runtime-import line stays readable. The suffix increments until
+    none of the four names appears in *source*.
+    """
+    existing = set(_NAME_RE.findall(source))
+
+    def _name(base: str, suffix: str) -> str:
+        # base is like ``__import_lazy__``; suffix is either ``""`` or
+        # ``"_2"`` etc. Insert the suffix before the trailing ``__``.
+        assert base.endswith("__")
+        return base[:-2] + suffix + "__"
+
+    n = 1
+    while True:
+        suffix = "" if n == 1 else f"_{n}"
+        candidates = {role: _name(base, suffix) for role, base in _BASE_HELPERS.items()}
+        if not (set(candidates.values()) & existing):
+            return _HelperNames(**candidates)
+        n += 1
 
 
 class LazyImportSyntaxError(SyntaxError):
@@ -73,7 +128,7 @@ def _split_top_level_commas(s: str) -> List[str]:
     return out
 
 
-def _format_lazy_import(stmt_src: str) -> _LazyStmt:
+def _format_lazy_import(stmt_src: str, helpers: _HelperNames) -> _LazyStmt:
     body = stmt_src.strip()
     assert body.startswith("import"), body
     body = body[len("import") :].strip()
@@ -87,17 +142,19 @@ def _format_lazy_import(stmt_src: str) -> _LazyStmt:
             name = name.strip()
             alias = alias.strip()
             bindings.append(alias)
-            lines.append(f"{alias} = {_LAZY_IMPORT_AS}({name!r}, {alias!r})")
+            lines.append(
+                f"{alias} = {helpers.lazy_import_as}({name!r}, {alias!r})",
+            )
         else:
             # ``import foo.bar`` binds ``foo``
             name = clause.strip()
             top = name.partition(".")[0]
             bindings.append(top)
-            lines.append(f"{top} = {_LAZY_IMPORT}({name!r}, {top!r})")
+            lines.append(f"{top} = {helpers.lazy_import}({name!r}, {top!r})")
     return _LazyStmt(bindings=bindings, replacement="\n".join(lines))
 
 
-def _format_lazy_from(stmt_src: str) -> _LazyStmt:
+def _format_lazy_from(stmt_src: str, helpers: _HelperNames) -> _LazyStmt:
     body = stmt_src.strip()
     assert body.startswith("from"), body
     body = body[len("from") :].strip()
@@ -131,14 +188,10 @@ def _format_lazy_from(stmt_src: str) -> _LazyStmt:
             # Relative ``lazy from ... import`` needs the calling
             # module's ``__package__`` so ``importlib.import_module``
             # can resolve the relative target.
-            lines.append(
-                f"{alias} = {_LAZY_FROM}({module!r}, {attr!r}, {alias!r}, "
-                f"package=__package__)",
-            )
+            args = f"{module!r}, {attr!r}, {alias!r}, package=__package__"
         else:
-            lines.append(
-                f"{alias} = {_LAZY_FROM}({module!r}, {attr!r}, {alias!r})",
-            )
+            args = f"{module!r}, {attr!r}, {alias!r}"
+        lines.append(f"{alias} = {helpers.lazy_from}({args})")
     return _LazyStmt(bindings=bindings, replacement="\n".join(lines))
 
 
@@ -201,7 +254,10 @@ def _apply_edits(
     return "".join(lines)
 
 
-def _strip_lazy_syntax(source: str) -> Tuple[str, List[str]]:
+def _strip_lazy_syntax(
+    source: str,
+    helpers: _HelperNames,
+) -> Tuple[str, List[str]]:
     readline = io.StringIO(source).readline
     tokens = list(tokenize.generate_tokens(readline))
 
@@ -236,10 +292,9 @@ def _strip_lazy_syntax(source: str) -> Tuple[str, List[str]]:
                 and tokens[j].string in ("import", "from")
             ):
                 if indent_depth != 0:
-                    raise LazyImportSyntaxError(
-                        f"`lazy` is only permitted at module level "
-                        f"(line {tok.start[0]})",
-                    )
+                    lineno = tok.start[0]
+                    msg = f"`lazy` is only permitted at module level (line {lineno})"
+                    raise LazyImportSyntaxError(msg)
 
                 k = j
                 while k < n:
@@ -253,9 +308,9 @@ def _strip_lazy_syntax(source: str) -> Tuple[str, List[str]]:
                 stmt_src = _reconstruct_token_span(stmt_tokens)
 
                 if stmt_tokens[0].string == "import":
-                    rewritten = _format_lazy_import(stmt_src)
+                    rewritten = _format_lazy_import(stmt_src, helpers)
                 else:
-                    rewritten = _format_lazy_from(stmt_src)
+                    rewritten = _format_lazy_from(stmt_src, helpers)
 
                 lazy_names.extend(rewritten.bindings)
                 edits.append(
@@ -278,9 +333,10 @@ def _strip_lazy_syntax(source: str) -> Tuple[str, List[str]]:
 class _ResolveWrappingTransformer(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (ScopeProvider,)
 
-    def __init__(self, lazy_names: Set[str]) -> None:
+    def __init__(self, lazy_names: Set[str], resolve_name: str) -> None:
         super().__init__()
         self._lazy_names = lazy_names
+        self._resolve_name = resolve_name
         self._targets: Set[int] = set()
 
     def visit_Module(self, node: cst.Module) -> None:
@@ -357,17 +413,21 @@ class _ResolveWrappingTransformer(cst.CSTTransformer):
         if id(original_node) not in self._targets:
             return updated_node
         return cst.Call(
-            func=cst.Name(_RESOLVE),
+            func=cst.Name(self._resolve_name),
             args=[cst.Arg(value=updated_node)],
         )
 
 
-def _wrap_lazy_reads(source: str, lazy_names: List[str]) -> str:
+def _wrap_lazy_reads(
+    source: str,
+    lazy_names: List[str],
+    helpers: _HelperNames,
+) -> str:
     if not lazy_names:
         return source
     module = cst.parse_module(source)
     wrapper = cst.metadata.MetadataWrapper(module)
-    transformer = _ResolveWrappingTransformer(set(lazy_names))
+    transformer = _ResolveWrappingTransformer(set(lazy_names), helpers.resolve)
     return wrapper.visit(transformer).code
 
 
@@ -376,7 +436,7 @@ def _wrap_lazy_reads(source: str, lazy_names: List[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _inject_runtime_import(source: str) -> str:
+def _inject_runtime_import(source: str, helpers: _HelperNames) -> str:
     lines = source.splitlines(keepends=True)
     i = 0
 
@@ -408,7 +468,7 @@ def _inject_runtime_import(source: str) -> str:
     if i < len(lines) and lines[i].strip() == "":
         i += 1
 
-    lines.insert(i, _RUNTIME_IMPORT_LINE)
+    lines.insert(i, helpers.runtime_import_line)
     return "".join(lines)
 
 
@@ -418,8 +478,9 @@ def _inject_runtime_import(source: str) -> str:
 
 
 def transform_lazy_imports(source: str) -> str:
-    stripped, lazy_names = _strip_lazy_syntax(source)
+    helpers = _helper_names(source)
+    stripped, lazy_names = _strip_lazy_syntax(source, helpers)
     if not lazy_names:
         return source
-    wrapped = _wrap_lazy_reads(stripped, lazy_names)
-    return _inject_runtime_import(wrapped)
+    wrapped = _wrap_lazy_reads(stripped, lazy_names, helpers)
+    return _inject_runtime_import(wrapped, helpers)
