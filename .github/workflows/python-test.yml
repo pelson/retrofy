@@ -245,30 +245,24 @@ jobs:
     - name: Run example-project tests via `uv run` (no-venv workflow)
       run: |
         # `uv run` is the modern uv UX: no explicit venv, uv manages
-        # the project environment automatically (creating an
-        # ``.venv``, installing the project as editable, and running
-        # the command). This exercises the same hook path as the
-        # `uv pip install --editable` step above but via the workflow
-        # most users will hit.
+        # the project environment automatically. We run in
+        # ``--no-project`` + ``--with-editable .`` mode rather than
+        # full project mode because the latter would try to produce a
+        # universal ``uv.lock`` across example-project's whole
+        # ``requires-python`` range (>=3.7), which is unsatisfiable —
+        # retrofy itself requires >=3.9, so editable installs simply
+        # cannot resolve for Python 3.7 / 3.8 (non-editable wheel
+        # installs of example-project still work on 3.7+). The
+        # ``--no-project`` path resolves only for the active
+        # interpreter and writes no lockfile.
         export PATH="$HOME/.local/bin:$PATH"
         cd example-project
-        # uv run reuses any existing ``.venv`` next to pyproject.toml,
-        # which would mask regressions if an earlier step (or a stale
-        # workspace) left one behind. Force a clean slate.
-        rm -rf .venv uv.lock
         UV_FIND_LINKS="${{ github.workspace }}/dist" \
         UV_BUILD_CONSTRAINT=/tmp/retrofy-build-constraint.txt \
         UV_CONSTRAINT=/tmp/retrofy-build-constraint.txt \
-          uv run --python ${{ matrix.python-version }} --with pytest \
+          uv run --no-project --python ${{ matrix.python-version }} \
+            --with-editable . --with pytest \
             python -m pytest example_project -ssvv
-
-        # Sanity-check uv pulled retrofy into its managed env.
-        if ! VIRTUAL_ENV=.venv uv pip list --format=freeze \
-            | grep -qE '^retrofy=='; then
-          echo "::error::uv run did not install retrofy into the managed env"
-          VIRTUAL_ENV=.venv uv pip list --format=freeze
-          exit 1
-        fi
 
   compatibility_test:
     strategy:
