@@ -42,6 +42,7 @@ Homepage = "https://github.com/pelson/retrofy"
 # Declare automatic hooks for a multistage-build using project.
 post-build-wheel = "retrofy._pep517_hooks:compatibility_via_rewrite"
 post-build-editable = "retrofy._pep517_hooks:compatibility_via_import_hook"
+post-prepare-metadata-for-build-editable = "retrofy._pep517_hooks:inject_runtime_requirement"
 
 [project.entry-points.pytest11]
 # Cooperate with pytest's assertion rewriter when test files use

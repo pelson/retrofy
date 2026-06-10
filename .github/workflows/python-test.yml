@@ -166,41 +166,103 @@ jobs:
         # source through retrofy's meta-path loader at import time, so
         # retrofy itself must be importable at runtime.
         #
-        # TODO: drop the explicit ``pip install retrofy`` once
-        # retrofy's editable install path declares retrofy as a
-        # runtime requirement. Needs an upstream multistage-build
-        # ``post-prepare-metadata-for-build-editable`` hook used by
-        # retrofy.
-
+        # retrofy declares ``Requires-Dist: retrofy`` from
+        # ``prepare_metadata_for_build_editable`` (via the
+        # multistage-build hook of the same name), so pip resolves it
+        # and pulls it into the runtime env automatically. We then
+        # constrain pip to install the dev retrofy wheel (built earlier
+        # in this workflow) rather than the released version from
+        # PyPI, by adding it to ``--find-links`` and pinning it via a
+        # runtime constraint.
         python -m venv /tmp/editable-venv
         /tmp/editable-venv/bin/pip install --upgrade 'pip>=25.3'
         /tmp/editable-venv/bin/pip install pytest
 
+        # Use the same dev retrofy at both build- and run-time.
         export PIP_FIND_LINKS="${{ github.workspace }}/dist"
         export PIP_BUILD_CONSTRAINT=/tmp/retrofy-build-constraint.txt
-        /tmp/editable-venv/bin/pip install --editable example-project/
+        /tmp/editable-venv/bin/pip install \
+          --editable example-project/ \
+          --constraint /tmp/retrofy-build-constraint.txt
 
-        # Sanity-check the runtime-dep gap is still as documented in
-        # the TODO: today the editable install does NOT pull retrofy
-        # into the runtime env. When the multistage-build upstream fix
-        # lands and retrofy declares ``Requires-Dist: retrofy`` from
-        # ``prepare_metadata_for_build_editable``, this assertion will
-        # fail — at which point the TODO above can be closed and the
-        # manual ``pip install retrofy`` below removed.
-        if /tmp/editable-venv/bin/pip list --format=freeze | grep -qE '^retrofy=='; then
-          echo "::error::retrofy was pulled in by the editable install — TODO above can now be addressed: remove the assertion and the manual install below"
+        # The editable install path MUST pull retrofy as a runtime dep
+        # (retrofy's import-time rewriter runs against the user's
+        # source on each import, so retrofy must be importable). If
+        # this assertion ever flips, the multistage-build hook chain
+        # has regressed.
+        if ! /tmp/editable-venv/bin/pip list --format=freeze | grep -qE '^retrofy=='; then
+          echo "::error::editable install did not pull retrofy as a runtime dep — multistage-build post-prepare-metadata-for-build-editable hook likely regressed"
+          /tmp/editable-venv/bin/pip list --format=freeze
           exit 1
         fi
-        echo "Confirmed editable install does NOT pull retrofy; applying manual workaround"
-
-        # Install dev retrofy directly from the wheel — ``pip install
-        # retrofy`` would resolve a released version from PyPI.
-        /tmp/editable-venv/bin/pip install dist/retrofy-*-py3-none-any.whl
+        INSTALLED_RETROFY=$(/tmp/editable-venv/bin/pip list --format=freeze | grep -E '^retrofy==' | head -n1)
+        echo "Confirmed editable install pulled ${INSTALLED_RETROFY}"
 
     - name: Test example-project from isolation (editable install)
       run: |
         cd not-the-source
         /tmp/editable-venv/bin/pytest --pyargs example_project -ssvv
+
+    - name: Install example-project as editable with uv
+      run: |
+        # Mirror of the pip editable step, exercising uv's PEP 660
+        # implementation. uv follows PEP 621 strictly: it will only
+        # call the backend's ``prepare_metadata_for_build_editable``
+        # hook (and thus see retrofy's spliced ``Requires-Dist``) when
+        # the project declares ``dependencies`` in ``[project].dynamic``
+        # — which example-project does. If uv ever stops calling the
+        # backend hook, or if example-project drops the ``dynamic``
+        # declaration, this step regresses and the retrofy assertion
+        # below fails.
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        export PATH="$HOME/.local/bin:$PATH"
+        uv --version
+
+        uv venv --python ${{ matrix.python-version }} /tmp/editable-uv-venv
+
+        # Feed uv the dev wheels for both build- and runtime resolution.
+        export UV_FIND_LINKS="${{ github.workspace }}/dist"
+        VIRTUAL_ENV=/tmp/editable-uv-venv uv pip install pytest
+        VIRTUAL_ENV=/tmp/editable-uv-venv uv pip install \
+          --editable example-project/ \
+          --build-constraint /tmp/retrofy-build-constraint.txt \
+          --constraint /tmp/retrofy-build-constraint.txt
+
+        if ! VIRTUAL_ENV=/tmp/editable-uv-venv uv pip list --format=freeze \
+            | grep -qE '^retrofy=='; then
+          echo "::error::uv editable install did not pull retrofy as a runtime dep — uv may have stopped honouring prepare_metadata_for_build_editable, or example-project lost its 'dynamic = [\"dependencies\"]' declaration"
+          VIRTUAL_ENV=/tmp/editable-uv-venv uv pip list --format=freeze
+          exit 1
+        fi
+        INSTALLED_RETROFY=$(VIRTUAL_ENV=/tmp/editable-uv-venv uv pip list --format=freeze | grep -E '^retrofy==' | head -n1)
+        echo "Confirmed uv editable install pulled ${INSTALLED_RETROFY}"
+
+    - name: Test example-project from isolation (uv editable install)
+      run: |
+        cd not-the-source
+        /tmp/editable-uv-venv/bin/pytest --pyargs example_project -ssvv
+
+    - name: Run example-project tests via `uv run` (no-venv workflow)
+      run: |
+        # `uv run` is the modern uv UX: no explicit venv, uv manages
+        # the project environment automatically. We run in
+        # ``--no-project`` + ``--with-editable .`` mode rather than
+        # full project mode because the latter would try to produce a
+        # universal ``uv.lock`` across example-project's whole
+        # ``requires-python`` range (>=3.7), which is unsatisfiable —
+        # retrofy itself requires >=3.9, so editable installs simply
+        # cannot resolve for Python 3.7 / 3.8 (non-editable wheel
+        # installs of example-project still work on 3.7+). The
+        # ``--no-project`` path resolves only for the active
+        # interpreter and writes no lockfile.
+        export PATH="$HOME/.local/bin:$PATH"
+        cd example-project
+        UV_FIND_LINKS="${{ github.workspace }}/dist" \
+        UV_BUILD_CONSTRAINT=/tmp/retrofy-build-constraint.txt \
+        UV_CONSTRAINT=/tmp/retrofy-build-constraint.txt \
+          uv run --no-project --python ${{ matrix.python-version }} \
+            --with-editable . --with pytest \
+            python -m pytest example_project -ssvv
 
   compatibility_test:
     strategy:
