@@ -51,8 +51,19 @@ jobs:
           - python-version: "3.14"
             os: ubuntu-latest
             prerelease: true
+          - python-version: "3.15"
+            os: ubuntu-latest
+            prerelease: true
 
     runs-on: ${{ matrix.os }}
+
+    env:
+      # libcst (a retrofy runtime dep) builds a native extension via
+      # PyO3. PyO3 0.26 caps at Python 3.14, so building from sdist on
+      # 3.15 fails unless we opt in to the stable-ABI forward-compat
+      # path. Setting it unconditionally is a no-op for Pythons PyO3
+      # already supports natively.
+      PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
 
     steps:
     - uses: actions/checkout@v4
