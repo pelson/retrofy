@@ -22,12 +22,8 @@ repos:
     hooks:
       - id: isort
   - repo: https://gitlab.cern.ch/pre-commit-hook-mirrors/astral-sh/ruff-pre-commit
-    rev: v0.12.3
+    rev: v0.15.16
     hooks:
       - id: ruff-check
         args: [ --fix ]
-        # Files using post-3.11 syntax that stock Python (and so ruff)
-        # cannot parse — they are processed by retrofy at import / build.
-        exclude: ^example-project/example_project/tests/test_lazy_imports\.py$
       - id: ruff-format
-        exclude: ^example-project/example_project/tests/test_lazy_imports\.py$

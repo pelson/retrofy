@@ -5,6 +5,7 @@ The ``lazy`` soft keyword is Python 3.15+ syntax. Retrofy rewrites it
 into runtime helper calls so this file is importable on the older
 Pythons that the example project supports.
 """
+
 import sys
 
 lazy import json
