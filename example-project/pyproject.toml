@@ -1,5 +1,5 @@
 [build-system]
-requires = ["multistage-build", "setuptools", "retrofy"]
+requires = ["multistage-build>=0.2", "setuptools", "retrofy"]
 build-backend = "multistage_build:backend"
 
 [tool.multistage-build]
@@ -11,6 +11,11 @@ version = "0.1"
 description = "A project full of the latest and greatest Python (syntax) features"
 # The syntax in the repository is Python 3.13+, but we use retrofy to support older versions.
 requires-python = ">=3.7"
+# Retrofy injects ``Requires-Dist: retrofy`` for editable installs (it
+# needs retrofy at runtime for the import-time rewriter). PEP 621
+# requires this to be opted into via ``dynamic``; wheel installs are
+# unaffected.
+dynamic = ["dependencies"]
 
 [project.optional-dependencies]
 test = [
