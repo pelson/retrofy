@@ -42,24 +42,10 @@ def test_inject_runtime_requirement_adds_dep(tmp_path):
     assert "Requires-Dist: retrofy" in header
 
 
-def test_inject_runtime_requirement_is_idempotent(tmp_path):
-    dist_info = _write_metadata(
-        tmp_path,
-        """\
-        Metadata-Version: 2.1
-        Name: some-project
-        Version: 0.1.0
-        Requires-Dist: retrofy
-
-        Body.
-        """,
-    )
-    before = (dist_info / "METADATA").read_text(encoding="utf-8")
-    inject_runtime_requirement(dist_info)
-    assert (dist_info / "METADATA").read_text(encoding="utf-8") == before
-
-
-def test_inject_runtime_requirement_skips_when_retrofy_has_marker(tmp_path):
+def test_inject_runtime_requirement_adds_even_if_retrofy_already_present(tmp_path):
+    # A pre-existing retrofy line may carry environment markers that
+    # leave the running interpreter without retrofy installed, so we
+    # add an unconditional line regardless. Pip dedupes the rest.
     dist_info = _write_metadata(
         tmp_path,
         """\
@@ -71,9 +57,16 @@ def test_inject_runtime_requirement_skips_when_retrofy_has_marker(tmp_path):
         Body.
         """,
     )
-    before = (dist_info / "METADATA").read_text(encoding="utf-8")
     inject_runtime_requirement(dist_info)
-    assert (dist_info / "METADATA").read_text(encoding="utf-8") == before
+    text = (dist_info / "METADATA").read_text(encoding="utf-8")
+    header, _, _ = text.partition("\n\n")
+    lines = [
+        line
+        for line in header.splitlines()
+        if line.startswith("Requires-Dist: retrofy")
+    ]
+    assert len(lines) == 2
+    assert "Requires-Dist: retrofy" in lines
 
 
 def test_inject_runtime_requirement_no_body(tmp_path):

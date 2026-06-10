@@ -18,13 +18,7 @@ else:
 class EditableRuntimeRequirementError(RuntimeError):
     """The project being built editable has not marked ``dependencies``
     as ``dynamic``, so retrofy cannot legitimately inject itself as a
-    runtime requirement. Frontends that follow PEP 621 strictly (e.g.
-    uv) would then refuse to install retrofy, and the rewritten source
-    would fail at import time.
-
-    This check fires only on the editable build path. Wheel builds bake
-    the converted source into the wheel and do not need retrofy at
-    runtime, so they impose no such requirement.
+    runtime requirement.
     """
 
 
@@ -46,29 +40,19 @@ def _assert_editable_dependencies_dynamic(source_root: pathlib.Path) -> None:
         "Editable installs of retrofy-using projects need retrofy at "
         "runtime, but this project's pyproject.toml does not mark "
         "``dependencies`` as dynamic, so retrofy cannot inject itself "
-        "as a runtime requirement in a PEP 621-compliant way (uv, in "
-        "particular, will refuse to call the backend's metadata hook "
-        "otherwise).\n\n"
+        "as a runtime requirement in a PEP 621-compliant way.\n\n"
         "Add the following to pyproject.toml:\n\n"
         "    [project]\n"
         '    dynamic = ["dependencies"]\n\n'
-        "Wheel builds of the same project are unaffected and impose no "
-        "such requirement.",
+        "Non-editable builds of the same project are unaffected and "
+        "impose no such requirement.",
     )
 
 
 def _splice_retrofy_requires_dist(text: str) -> str:
-    """Return ``text`` with ``Requires-Dist: retrofy`` added to the
-    METADATA header block, or return ``text`` unchanged if it already
-    declares a retrofy requirement.
+    """Return ``text`` with an unconditional ``Requires-Dist: retrofy``
+    added to the METADATA header block.
     """
-    if any(
-        line.strip().lower() == "requires-dist: retrofy"
-        or line.strip().lower().startswith("requires-dist: retrofy ")
-        or line.strip().lower().startswith("requires-dist: retrofy;")
-        for line in text.splitlines()
-    ):
-        return text
     # PEP 566 / RFC 822: the first blank line ends the header block and
     # starts the long-description body. The new Requires-Dist must go
     # inside the header block.
