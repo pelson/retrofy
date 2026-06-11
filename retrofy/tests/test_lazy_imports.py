@@ -5,10 +5,17 @@ The expected output reflects PEP 810's runtime semantics:
 * ``lazy import`` / ``lazy from`` are rewritten as runtime-helper assignments
   whose ``bind_name`` argument records the local name in module globals.
 * Every read of a lazy-bound module global is wrapped with
-  ``__lazy_resolve__(name)`` — a *function* call. The function returns its
+  ``__lazy_reify__(name)`` — a *function* call. The function returns its
   argument unchanged if it isn't a ``LazyProxy``, so a name that gets
   rebound later (e.g. by a plain ``import`` of the same top-level package)
   continues to work transparently.
+
+Most tests use the ``{_RUNTIME_IMPORT}`` placeholder at the start of
+the expected output. ``_assert_transform`` replaces it with a
+``from ._retrofy.lazy_runtime import ...`` line containing **only**
+the helpers whose mangled names appear in the rest of the expected
+body — the converter now imports the subset it actually uses, not
+all four helpers unconditionally.
 """
 
 import textwrap
@@ -17,30 +24,37 @@ import warnings
 import pytest
 
 from retrofy._transformations.lazy_imports import (
+    _BASE_HELPERS,
     LazyImportSyntaxError,
     LazyModulesIgnoredWarning,
     transform_lazy_imports,
 )
 
-_RUNTIME_IMPORT = (
-    "from ._retrofy.lazy_runtime import ("
-    "lazy_import as __lazy_import__, "
-    "lazy_import_as as __lazy_import_as__, "
-    "lazy_from as __lazy_from__, "
-    "resolve as __lazy_resolve__"
-    ")"
-)
+_RUNTIME_IMPORT = "<<RUNTIME-IMPORT>>"
 
 
 def _norm(s: str) -> str:
     return textwrap.dedent(s).lstrip("\n")
 
 
+def _build_runtime_import(body: str) -> str:
+    aliases = [
+        f"{role} as {_BASE_HELPERS[role]}"
+        for role in _BASE_HELPERS
+        if _BASE_HELPERS[role] in body
+    ]
+    return "from ._retrofy.lazy_runtime import " + ", ".join(aliases)
+
+
 def _assert_transform(src: str, expected: str) -> None:
+    expected = _norm(expected)
+    if _RUNTIME_IMPORT in expected:
+        # Build the import line over the rest of the body so we only
+        # claim to import helpers that the body actually uses.
+        rest = expected.replace(_RUNTIME_IMPORT, "")
+        expected = expected.replace(_RUNTIME_IMPORT, _build_runtime_import(rest))
     got = transform_lazy_imports(_norm(src))
-    assert got == _norm(expected), (
-        f"\n--- got ---\n{got}\n--- expected ---\n{_norm(expected)}"
-    )
+    assert got == expected, f"\n--- got ---\n{got}\n--- expected ---\n{expected}"
 
 
 def test_passthrough_when_no_lazy() -> None:
@@ -64,7 +78,7 @@ def test_lazy_import_simple() -> None:
         {_RUNTIME_IMPORT}
         numpy = __lazy_import__('numpy', 'numpy')
 
-        arr = __lazy_resolve__(numpy).array([1, 2, 3])
+        arr = __lazy_reify__(numpy).array([1, 2, 3])
         """,
     )
 
@@ -80,7 +94,7 @@ def test_lazy_import_as_alias() -> None:
         {_RUNTIME_IMPORT}
         np = __lazy_import_as__('numpy', 'np')
 
-        arr = __lazy_resolve__(np).array([1, 2, 3])
+        arr = __lazy_reify__(np).array([1, 2, 3])
         """,
     )
 
@@ -96,7 +110,7 @@ def test_lazy_import_dotted_binds_top() -> None:
         {_RUNTIME_IMPORT}
         xml = __lazy_import__('xml.etree.ElementTree', 'xml')
 
-        tree = __lazy_resolve__(xml).etree.ElementTree.parse('f.xml')
+        tree = __lazy_reify__(xml).etree.ElementTree.parse('f.xml')
         """,
     )
 
@@ -115,8 +129,8 @@ def test_mixed_lazy_and_eager_same_top_level() -> None:
         xml = __lazy_import__('xml.etree.ElementTree', 'xml')
         import xml.dom.minidom
 
-        tree = __lazy_resolve__(xml).etree.ElementTree.parse('f.xml')
-        dom = __lazy_resolve__(xml).dom.minidom.parseString('<a/>')
+        tree = __lazy_reify__(xml).etree.ElementTree.parse('f.xml')
+        dom = __lazy_reify__(xml).dom.minidom.parseString('<a/>')
         """,
     )
 
@@ -134,7 +148,7 @@ def test_lazy_from_single_name() -> None:
         Mapping = __lazy_from__('collections.abc', 'Mapping', 'Mapping')
 
         def f(x):
-            return isinstance(x, __lazy_resolve__(Mapping))
+            return isinstance(x, __lazy_reify__(Mapping))
         """,
     )
 
@@ -152,8 +166,8 @@ def test_lazy_from_multiple_names_with_alias() -> None:
         List = __lazy_from__('typing', 'List', 'List')
         D = __lazy_from__('typing', 'Dict', 'D')
 
-        x: __lazy_resolve__(List)
-        y: __lazy_resolve__(D)
+        x: __lazy_reify__(List)
+        y: __lazy_reify__(D)
         """,
     )
 
@@ -175,7 +189,7 @@ def test_local_shadowing_is_not_rewritten() -> None:
         def f(np):
             return np + 1
 
-        outer = __lazy_resolve__(np).array([1])
+        outer = __lazy_reify__(np).array([1])
         """,
     )
 
@@ -184,7 +198,7 @@ def test_assignment_lhs_is_not_wrapped() -> None:
     src = _norm("lazy import numpy as np\n")
     out = transform_lazy_imports(src)
     assert "np = __lazy_import_as__('numpy', 'np')" in out
-    assert "__lazy_resolve__(np) = " not in out
+    assert "__lazy_reify__(np) = " not in out
 
 
 def test_rebind_in_module_still_wraps_reads() -> None:
@@ -200,7 +214,7 @@ def test_rebind_in_module_still_wraps_reads() -> None:
         np = __lazy_import_as__('numpy', 'np')
 
         np = 42
-        print(__lazy_resolve__(np))
+        print(__lazy_reify__(np))
         """,
     )
 
@@ -242,7 +256,7 @@ def test_future_import_stays_first() -> None:
         {_RUNTIME_IMPORT}
         np = __lazy_import_as__('numpy', 'np')
 
-        x = __lazy_resolve__(np).array([])
+        x = __lazy_reify__(np).array([])
         """,
     )
 
@@ -262,7 +276,7 @@ def test_module_docstring_stays_first() -> None:
         {_RUNTIME_IMPORT}
         np = __lazy_import_as__('numpy', 'np')
 
-        x = __lazy_resolve__(np).array([])
+        x = __lazy_reify__(np).array([])
         ''',
     )
 
@@ -283,7 +297,7 @@ def test_semicolon_separated_lazy_statements() -> None:
         {_RUNTIME_IMPORT}
         json = __lazy_import__('json', 'json'); os = __lazy_import__('os', 'os')
 
-        print(__lazy_resolve__(json), __lazy_resolve__(os))
+        print(__lazy_reify__(json), __lazy_reify__(os))
         """,
     )
 
@@ -304,37 +318,61 @@ def test_relative_lazy_from() -> None:
         sibling = __lazy_from__('.', 'sibling', 'sibling', package=__package__)
         h = __lazy_from__('.pkg', 'helper', 'h', package=__package__)
 
-        __lazy_resolve__(sibling).f()
-        __lazy_resolve__(h)()
+        __lazy_reify__(sibling).f()
+        __lazy_reify__(h)()
         """,
     )
 
 
 def test_helper_names_avoid_collision_with_user_source() -> None:
-    """If the user's source already binds a name that the rewriter
-    would otherwise inject, all four helper names get the same numeric
-    suffix so the generated code can't shadow user code."""
+    """If the user's source already binds *any* name that one of the
+    helpers would otherwise take, all four helper names get the same
+    numeric suffix so the generated code can't shadow user code. The
+    suffix is uniform across helpers — even helpers the body doesn't
+    invoke — so a future edit that introduces a new lazy form into
+    the source doesn't accidentally collide.
+    """
     src = _norm(
         """
         lazy import numpy as np
 
-        # Pre-existing name that the rewriter would clobber.
-        __lazy_import__ = 'user-bound'
+        # Pre-existing name that the rewriter would clobber if we
+        # used the un-suffixed ``__lazy_import_as__``.
+        __lazy_import_as__ = 'user-bound'
         x = np.array([1])
         """,
     )
     out = transform_lazy_imports(src)
-    # Suffixed forms used everywhere.
-    assert "__lazy_import_2__" in out
+    # Helpers the body actually uses are emitted in the suffixed form.
     assert "__lazy_import_as_2__" in out
-    assert "__lazy_resolve_2__" in out
-    # Un-suffixed forms appear only as the user's own binding /
-    # references — never as injected calls.
-    assert "= __lazy_import__(" not in out
+    assert "__lazy_reify_2__" in out
+    # Un-suffixed helper forms must not appear as injected calls.
     assert "= __lazy_import_as__(" not in out
-    assert "__lazy_resolve__(" not in out
+    assert "__lazy_reify__(" not in out
     # User's literal binding is preserved verbatim.
-    assert "__lazy_import__ = 'user-bound'" in out
+    assert "__lazy_import_as__ = 'user-bound'" in out
+
+
+def test_helper_names_suffix_is_uniform_across_helpers() -> None:
+    """Collision on a name that is *not* otherwise emitted still
+    forces all helpers to use the same suffix. Catches a regression
+    where we'd suffix-collide only the colliding helper.
+    """
+    src = _norm(
+        """
+        lazy import numpy as np
+
+        # ``__lazy_from__`` is not used by this module (no ``lazy
+        # from`` statement), but a user binding still must force the
+        # uniform suffix.
+        __lazy_from__ = 'user-bound'
+        x = np.array([1])
+        """,
+    )
+    out = transform_lazy_imports(src)
+    assert "__lazy_import_as_2__" in out
+    assert "__lazy_reify_2__" in out
+    assert "__lazy_from__ = 'user-bound'" in out
 
 
 def test_lazy_modules_declaration_warns_and_is_left_alone() -> None:
@@ -412,9 +450,9 @@ def test_multiple_lazy_statements() -> None:
         Iter = __lazy_from__('collections.abc', 'Iterable', 'Iter')
 
         def f(x):
-            if isinstance(x, __lazy_resolve__(Mapping)):
-                return __lazy_resolve__(np).array(list(x.values()))
-            if isinstance(x, __lazy_resolve__(Iter)):
+            if isinstance(x, __lazy_reify__(Mapping)):
+                return __lazy_reify__(np).array(list(x.values()))
+            if isinstance(x, __lazy_reify__(Iter)):
                 return list(x)
             return None
         """,

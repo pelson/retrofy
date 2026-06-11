@@ -9,6 +9,16 @@ Here the unconverted source uses ``lazy`` soft-keyword syntax, which
 is only parseable by CPython 3.15+. The converted source uses the
 retrofy-injected ``__lazy_*__`` helpers and runs on every supported
 Python.
+
+Note on ``_exec_native``: the unconverted source is fed straight to
+``compile()``, so the running interpreter must understand the modern
+syntax. Retrofy is **not** a runtime dependency — we are not
+teaching the interpreter about new syntax, just round-tripping the
+source through ``ast``/``compile``. That's why these cases are
+skipped below 3.15. The retrofy docs should call this out for users
+who reach for ``exec(open(...).read())`` and find that retrofy-
+backported syntax is still unparseable: retrofy only intervenes at
+build time or via the editable-install import hook.
 """
 
 from __future__ import annotations
@@ -163,100 +173,44 @@ def test_converted_source_behaviour(
     assert _exec_converted(source, tmp_path, monkeypatch) == expected
 
 
-@pytest.mark.skipif(
-    sys.version_info < (3, 15),
-    reason="``lazy`` soft keyword requires Python 3.15+",
-)
-def test_unconverted_module_not_loaded_before_use() -> None:
-    """ASSUMPTION VALIDATION: native PEP 810 doesn't import the lazy
-    target module until it's actually accessed."""
-    # ``encodings.rot_13`` is rarely imported by anything else in a
-    # test session — use it as the deferred-import canary.
-    source = textwrap.dedent(
-        """
-        import sys
-        lazy import encodings.rot_13
-
-        was_loaded_before_use = 'encodings.rot_13' in sys.modules
-        encodings.rot_13  # trigger reification
-        was_loaded_after_use = 'encodings.rot_13' in sys.modules
-        """,
-    )
-    ns: dict[str, Any] = {"__name__": "_lazy_imports_native_deferred"}
-    sys.modules.pop("encodings.rot_13", None)
-    exec(compile(source, "<native-deferred>", "exec"), ns)
-    assert ns["was_loaded_before_use"] is False
-    assert ns["was_loaded_after_use"] is True
-
-
-def test_converted_module_not_loaded_before_use(tmp_path, monkeypatch) -> None:
-    """EXECUTION VALIDATION: retrofy's converted source matches the
-    deferred-import semantics — the lazy target stays out of
-    ``sys.modules`` until something reads its name."""
-    pkg_root = tmp_path / "synthcase"
-    pkg_root.mkdir()
-    (pkg_root / "__init__.py").write_text("")
-    (pkg_root / "mod.py").write_text(
-        textwrap.dedent(
-            """
-            import sys
-            lazy import encodings.rot_13
-
-            was_loaded_before_use = 'encodings.rot_13' in sys.modules
-            encodings.rot_13
-            was_loaded_after_use = 'encodings.rot_13' in sys.modules
-            """,
-        ).lstrip(),
-    )
-
-    monkeypatch.syspath_prepend(str(tmp_path))
-    finder = MyMetaPathFinder(["synthcase"])
-    monkeypatch.setattr(sys, "meta_path", [finder, *sys.meta_path])
-    for name in list(sys.modules):
-        if name == "synthcase" or name.startswith("synthcase."):
-            del sys.modules[name]
-    sys.modules.pop("encodings.rot_13", None)
-
-    mod = importlib.import_module("synthcase.mod")
-    assert mod.was_loaded_before_use is False
-    assert mod.was_loaded_after_use is True
-
-
-# sys.modules-mutation source: reify the binding, then pop the target
-# from sys.modules, then access the binding again. The captured
-# observations are returned via the module globals; native and
-# converted runs must agree on every flag.
+# sys.modules-trace source: covers both halves of the deferred-import
+# property in one source.
 #
-# We deliberately touch a *real* attribute (``token_bytes``) rather
-# than a dunder like ``__name__`` — native PEP 810 may serve some
-# dunders from a precomputed descriptor without actually importing
-# the target. Calling ``token_bytes(...)`` forces a real attribute
-# resolution that has to go through the module body.
+# 1. Before any touch of the lazy binding, ``sys.modules`` is empty
+#    for the target — module load hasn't happened.
+# 2. First touch reifies the binding and populates ``sys.modules``.
+# 3. Dropping the target from ``sys.modules`` does NOT reset the
+#    binding (PEP 810 replaces the global slot with the real module
+#    on first read).
+# 4. Subsequent touches use the cached local reference; they do not
+#    silently re-import or re-populate ``sys.modules``.
+#
+# A real attribute (``token_bytes``) is exercised rather than a
+# dunder like ``__name__`` — native PEP 810 may serve some dunders
+# from a precomputed descriptor without importing the target.
+# Calling ``token_bytes(...)`` forces a real attribute resolution
+# that has to go through the loaded module.
 _SYS_MODULES_MUTATION_SRC = textwrap.dedent(
     """
     import sys
 
     lazy import secrets as secrets_mod
 
-    # 1. Touching the binding for the first time reifies the proxy and
-    #    populates sys.modules.
+    in_modules_before_first_touch = 'secrets' in sys.modules
+
     first_len = len(secrets_mod.token_bytes(4))
     in_modules_after_first_touch = 'secrets' in sys.modules
 
-    # 2. Drop the target from sys.modules. PEP 810 specifies that the
-    #    local binding has been *replaced* with the real module on first
-    #    read, so the pop must not affect what subsequent reads see.
     sys.modules.pop('secrets', None)
     in_modules_after_pop = 'secrets' in sys.modules
 
-    # 3. Touching again still works (cached reference); the access does
-    #    NOT silently re-import and re-populate sys.modules.
     second_len = len(secrets_mod.token_bytes(4))
     in_modules_after_second_touch = 'secrets' in sys.modules
     """,
 )
 
 _SYS_MODULES_MUTATION_EXPECTED = {
+    "in_modules_before_first_touch": False,
     "first_len": 4,
     "in_modules_after_first_touch": True,
     "in_modules_after_pop": False,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.resources
+import logging
 import pathlib
 import posixpath
 import shutil
@@ -10,6 +11,8 @@ import zipfile
 from setuptools_ext import WheelModifier
 
 from ._converters import convert
+
+_log = logging.getLogger("retrofy.build")
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -152,7 +155,7 @@ def compatibility_via_import_hook(wheel: pathlib.Path):
         with wheel.open("wb") as whl_fh:
             whl.write_wheel(whl_fh)
 
-    print("Enabling automatic retrofiting of Python code at import-time")
+    _log.info("Enabling automatic retrofiting of Python code at import-time")
 
     editable_copy.unlink()
 
@@ -177,7 +180,7 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
                 code = whl.read(filename).decode("utf-8")
                 new_code = convert(code)
                 if new_code != code:
-                    print(f"Converted {filename} to compatibility syntax")
+                    _log.info("Converted %s to compatibility syntax", filename)
                     whl.write(filename, new_code)
                     has_modifications = True
                     if _LAZY_RUNTIME_IMPORT_MARKER in new_code:
@@ -209,8 +212,9 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
                     # not already in the source wheel (which the
                     # injected payload never is).
                     whl.write(zipfile.ZipInfo(f"{target_dir}/{relpath}"), data)
-                print(
-                    f"Injected retrofy runtime payload into {target_dir}/",
+                _log.info(
+                    "Injected retrofy runtime payload into %s/",
+                    target_dir,
                 )
             has_modifications = True
 

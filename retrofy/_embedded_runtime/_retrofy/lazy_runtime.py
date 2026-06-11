@@ -5,13 +5,13 @@ converted package as ``<pkg>/_retrofy/lazy_runtime.py``. Converted
 modules emit ``from ._retrofy.lazy_runtime import (...)`` so wheel
 installs never reach back to ``retrofy.*`` at runtime.
 
-The rewriter in :mod:`retrofy._transformations.lazy_imports` turns ``lazy
-import`` and ``lazy from`` statements into calls to
+The rewriter in :mod:`retrofy._transformations.lazy_imports` turns
+``lazy import`` and ``lazy from`` statements into calls to
 :func:`lazy_import`, :func:`lazy_import_as`, and :func:`lazy_from`,
-and wraps every read of a lazy-bound name with :func:`resolve`
-(aliased as ``__lazy_resolve__`` in the converted module).
+and wraps every read of a lazy-bound name with :func:`reify`
+(aliased as ``__lazy_reify__`` in the converted module).
 
-:func:`resolve` matches PEP 810 runtime semantics:
+:func:`reify` matches PEP 810 runtime semantics:
 
 * If the argument is not a :class:`LazyProxy`, it is returned unchanged —
   so a name rebound by a later eager ``import`` (or any other assignment)
@@ -62,7 +62,7 @@ class LazyProxy:
 
     # Instance-level forwarding acts as a safety net for proxies that
     # escape the rewritten module. Inside the rewritten module every read
-    # is wrapped with ``resolve()`` so this path is normally unused.
+    # is wrapped with ``reify()`` so this path is normally unused.
     def __getattr__(self, name: str) -> Any:
         if name in LazyProxy.__slots__:
             raise AttributeError(name)
@@ -85,7 +85,7 @@ class LazyProxy:
         return repr(resolved)
 
 
-def resolve(obj: Any) -> Any:
+def reify(obj: Any) -> Any:
     """The wrap-every-use helper. See module docstring."""
     if not isinstance(obj, LazyProxy):
         return obj
