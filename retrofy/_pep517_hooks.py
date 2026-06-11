@@ -23,7 +23,11 @@ else:
 # Marker that ``transform_lazy_imports`` injects into any module it
 # rewrites. The wheel-build hook uses this to identify which converted
 # modules need the ``_retrofy`` sub-package dropped alongside them.
-_LAZY_RUNTIME_IMPORT_MARKER = "from ._retrofy.lazy_runtime import ("
+# Trailing space is significant — it pins the form
+# ``from ._retrofy.lazy_runtime import <alias>, ...`` and avoids
+# false positives on, say, ``from .._retrofy.lazy_runtime import ...``
+# (different package depth that retrofy never emits).
+_LAZY_RUNTIME_IMPORT_MARKER = "from ._retrofy.lazy_runtime import "
 
 
 class _EmbeddedRuntimeCollisionError(RuntimeError):

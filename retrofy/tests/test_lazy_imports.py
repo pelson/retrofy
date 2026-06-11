@@ -353,6 +353,22 @@ def test_helper_names_avoid_collision_with_user_source() -> None:
     assert "__lazy_import_as__ = 'user-bound'" in out
 
 
+def test_emitted_import_contains_wheel_build_marker() -> None:
+    """Pin the contract between the converter and the wheel-build hook.
+
+    ``retrofy._pep517_hooks.compatibility_via_rewrite`` greps each
+    converted module for a marker substring to decide whether to drop
+    the ``_retrofy/`` payload sub-package alongside it. If the
+    converter ever emits the runtime import in a form that doesn't
+    contain the marker, the wheel-build hook silently skips the
+    payload drop and the installed wheel is unusable. Catch that here.
+    """
+    from retrofy._pep517_hooks import _LAZY_RUNTIME_IMPORT_MARKER
+
+    out = transform_lazy_imports("lazy import json\n")
+    assert _LAZY_RUNTIME_IMPORT_MARKER in out
+
+
 def test_helper_names_suffix_is_uniform_across_helpers() -> None:
     """Collision on a name that is *not* otherwise emitted still
     forces all helpers to use the same suffix. Catches a regression
