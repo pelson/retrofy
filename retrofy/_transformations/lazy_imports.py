@@ -31,6 +31,7 @@ import io
 import re
 import tokenize
 from typing import List, Optional, Set, Tuple
+import warnings
 
 import libcst as cst
 from libcst.metadata import GlobalScope, ScopeProvider
@@ -96,6 +97,59 @@ def _helper_names(source: str) -> _HelperNames:
 
 class LazyImportSyntaxError(SyntaxError):
     """Raised for misuse of the ``lazy`` soft keyword."""
+
+
+class LazyModulesIgnoredWarning(UserWarning):
+    """Emitted when a module declares ``__lazy_modules__`` — the
+    declarative form of PEP 810 that retrofy does not backport.
+
+    Retrofy supports the explicit ``lazy import`` / ``lazy from``
+    keyword form only; ``__lazy_modules__`` is left in the converted
+    source as an inert variable assignment (which is exactly what older
+    Python interpreters see anyway). Users who want laziness should
+    rewrite the relevant ``import`` statements to use the ``lazy``
+    keyword.
+    """
+
+
+def _find_lazy_modules_declaration(
+    tokens: List[tokenize.TokenInfo],
+) -> Optional[int]:
+    """Return the 1-based line number of a top-level
+    ``__lazy_modules__ = ...`` assignment, or ``None`` if none.
+
+    Only module-scope assignments to the bare name are recognised —
+    attribute writes (``mod.__lazy_modules__ = ...``) and writes inside
+    function / class bodies do not trigger the warning.
+    """
+    indent_depth = 0
+    for i, tok in enumerate(tokens):
+        if tok.type == tokenize.INDENT:
+            indent_depth += 1
+            continue
+        if tok.type == tokenize.DEDENT:
+            indent_depth -= 1
+            continue
+        if indent_depth != 0:
+            continue
+        if (
+            tok.type == tokenize.NAME
+            and tok.string == "__lazy_modules__"
+            and _is_statement_start(tokens, i)
+        ):
+            j = i + 1
+            while j < len(tokens) and tokens[j].type in (
+                tokenize.NL,
+                tokenize.COMMENT,
+            ):
+                j += 1
+            if (
+                j < len(tokens)
+                and tokens[j].type == tokenize.OP
+                and tokens[j].string == "="
+            ):
+                return tok.start[0]
+    return None
 
 
 @dataclass
@@ -478,6 +532,19 @@ def _inject_runtime_import(source: str, helpers: _HelperNames) -> str:
 
 
 def transform_lazy_imports(source: str) -> str:
+    tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    lazy_modules_lineno = _find_lazy_modules_declaration(tokens)
+    if lazy_modules_lineno is not None:
+        warnings.warn(
+            f"line {lazy_modules_lineno}: ``__lazy_modules__`` is the "
+            "declarative form of PEP 810 (lazy imports) and is ignored "
+            "by retrofy — use the ``lazy import`` / ``lazy from`` "
+            "keyword form instead. The declaration is left in place; "
+            "older Python interpreters see it as an inert variable.",
+            category=LazyModulesIgnoredWarning,
+            stacklevel=2,
+        )
+
     helpers = _helper_names(source)
     stripped, lazy_names = _strip_lazy_syntax(source, helpers)
     if not lazy_names:

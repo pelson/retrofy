@@ -12,11 +12,13 @@ The expected output reflects PEP 810's runtime semantics:
 """
 
 import textwrap
+import warnings
 
 import pytest
 
-from retrofy._transformations.pep810 import (
+from retrofy._transformations.lazy_imports import (
     LazyImportSyntaxError,
+    LazyModulesIgnoredWarning,
     transform_lazy_imports,
 )
 
@@ -333,6 +335,61 @@ def test_helper_names_avoid_collision_with_user_source() -> None:
     assert "__lazy_resolve__(" not in out
     # User's literal binding is preserved verbatim.
     assert "__lazy_import__ = 'user-bound'" in out
+
+
+def test_lazy_modules_declaration_warns_and_is_left_alone() -> None:
+    """retrofy doesn't backport the declarative ``__lazy_modules__``
+    form of PEP 810. A user declaration must surface as a warning and
+    the source must be returned unchanged (the assignment is inert on
+    older interpreters)."""
+    src = _norm(
+        """
+        __lazy_modules__ = {"json"}
+
+        import json
+        x = json.dumps({})
+        """,
+    )
+    with pytest.warns(LazyModulesIgnoredWarning, match="line 1"):
+        out = transform_lazy_imports(src)
+    assert out == src
+
+
+def test_lazy_modules_inside_function_does_not_warn() -> None:
+    """Only module-scope declarations carry the PEP 810 meaning;
+    function-local writes are irrelevant and must not trigger the
+    warning (otherwise common variable names get noisy)."""
+    src = _norm(
+        """
+        def f():
+            __lazy_modules__ = {"json"}
+            return __lazy_modules__
+        """,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", LazyModulesIgnoredWarning)
+        # Should not raise.
+        transform_lazy_imports(src)
+
+
+def test_lazy_modules_warning_with_lazy_keyword_still_rewrites() -> None:
+    """If a file has both ``__lazy_modules__`` and explicit ``lazy``
+    syntax, we still rewrite the ``lazy`` form and emit the warning
+    for the declarative form."""
+    src = _norm(
+        """
+        __lazy_modules__ = {"os"}
+
+        lazy import json
+        x = json.dumps({})
+        """,
+    )
+    with pytest.warns(LazyModulesIgnoredWarning):
+        out = transform_lazy_imports(src)
+    # ``lazy import json`` still got rewritten.
+    assert "__lazy_import__('json'," in out
+    # The user's ``__lazy_modules__`` line survives verbatim.
+    assert '__lazy_modules__ = {"os"}' in out
 
 
 def test_multiple_lazy_statements() -> None:

@@ -4,8 +4,8 @@ import libcst as cst
 
 from ._transformations import (
     dataclass,
+    lazy_imports,
     match_statement,
-    pep810,
     type_alias,
     typing_extensions,
     walrus,
@@ -112,7 +112,7 @@ def convert_typing_extensions(module: cst.Module) -> cst.Module:
 
 
 def convert_lazy_imports(code: str) -> str:
-    return pep810.transform_lazy_imports(code)
+    return lazy_imports.transform_lazy_imports(code)
 
 
 def convert(code: str) -> str:

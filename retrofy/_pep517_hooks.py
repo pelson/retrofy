@@ -23,7 +23,7 @@ else:
 _LAZY_RUNTIME_IMPORT_MARKER = "from ._retrofy.lazy_runtime import ("
 
 
-class _PayloadCollisionError(RuntimeError):
+class _EmbeddedRuntimeCollisionError(RuntimeError):
     """The wheel already contains a ``_retrofy`` entry in a directory
     where retrofy needs to inject its runtime helpers. ``_retrofy`` is
     reserved as the retrofy runtime namespace inside converted
@@ -37,15 +37,15 @@ class EditableRuntimeRequirementError(RuntimeError):
     """
 
 
-def _payload_files() -> dict[str, bytes]:
+def _embedded_runtime_files() -> dict[str, bytes]:
     """Return ``{relpath: bytes}`` for the ``_retrofy`` payload that
     gets dropped into converted packages.
 
-    The payload tree lives at ``retrofy/_payload/_retrofy/`` in the
+    The payload tree lives at ``retrofy/_embedded_runtime/_retrofy/`` in the
     source distribution and is the single canonical home for any
     runtime helper a converter needs to ship into user code.
     """
-    root = importlib.resources.files("retrofy._payload._retrofy")
+    root = importlib.resources.files("retrofy._embedded_runtime._retrofy")
     out: dict[str, bytes] = {}
     for entry in root.iterdir():
         if not entry.is_file():
@@ -184,7 +184,7 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
                         lazy_runtime_dirs.add(posixpath.dirname(filename))
 
         if lazy_runtime_dirs:
-            payload = _payload_files()
+            payload = _embedded_runtime_files()
             for pkg_dir in sorted(lazy_runtime_dirs):
                 target_dir = f"{pkg_dir}/_retrofy" if pkg_dir else "_retrofy"
                 # ``_retrofy`` is retrofy's reserved namespace inside
@@ -198,7 +198,7 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
                     or e.startswith(f"{target_dir}/")
                 ]
                 if clash:
-                    raise _PayloadCollisionError(
+                    raise _EmbeddedRuntimeCollisionError(
                         f"package directory {pkg_dir!r} already contains a "
                         f"`_retrofy` entry ({clash[0]!r}); `_retrofy` is "
                         f"reserved as retrofy's runtime namespace inside "

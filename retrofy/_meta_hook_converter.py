@@ -31,7 +31,7 @@ class OnTheFlyConverter(SourceLoader):
         return new_code
 
 
-class _PayloadLoader(Loader):
+class _EmbeddedRuntimeLoader(Loader):
     """Serve a single payload file as a module's source.
 
     Used by :class:`MyMetaPathFinder` to synthesise the ``_retrofy``
@@ -59,15 +59,15 @@ class _PayloadLoader(Loader):
         return self._filename
 
 
-def _payload_root():
-    return importlib.resources.files("retrofy._payload._retrofy")
+def _embedded_runtime_root():
+    return importlib.resources.files("retrofy._embedded_runtime._retrofy")
 
 
-def _payload_source(modname: str) -> typing.Tuple[bytes, str] | None:
+def _embedded_runtime_source(modname: str) -> typing.Tuple[bytes, str] | None:
     """Return ``(source_bytes, synthetic_filename)`` for the payload
     module *modname* (e.g. ``"lazy_runtime"`` or ``""`` for the
     package's own ``__init__``), or ``None`` if it doesn't exist."""
-    root = _payload_root()
+    root = _embedded_runtime_root()
     if modname == "":
         target = root / "__init__.py"
     else:
@@ -91,7 +91,7 @@ class MyMetaPathFinder(MetaPathFinder):
                 return True
         return False
 
-    def _payload_spec(self, fullname: str) -> typing.Optional[ModuleSpec]:
+    def _embedded_runtime_spec(self, fullname: str) -> typing.Optional[ModuleSpec]:
         """Synthesise a spec for the reserved ``_retrofy`` sub-package
         (or any module beneath it) inside a converted package.
 
@@ -111,11 +111,11 @@ class MyMetaPathFinder(MetaPathFinder):
         tail = parts[idx + 1 :]
         if len(tail) == 0:
             # ``<parent>._retrofy`` — the package itself.
-            payload = _payload_source("")
+            payload = _embedded_runtime_source("")
             if payload is None:
                 return None
             source, filename = payload
-            loader = _PayloadLoader(source, filename)
+            loader = _EmbeddedRuntimeLoader(source, filename)
             spec = ModuleSpec(fullname, loader, origin=filename, is_package=True)
             # No on-disk submodule search location — submodules are
             # served via this same finder.
@@ -123,11 +123,11 @@ class MyMetaPathFinder(MetaPathFinder):
             return spec
 
         if len(tail) == 1:
-            payload = _payload_source(tail[0])
+            payload = _embedded_runtime_source(tail[0])
             if payload is None:
                 return None
             source, filename = payload
-            loader = _PayloadLoader(source, filename)
+            loader = _EmbeddedRuntimeLoader(source, filename)
             return ModuleSpec(fullname, loader, origin=filename)
 
         # Nested under ``_retrofy.<x>.<y>...`` — payload is flat for
@@ -138,7 +138,7 @@ class MyMetaPathFinder(MetaPathFinder):
         if not self._is_handled_module(fullname):
             return None
 
-        payload_spec = self._payload_spec(fullname)
+        payload_spec = self._embedded_runtime_spec(fullname)
         if payload_spec is not None:
             return payload_spec
 
@@ -183,15 +183,15 @@ class RetrofyRuntimeFinder(MetaPathFinder):
             return None
         tail = parts[idx + 1 :]
         if len(tail) == 0:
-            payload = _payload_source("")
+            payload = _embedded_runtime_source("")
         elif len(tail) == 1:
-            payload = _payload_source(tail[0])
+            payload = _embedded_runtime_source(tail[0])
         else:
             return None
         if payload is None:
             return None
         source, filename = payload
-        loader = _PayloadLoader(source, filename)
+        loader = _EmbeddedRuntimeLoader(source, filename)
         if not tail:
             spec = ModuleSpec(fullname, loader, origin=filename, is_package=True)
             spec.submodule_search_locations = []
