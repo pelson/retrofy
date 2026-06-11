@@ -222,6 +222,95 @@ def test_converted_module_not_loaded_before_use(tmp_path, monkeypatch) -> None:
     assert mod.was_loaded_after_use is True
 
 
+# sys.modules-mutation source: reify the binding, then pop the target
+# from sys.modules, then access the binding again. The captured
+# observations are returned via the module globals; native and
+# converted runs must agree on every flag.
+#
+# We deliberately touch a *real* attribute (``token_bytes``) rather
+# than a dunder like ``__name__`` — native PEP 810 may serve some
+# dunders from a precomputed descriptor without actually importing
+# the target. Calling ``token_bytes(...)`` forces a real attribute
+# resolution that has to go through the module body.
+_SYS_MODULES_MUTATION_SRC = textwrap.dedent(
+    """
+    import sys
+
+    lazy import secrets as secrets_mod
+
+    # 1. Touching the binding for the first time reifies the proxy and
+    #    populates sys.modules.
+    first_len = len(secrets_mod.token_bytes(4))
+    in_modules_after_first_touch = 'secrets' in sys.modules
+
+    # 2. Drop the target from sys.modules. PEP 810 specifies that the
+    #    local binding has been *replaced* with the real module on first
+    #    read, so the pop must not affect what subsequent reads see.
+    sys.modules.pop('secrets', None)
+    in_modules_after_pop = 'secrets' in sys.modules
+
+    # 3. Touching again still works (cached reference); the access does
+    #    NOT silently re-import and re-populate sys.modules.
+    second_len = len(secrets_mod.token_bytes(4))
+    in_modules_after_second_touch = 'secrets' in sys.modules
+    """,
+)
+
+_SYS_MODULES_MUTATION_EXPECTED = {
+    "first_len": 4,
+    "in_modules_after_first_touch": True,
+    "in_modules_after_pop": False,
+    "second_len": 4,
+    # Critical: a stale local reference must NOT cause sys.modules to
+    # be silently repopulated. Matches plain ``import x; del
+    # sys.modules['x']; x.attr`` — the local name still works but
+    # sys.modules stays empty.
+    "in_modules_after_second_touch": False,
+}
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 15),
+    reason="``lazy`` soft keyword requires Python 3.15+",
+)
+def test_unconverted_sys_modules_mutation_semantics() -> None:
+    """ASSUMPTION VALIDATION: pins our model of what PEP 810 does when
+    user code mutates ``sys.modules`` after a lazy binding has been
+    reified."""
+    sys.modules.pop("encodings.rot_13", None)
+    ns: dict[str, Any] = {"__name__": "_lazy_imports_native_sysmod"}
+    exec(compile(_SYS_MODULES_MUTATION_SRC, "<native-sysmod>", "exec"), ns)
+    for key, value in _SYS_MODULES_MUTATION_EXPECTED.items():
+        assert ns[key] == value, (key, ns[key], value)
+
+
+def test_converted_sys_modules_mutation_matches_native(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """EXECUTION VALIDATION: retrofy's converted output must match the
+    native ``sys.modules`` mutation semantics observation-for-
+    observation. A regression to "secretly re-import on stale local
+    reference" would diverge from PEP 810 and from plain ``import``
+    semantics."""
+    pkg_root = tmp_path / "synthcase"
+    pkg_root.mkdir()
+    (pkg_root / "__init__.py").write_text("")
+    (pkg_root / "mod.py").write_text(_SYS_MODULES_MUTATION_SRC.lstrip())
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    finder = MyMetaPathFinder(["synthcase"])
+    monkeypatch.setattr(sys, "meta_path", [finder, *sys.meta_path])
+    for name in list(sys.modules):
+        if name == "synthcase" or name.startswith("synthcase."):
+            del sys.modules[name]
+    sys.modules.pop("encodings.rot_13", None)
+
+    mod = importlib.import_module("synthcase.mod")
+    for key, value in _SYS_MODULES_MUTATION_EXPECTED.items():
+        assert getattr(mod, key) == value, (key, getattr(mod, key), value)
+
+
 @pytest.mark.parametrize(["source", "expected"], CASES)
 def test_converted_output_parses(source: str, expected: Any) -> None:  # noqa: ARG001
     """Smoke check: every case's converted source must be valid
