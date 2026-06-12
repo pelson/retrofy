@@ -1,5 +1,5 @@
 [build-system]
-requires = ["multistage-build>=0.2", "setuptools", "retrofy"]
+requires = ["multistage-build>=0.2", "setuptools", "retrofy>=0.3"]
 build-backend = "multistage_build:backend"
 
 [tool.multistage-build]

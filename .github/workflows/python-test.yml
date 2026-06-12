@@ -266,12 +266,47 @@ jobs:
         # installs of example-project still work on 3.7+). The
         # ``--no-project`` path resolves only for the active
         # interpreter and writes no lockfile.
+        #
+        # ``UV_BUILD_CONSTRAINT`` / ``UV_CONSTRAINT`` are NOT honoured by
+        # ``uv run`` (only by ``uv pip install``), so we can't pin the
+        # dev retrofy via constraint files. ``--prerelease=allow`` is
+        # also not enough: it gates the build-env resolver inconsistently
+        # across uv versions, and on its own can leave the runtime env
+        # silently resolving stable retrofy from PyPI.
+        #
+        # Sidestep the resolver-policy ambiguity entirely by giving uv
+        # a tiny PEP 503 ``file://`` index that contains ONLY the dev
+        # retrofy. uv's default ``first-index`` strategy uses the first
+        # index that knows the package, so any resolution of ``retrofy``
+        # — in the build env or runtime env — is locked to the dev
+        # wheel. PyPI is still the default index for everything else
+        # (pytest, multistage-build, libcst, ...).
+        #
+        # Combined with retrofy's editable hook (which splices
+        # ``Requires-Dist: retrofy==<build-env-version>`` into METADATA),
+        # this leaves no ambiguity: build- and runtime-retrofy are
+        # always the same dev wheel.
         export PATH="$HOME/.local/bin:$PATH"
+
+        LOCAL_IDX=/tmp/retrofy-local-index
+        rm -rf "$LOCAL_IDX"
+        mkdir -p "$LOCAL_IDX/retrofy"
+        ln -s "${{ github.workspace }}/dist/"retrofy-* "$LOCAL_IDX/retrofy/"
+        {
+          echo '<!DOCTYPE html><html><body>'
+          for f in "$LOCAL_IDX/retrofy/"retrofy-*; do
+            bn=$(basename "$f")
+            echo "<a href=\"$bn\">$bn</a><br>"
+          done
+          echo '</body></html>'
+        } > "$LOCAL_IDX/retrofy/index.html"
+        echo '<!DOCTYPE html><html><body><a href="retrofy/">retrofy</a></body></html>' \
+          > "$LOCAL_IDX/index.html"
+
         cd example-project
-        UV_FIND_LINKS="${{ github.workspace }}/dist" \
-        UV_BUILD_CONSTRAINT=/tmp/retrofy-build-constraint.txt \
-        UV_CONSTRAINT=/tmp/retrofy-build-constraint.txt \
-          uv run --no-project --python ${{ matrix.python-version }} \
+        uv run --no-project --python ${{ matrix.python-version }} \
+            --default-index https://pypi.org/simple/ \
+            --index "file://${LOCAL_IDX}/" \
             --with-editable . --with pytest \
             python -m pytest example_project -ssvv
 

@@ -89,9 +89,27 @@ def _assert_editable_dependencies_dynamic(source_root: pathlib.Path) -> None:
     )
 
 
+def _retrofy_version() -> str:
+    # Imported lazily so this module is safe to import without retrofy's
+    # own setuptools-scm-generated ``_version.py`` being on disk yet
+    # (e.g. during retrofy's own bootstrap build).
+    from . import __version__
+
+    return __version__
+
+
 def _splice_retrofy_requires_dist(text: str) -> str:
-    """Return ``text`` with an unconditional ``Requires-Dist: retrofy``
-    added to the METADATA header block.
+    """Return ``text`` with ``Requires-Dist: retrofy=={VERSION}`` added
+    to the METADATA header block, where ``VERSION`` is the exact version
+    of the retrofy that is doing the splicing.
+
+    Pinning to the build-env retrofy keeps build- and runtime-retrofy
+    in lockstep: the editable wheel was produced by the import-hook
+    code of a specific retrofy version, and that exact code has to be
+    importable at runtime for the editable install to behave
+    consistently. Leaving the line unconstrained instead asks the
+    runtime resolver to make a policy decision (stable vs prerelease,
+    PyPI vs find-links) which is not stable across uv versions.
     """
     # PEP 566 / RFC 822: the first blank line ends the header block and
     # starts the long-description body. The new Requires-Dist must go
@@ -99,7 +117,7 @@ def _splice_retrofy_requires_dist(text: str) -> str:
     header, sep, body = text.partition("\n\n")
     header = header.rstrip("\n")
     suffix = sep + body if sep else "\n"
-    return header + "\nRequires-Dist: retrofy" + suffix
+    return header + f"\nRequires-Dist: retrofy=={_retrofy_version()}" + suffix
 
 
 def inject_runtime_requirement(dist_info_path: pathlib.Path) -> None:
