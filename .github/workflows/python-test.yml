@@ -103,7 +103,14 @@ jobs:
         # local directory (dev wheel only); queries for anything else
         # fall through to PyPI.
         python -m pip install --upgrade pip
-        python -m pip install simple-repository-server
+
+        # simple-repository-server itself needs Python >=3.11, but the
+        # test matrix covers Python 3.9+. Run the server out-of-band on
+        # an interpreter uv provisions for us — independent of the
+        # matrix Python that the rest of the job uses.
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        export PATH="$HOME/.local/bin:$PATH"
+        uv --version
 
         # simple-repository-server's local component requires a
         # ``<root>/<canonical-name>/`` directory layout and refuses
@@ -112,8 +119,12 @@ jobs:
         mkdir -p "$LOCAL_IDX/retrofy"
         cp dist/* "$LOCAL_IDX/retrofy/"
 
-        # Background server; the runner cleans it up at job end.
-        nohup python -m simple_repository_server \
+        # Background server; the runner cleans it up at job end. uv
+        # ensures a 3.13 interpreter is available even when the matrix
+        # job is on an older Python.
+        nohup uv run --no-project --python 3.13 \
+          --with simple-repository-server \
+          -- simple-repository-server \
           --host 127.0.0.1 --port 18900 \
           "$LOCAL_IDX" https://pypi.org/simple/ \
           > /tmp/retrofy-srs.log 2>&1 &
