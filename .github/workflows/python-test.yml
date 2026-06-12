@@ -80,12 +80,65 @@ jobs:
         name: dist
         path: dist/
 
+    - name: Stand up a merged local+PyPI index serving the dev retrofy
+      run: |
+        # Every pip in the rest of this job needs to resolve ``retrofy``
+        # to the dev wheel we built (the artefact in ``dist/``) rather
+        # than the released ``retrofy`` on PyPI. Pip only accepts one
+        # index URL plus optional ``--extra-index-url`` /
+        # ``--find-links`` fallbacks, and none of those let us *prefer*
+        # local files over an index that also has the package. Even
+        # ``--pre`` is a global policy switch rather than a per-package
+        # one. Without a dedicated index, the build-isolation environment
+        # silently picks the latest stable retrofy from PyPI; on Python
+        # 3.15-beta this leaks into example-project's build via the
+        # entry-point lookup and fails on PEP 810 syntax the released
+        # retrofy doesn't yet know how to convert.
+        #
+        # Stand up a tiny ``simple-repository-server`` in the background
+        # that serves the local dev retrofy from ``dist/`` and proxies
+        # PyPI for everything else, then point pip at it via
+        # ``PIP_INDEX_URL`` for the rest of the job. The merge is
+        # priority-ordered: queries for ``retrofy`` are answered by the
+        # local directory (dev wheel only); queries for anything else
+        # fall through to PyPI.
+        python -m pip install --upgrade pip
+        python -m pip install simple-repository-server
+
+        # simple-repository-server's local component requires a
+        # ``<root>/<canonical-name>/`` directory layout and refuses
+        # files that resolve outside the root (so symlinks won't do).
+        LOCAL_IDX=/tmp/retrofy-local-srs
+        mkdir -p "$LOCAL_IDX/retrofy"
+        cp dist/* "$LOCAL_IDX/retrofy/"
+
+        # Background server; the runner cleans it up at job end.
+        nohup python -m simple_repository_server \
+          --host 127.0.0.1 --port 18900 \
+          "$LOCAL_IDX" https://pypi.org/simple/ \
+          > /tmp/retrofy-srs.log 2>&1 &
+        for _ in $(seq 1 30); do
+          curl -fsS http://127.0.0.1:18900/simple/retrofy/ -o /dev/null \
+            && break
+          sleep 1
+        done
+        if ! curl -fsS http://127.0.0.1:18900/simple/retrofy/ -o /dev/null; then
+          echo "::error::simple-repository-server failed to come up"
+          cat /tmp/retrofy-srs.log
+          exit 1
+        fi
+
+        # Persist for subsequent steps in this job.
+        echo "PIP_INDEX_URL=http://127.0.0.1:18900/simple/" >> "$GITHUB_ENV"
+        echo "Local retrofy index live at http://127.0.0.1:18900/simple/"
+
     - name: Install the retrofy wheel
       run: |
-        python -m pip install --upgrade pip
-        python -m pip install pytest
-        # Install the wheel using --find-links to handle multiple platform wheels
-        python -m pip install --find-links dist/ retrofy
+        # ``PIP_INDEX_URL`` (set in the previous step) points pip at the
+        # local merged index, so this resolves ``retrofy`` to the dev
+        # wheel and ``pytest`` to PyPI's release — no ``--find-links``,
+        # no ``--pre``, no path-based install.
+        python -m pip install pytest retrofy
 
     - name: Test with pytest (isolated from source)
       run: |
