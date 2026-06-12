@@ -126,7 +126,13 @@ def pytest_configure(config):
 def pytest_sessionstart(session):
     from _pytest.assertion.rewrite import AssertionRewritingHook
 
-    from ._meta_hook_converter import MyMetaPathFinder
+    from ._meta_hook_converter import MyMetaPathFinder, register_runtime_synthesiser
+
+    # Converted test source emits ``from ._retrofy.lazy_runtime import
+    # ...``; tests don't live under a registered retrofy hook prefix,
+    # so install a permissive synthesiser at the end of the meta path
+    # to serve the payload for any user package.
+    register_runtime_synthesiser()
 
     rewriter_idx = None
     retrofy_idx = None

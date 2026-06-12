@@ -1,5 +1,5 @@
 [build-system]
-requires = ["multistage-build>=0.2", "setuptools", "retrofy"]
+requires = ["multistage-build>=0.2", "setuptools", "retrofy>=0.3"]
 build-backend = "multistage_build:backend"
 
 [tool.multistage-build]
@@ -28,3 +28,11 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["example_project", "example_project.*"]
+
+# The on-disk source uses post-current-Python syntax that retrofy
+# backports at build / import time. Tell ruff to lint it against the
+# Python version where that syntax is native, not the ``requires-python``
+# floor above (which is the *runtime* floor after retrofy converts the
+# source).
+[tool.ruff]
+target-version = "py315"

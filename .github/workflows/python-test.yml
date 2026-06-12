@@ -80,12 +80,76 @@ jobs:
         name: dist
         path: dist/
 
+    - name: Stand up a merged local+PyPI index serving the dev retrofy
+      run: |
+        # Every pip in the rest of this job needs to resolve ``retrofy``
+        # to the dev wheel we built (the artefact in ``dist/``) rather
+        # than the released ``retrofy`` on PyPI. Pip only accepts one
+        # index URL plus optional ``--extra-index-url`` /
+        # ``--find-links`` fallbacks, and none of those let us *prefer*
+        # local files over an index that also has the package. Even
+        # ``--pre`` is a global policy switch rather than a per-package
+        # one. Without a dedicated index, the build-isolation environment
+        # silently picks the latest stable retrofy from PyPI; on Python
+        # 3.15-beta this leaks into example-project's build via the
+        # entry-point lookup and fails on PEP 810 syntax the released
+        # retrofy doesn't yet know how to convert.
+        #
+        # Stand up a tiny ``simple-repository-server`` in the background
+        # that serves the local dev retrofy from ``dist/`` and proxies
+        # PyPI for everything else, then point pip at it via
+        # ``PIP_INDEX_URL`` for the rest of the job. The merge is
+        # priority-ordered: queries for ``retrofy`` are answered by the
+        # local directory (dev wheel only); queries for anything else
+        # fall through to PyPI.
+        python -m pip install --upgrade pip
+
+        # simple-repository-server itself needs Python >=3.11, but the
+        # test matrix covers Python 3.9+. Run the server out-of-band on
+        # an interpreter uv provisions for us — independent of the
+        # matrix Python that the rest of the job uses.
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        export PATH="$HOME/.local/bin:$PATH"
+        uv --version
+
+        # simple-repository-server's local component requires a
+        # ``<root>/<canonical-name>/`` directory layout and refuses
+        # files that resolve outside the root (so symlinks won't do).
+        LOCAL_IDX=/tmp/retrofy-local-srs
+        mkdir -p "$LOCAL_IDX/retrofy"
+        cp dist/* "$LOCAL_IDX/retrofy/"
+
+        # Background server; the runner cleans it up at job end. uv
+        # ensures a 3.13 interpreter is available even when the matrix
+        # job is on an older Python.
+        nohup uv run --no-project --python 3.13 \
+          --with simple-repository-server \
+          -- simple-repository-server \
+          --host 127.0.0.1 --port 18900 \
+          "$LOCAL_IDX" https://pypi.org/simple/ \
+          > /tmp/retrofy-srs.log 2>&1 &
+        for _ in $(seq 1 30); do
+          curl -fsS http://127.0.0.1:18900/simple/retrofy/ -o /dev/null \
+            && break
+          sleep 1
+        done
+        if ! curl -fsS http://127.0.0.1:18900/simple/retrofy/ -o /dev/null; then
+          echo "::error::simple-repository-server failed to come up"
+          cat /tmp/retrofy-srs.log
+          exit 1
+        fi
+
+        # Persist for subsequent steps in this job.
+        echo "PIP_INDEX_URL=http://127.0.0.1:18900/simple/" >> "$GITHUB_ENV"
+        echo "Local retrofy index live at http://127.0.0.1:18900/simple/"
+
     - name: Install the retrofy wheel
       run: |
-        python -m pip install --upgrade pip
-        python -m pip install pytest
-        # Install the wheel using --find-links to handle multiple platform wheels
-        python -m pip install --find-links dist/ retrofy
+        # ``PIP_INDEX_URL`` (set in the previous step) points pip at the
+        # local merged index, so this resolves ``retrofy`` to the dev
+        # wheel and ``pytest`` to PyPI's release — no ``--find-links``,
+        # no ``--pre``, no path-based install.
+        python -m pip install pytest retrofy
 
     - name: Test with pytest (isolated from source)
       run: |
@@ -266,12 +330,31 @@ jobs:
         # installs of example-project still work on 3.7+). The
         # ``--no-project`` path resolves only for the active
         # interpreter and writes no lockfile.
+        #
+        # ``UV_BUILD_CONSTRAINT`` / ``UV_CONSTRAINT`` are NOT honoured by
+        # ``uv run`` (only by ``uv pip install``), so we can't pin the
+        # dev retrofy via constraint files. ``--prerelease=allow`` is
+        # also not enough: it gates the build-env resolver inconsistently
+        # across uv versions, and on its own can leave the runtime env
+        # silently resolving stable retrofy from PyPI.
+        #
+        # Sidestep the resolver-policy ambiguity entirely by pointing uv
+        # at the same merged local+PyPI index that the pip steps use
+        # (set up in ``Stand up a merged local+PyPI index serving the
+        # dev retrofy``). Queries for ``retrofy`` are answered by the
+        # local directory (dev wheel only); queries for anything else
+        # proxy through to PyPI. That locks every retrofy lookup — in
+        # the build env or the runtime env — to the dev wheel.
+        #
+        # Combined with retrofy's editable hook (which splices
+        # ``Requires-Dist: retrofy==<build-env-version>`` into METADATA),
+        # this leaves no ambiguity: build- and runtime-retrofy are
+        # always the same dev wheel.
         export PATH="$HOME/.local/bin:$PATH"
+
         cd example-project
-        UV_FIND_LINKS="${{ github.workspace }}/dist" \
-        UV_BUILD_CONSTRAINT=/tmp/retrofy-build-constraint.txt \
-        UV_CONSTRAINT=/tmp/retrofy-build-constraint.txt \
-          uv run --no-project --python ${{ matrix.python-version }} \
+        uv run --no-project --python ${{ matrix.python-version }} \
+            --default-index "${PIP_INDEX_URL}" \
             --with-editable . --with pytest \
             python -m pytest example_project -ssvv
 

@@ -5,11 +5,14 @@ import textwrap
 
 import pytest
 
+from retrofy import __version__ as RETROFY_VERSION
 from retrofy._pep517_hooks import (
     EditableRuntimeRequirementError,
     _assert_editable_dependencies_dynamic,
     inject_runtime_requirement,
 )
+
+PINNED_REQUIRES = f"Requires-Dist: retrofy=={RETROFY_VERSION}"
 
 
 def _write_metadata(tmp_path: pathlib.Path, body: str) -> pathlib.Path:
@@ -33,13 +36,13 @@ def test_inject_runtime_requirement_adds_dep(tmp_path):
     )
     inject_runtime_requirement(dist_info)
     text = (dist_info / "METADATA").read_text(encoding="utf-8")
-    assert "Requires-Dist: retrofy\n" in text
+    assert f"{PINNED_REQUIRES}\n" in text
     assert "Requires-Dist: libcst\n" in text
     assert text.endswith("Some long description.\n")
     # The line must land inside the header block (before the blank line),
     # otherwise pip parses it as part of the description.
     header, _, _ = text.partition("\n\n")
-    assert "Requires-Dist: retrofy" in header
+    assert PINNED_REQUIRES in header
 
 
 def test_inject_runtime_requirement_adds_even_if_retrofy_already_present(tmp_path):
@@ -66,7 +69,7 @@ def test_inject_runtime_requirement_adds_even_if_retrofy_already_present(tmp_pat
         if line.startswith("Requires-Dist: retrofy")
     ]
     assert len(lines) == 2
-    assert "Requires-Dist: retrofy" in lines
+    assert PINNED_REQUIRES in lines
 
 
 def test_inject_runtime_requirement_no_body(tmp_path):
@@ -80,7 +83,7 @@ def test_inject_runtime_requirement_no_body(tmp_path):
     )
     inject_runtime_requirement(dist_info)
     text = (dist_info / "METADATA").read_text(encoding="utf-8")
-    assert "Requires-Dist: retrofy" in text
+    assert PINNED_REQUIRES in text
 
 
 def _write_pyproject(tmp_path: pathlib.Path, body: str) -> pathlib.Path:

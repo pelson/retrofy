@@ -4,6 +4,9 @@ repos:
     hooks:
       - id: mypy
         additional_dependencies: ["types-mock"]
+        # 3.15 ``lazy`` syntax is not parseable by mypy; retrofy
+        # rewrites this file at import / build.
+        exclude: ^example-project/example_project/tests/test_lazy_imports\.py$
   - repo: https://gitlab.cern.ch/pre-commit-hook-mirrors/pre-commit/pre-commit-hooks
     rev: "v4.0.1"
     hooks:
@@ -19,7 +22,7 @@ repos:
     hooks:
       - id: isort
   - repo: https://gitlab.cern.ch/pre-commit-hook-mirrors/astral-sh/ruff-pre-commit
-    rev: v0.12.3
+    rev: v0.15.16
     hooks:
       - id: ruff-check
         args: [ --fix ]
