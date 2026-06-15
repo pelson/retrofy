@@ -453,10 +453,12 @@ jobs:
 
     - name: Drive `setup-editable` against example-project end-to-end
       run: |
-        # The integration-level check: run `setup-editable` from the
+        # Integration-level check: run `setup-editable` from the
         # converter venv, pointing at the 3.7/3.8 host venv as the
-        # target. Then import a post-3.8 syntax module from the host
-        # to confirm the worker subprocess actually converts it.
+        # target. Then run example-project's own pytest suite from
+        # the host. ``--assert=plain`` disables pytest's assertion
+        # rewriter (which reads the source through Python's AST, and
+        # so cannot handle the post-3.8 syntax that retrofy lowers).
         HOST_PYTHON=$(which python)
 
         "$HOME/.cache/retrofy/converter-venv/bin/python" -m retrofy \
@@ -465,12 +467,11 @@ jobs:
             --converter-venv "$HOME/.cache/retrofy/converter-venv" \
             --no-create-converter-env
 
+        # Run from a directory unrelated to the repo so cwd doesn't
+        # leak retrofy onto sys.path.
+        cd /tmp
         RETROFY_CONVERTER_PYTHON="$HOME/.cache/retrofy/converter-venv/bin/python" \
-          python -c "
-        import example_project.tests.test_walrus_comprehensions as m
-        print('imported', m.__file__)
-        assert m.__file__.endswith('example_project/tests/test_walrus_comprehensions.py'), m.__file__
-        "
+          python -m pytest --assert=plain --pyargs example_project -ssvv
 
   pre-commit:
     runs-on: ubuntu-latest
