@@ -430,7 +430,12 @@ jobs:
       run: |
         ${{ steps.converter-python.outputs.python-path }} -m venv "$HOME/.cache/retrofy/converter-venv"
         "$HOME/.cache/retrofy/converter-venv/bin/pip" install --upgrade pip
-        "$HOME/.cache/retrofy/converter-venv/bin/pip" install dist/retrofy-*-py3-none-any.whl
+        # ``multistage-build`` is example-project's PEP 517 backend.
+        # ``setup-editable`` calls ``prepare_metadata_for_build_wheel``
+        # against whatever backend the project declares, so the
+        # backend must be importable in the converter venv.
+        "$HOME/.cache/retrofy/converter-venv/bin/pip" install \
+          dist/retrofy-*-py3-none-any.whl multistage-build
 
     - name: Install pytest on the host (no libcst)
       run: |
@@ -445,6 +450,27 @@ jobs:
       run: |
         export RETROFY_CONVERTER_PYTHON="$HOME/.cache/retrofy/converter-venv/bin/python"
         python -m pytest ./retrofy/tests/test_out_of_process_editable.py -ssvv
+
+    - name: Drive `setup-editable` against example-project end-to-end
+      run: |
+        # The integration-level check: run `setup-editable` from the
+        # converter venv, pointing at the 3.7/3.8 host venv as the
+        # target. Then import a post-3.8 syntax module from the host
+        # to confirm the worker subprocess actually converts it.
+        HOST_PYTHON=$(which python)
+
+        "$HOME/.cache/retrofy/converter-venv/bin/python" -m retrofy \
+            setup-editable ./example-project \
+            --target-python "$HOST_PYTHON" \
+            --converter-venv "$HOME/.cache/retrofy/converter-venv" \
+            --no-create-converter-env
+
+        RETROFY_CONVERTER_PYTHON="$HOME/.cache/retrofy/converter-venv/bin/python" \
+          python -c "
+        import example_project.tests.test_walrus_comprehensions as m
+        print('imported', m.__file__)
+        assert m.__file__.endswith('example_project/tests/test_walrus_comprehensions.py'), m.__file__
+        "
 
   pre-commit:
     runs-on: ubuntu-latest
