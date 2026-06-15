@@ -12,18 +12,14 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
-  - repo: https://gitlab.cern.ch/pre-commit-hook-mirrors/asottile/add-trailing-comma
-    rev: "v2.1.0"
-    hooks:
-      - id: add-trailing-comma
-        args: ["--py36-plus"]
-  - repo: https://gitlab.cern.ch/pre-commit-hook-mirrors/PyCQA/isort
-    rev: "5.11.5"
-    hooks:
-      - id: isort
   - repo: https://gitlab.cern.ch/pre-commit-hook-mirrors/astral-sh/ruff-pre-commit
     rev: v0.15.16
     hooks:
       - id: ruff-check
         args: [ --fix ]
       - id: ruff-format
+        # --quiet hides ruff's spurious "COM812 may conflict with the
+        # formatter" warning. In our hook order COM812 runs in
+        # ruff-check first to add commas, and the formatter then
+        # preserves them via magic-trailing-comma -- no actual conflict.
+        args: ["--quiet"]
