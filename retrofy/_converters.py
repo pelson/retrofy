@@ -108,7 +108,7 @@ def convert_dataclass(module: cst.Module) -> cst.Module:
 
 
 def convert_typing_extensions(module: cst.Module) -> cst.Module:
-    return cst.parse_module(typing_extensions.transform_typing_extensions(module.code))
+    return typing_extensions.convert(module)
 
 
 def convert_lazy_imports(code: str) -> str:
