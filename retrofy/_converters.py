@@ -3,6 +3,7 @@ import dataclasses
 import libcst as cst
 
 from ._transformations import (
+    collections_abc,
     dataclass,
     lazy_imports,
     match_statement,
@@ -108,7 +109,11 @@ def convert_dataclass(module: cst.Module) -> cst.Module:
 
 
 def convert_typing_extensions(module: cst.Module) -> cst.Module:
-    return cst.parse_module(typing_extensions.transform_typing_extensions(module.code))
+    return typing_extensions.convert(module)
+
+
+def convert_collections_abc(module: cst.Module) -> cst.Module:
+    return collections_abc.convert(module)
 
 
 def convert_lazy_imports(code: str) -> str:
@@ -125,6 +130,7 @@ def convert(code: str) -> str:
     mod = convert_type_alias(mod)
     mod = convert_dataclass(mod)
     mod = convert_typing_extensions(mod)
+    mod = convert_collections_abc(mod)
     mod = convert_match_statement(mod)
     mod = convert_union(mod)
     return mod.code
