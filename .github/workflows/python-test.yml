@@ -358,42 +358,12 @@ jobs:
             --with-editable . --with pytest \
             python -m pytest example_project -ssvv
 
-  compatibility_test:
-    strategy:
-      matrix:
-        include:
-          # Since this is just running the tests on Python versions that aren't compatible with
-          # retrofy, we don't need to run this against Python versions which are tested above.
-          - python-version: "3.7"
-            os: ubuntu-22.04
-          - python-version: "3.8"
-            os: ubuntu-latest
-
-    runs-on: ${{ matrix.os }}
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
-        allow-prereleases: ${{ matrix.prerelease || false }}
-
-    - name: Install pytest only
-      run: |
-        python -m pip install pytest libcst
-        echo "__version__ = 'dev'" > ./retrofy/_version.py
-
-    - name: Test compatibility without installing retrofy itself (since it may not be possible to install for older Python versions)
-      run: |
-        python -m pytest ./retrofy/tests/_transformations/test_match_statement.py -ssvv
-
-  out_of_process_editable_test:
-    # Validate the worker subprocess flow on hosts that can't install libcst.
-    # The host (3.7/3.8) imports retrofy's source directly and points
-    # ``$RETROFY_CONVERTER_PYTHON`` at a separately-provisioned 3.13 venv
-    # that has the dev retrofy wheel installed.
+  test_legacy_python:
+    # Validate both retrofy install paths on hosts where retrofy itself
+    # cannot be installed (libcst won't build): the wheel path (where
+    # source is pre-converted at build time) and the editable path (via
+    # ``retrofy setup-editable`` + worker subprocess). Build happens on
+    # a separately-provisioned modern Python; only the host runs old.
     needs: build
     strategy:
       matrix:
@@ -420,7 +390,7 @@ jobs:
         python-version: "3.13"
         update-environment: false
 
-    - name: Download build artifacts
+    - name: Download retrofy dist artefact
       uses: actions/download-artifact@v4
       with:
         name: dist
@@ -430,48 +400,77 @@ jobs:
       run: |
         ${{ steps.converter-python.outputs.python-path }} -m venv "$HOME/.cache/retrofy/converter-venv"
         "$HOME/.cache/retrofy/converter-venv/bin/pip" install --upgrade pip
-        # ``multistage-build`` is example-project's PEP 517 backend.
-        # ``setup-editable`` calls ``prepare_metadata_for_build_wheel``
-        # against whatever backend the project declares, so the
-        # backend must be importable in the converter venv.
+        # ``multistage-build`` is example-project's PEP 517 backend;
+        # both the wheel build below and ``setup-editable``'s
+        # ``prepare_metadata_for_build_wheel`` call need it importable
+        # in the converter venv.
         "$HOME/.cache/retrofy/converter-venv/bin/pip" install \
           dist/retrofy-*-py3-none-any.whl multistage-build
 
-    - name: Install pytest on the host (no libcst)
+    - name: Install pytest on the host (no libcst, no retrofy)
       run: |
-        # The whole point of the worker is that the host does not need
-        # libcst — only the converter venv does. Importing retrofy from
-        # source here proves that ``_meta_hook_converter`` /
-        # ``_editable_converter_client`` are libcst-free on 3.7/3.8.
         python -m pip install pytest
+        # Stand-in version so ``import retrofy`` works from source for
+        # the worker-test step below.
         echo "__version__ = 'dev'" > ./retrofy/_version.py
 
-    - name: Run the out-of-process editable tests
+    # ----- Wheel-install path ------------------------------------------
+    - name: Build example-project wheel via the converter Python
+      run: |
+        # Build with the converter Python (the one that has retrofy).
+        # ``--no-build-isolation`` because the converter venv already
+        # carries the backend chain (retrofy, multistage-build,
+        # setuptools); ``--no-deps`` so pip doesn't try to install
+        # example-project's deps into the wheel-build dir.
+        mkdir -p /tmp/expr-dist
+        "$HOME/.cache/retrofy/converter-venv/bin/pip" wheel ./example-project \
+          --no-build-isolation --no-deps --wheel-dir /tmp/expr-dist
+
+    - name: Install + test example-project wheel on the host
+      run: |
+        # A clean venv so we can assert the wheel install does NOT pull
+        # retrofy at runtime — the build-time rewrite path bakes the
+        # converted source into the wheel.
+        python -m venv /tmp/wheel-venv
+        /tmp/wheel-venv/bin/pip install --upgrade pip
+        /tmp/wheel-venv/bin/pip install pytest /tmp/expr-dist/*.whl
+
+        if /tmp/wheel-venv/bin/pip list --format=freeze | grep -qE '^retrofy=='; then
+          echo "::error::wheel install of example-project pulled retrofy at runtime"
+          /tmp/wheel-venv/bin/pip list --format=freeze
+          exit 1
+        fi
+
+        cd /tmp
+        /tmp/wheel-venv/bin/pytest --pyargs example_project -ssvv
+
+    # ----- Editable path (setup-editable + worker subprocess) ----------
+    - name: Out-of-process worker unit tests
       run: |
         export RETROFY_CONVERTER_PYTHON="$HOME/.cache/retrofy/converter-venv/bin/python"
         python -m pytest ./retrofy/tests/test_out_of_process_editable.py -ssvv
 
-    - name: Drive `setup-editable` against example-project end-to-end
+    - name: setup-editable + example-project pytest end-to-end
       run: |
-        # Integration-level check: run `setup-editable` from the
-        # converter venv, pointing at the 3.7/3.8 host venv as the
-        # target. Then run example-project's own pytest suite from
-        # the host. ``--assert=plain`` disables pytest's assertion
-        # rewriter (which reads the source through Python's AST, and
-        # so cannot handle the post-3.8 syntax that retrofy lowers).
-        HOST_PYTHON=$(which python)
+        # Separate venv so the editable bootstrap doesn't collide with
+        # the wheel-install assertions above.
+        python -m venv /tmp/editable-venv
+        /tmp/editable-venv/bin/pip install --upgrade pip
+        /tmp/editable-venv/bin/pip install pytest
 
         "$HOME/.cache/retrofy/converter-venv/bin/python" -m retrofy \
             setup-editable ./example-project \
-            --target-python "$HOST_PYTHON" \
+            --target-python /tmp/editable-venv/bin/python \
             --converter-venv "$HOME/.cache/retrofy/converter-venv" \
             --no-create-converter-env
 
-        # Run from a directory unrelated to the repo so cwd doesn't
-        # leak retrofy onto sys.path.
+        # Run from /tmp so the repo's cwd doesn't accidentally put
+        # retrofy on sys.path. ``--assert=plain`` because pytest's
+        # assertion rewriter reads source through the host AST, which
+        # doesn't understand the post-3.8 syntax retrofy is lowering.
         cd /tmp
         RETROFY_CONVERTER_PYTHON="$HOME/.cache/retrofy/converter-venv/bin/python" \
-          python -m pytest --assert=plain --pyargs example_project -ssvv
+          /tmp/editable-venv/bin/pytest --assert=plain --pyargs example_project -ssvv
 
   pre-commit:
     runs-on: ubuntu-latest
