@@ -5,6 +5,26 @@ from typing import Dict, List, Optional, Tuple, Union
 import libcst as cst
 
 
+def _module_dotted_name(node: Optional[cst.BaseExpression]) -> Optional[str]:
+    """Return the dotted-name string of a Name/Attribute chain, or None.
+
+    Handles both ``cst.Name("typing")`` and ``cst.Attribute(Name("collections"), Name("abc"))``.
+    """
+    if node is None:
+        return None
+    parts: List[str] = []
+    cur: cst.BaseExpression = node
+    while isinstance(cur, cst.Attribute):
+        if not isinstance(cur.attr, cst.Name):
+            return None
+        parts.append(cur.attr.value)
+        cur = cur.value
+    if not isinstance(cur, cst.Name):
+        return None
+    parts.append(cur.value)
+    return ".".join(reversed(parts))
+
+
 class ImportManager:
     """Helper class for managing automatic imports in transformations."""
 
@@ -153,11 +173,10 @@ class EnhancedImportManager:
                         self._scan_import(substmt, stmt_idx)
 
     def _scan_import_from(self, import_stmt: cst.ImportFrom, stmt_idx: int) -> None:
-        """Scan a 'from X import Y' statement."""
-        if not isinstance(import_stmt.module, cst.Name):
+        """Scan a 'from X import Y' statement (supports dotted X)."""
+        module_name = _module_dotted_name(import_stmt.module)
+        if module_name is None:
             return
-
-        module_name = import_stmt.module.value
 
         if isinstance(import_stmt.names, (list, tuple)):
             for import_idx, name in enumerate(import_stmt.names):
@@ -181,10 +200,10 @@ class EnhancedImportManager:
                     self._import_info[module_name].append(info)
 
     def _scan_import(self, import_stmt: cst.Import, stmt_idx: int) -> None:
-        """Scan a direct 'import X' statement."""
+        """Scan a direct 'import X' statement (supports dotted X)."""
         for alias in import_stmt.names:
-            if isinstance(alias.name, cst.Name):
-                module_name = alias.name.value
+            module_name = _module_dotted_name(alias.name)
+            if module_name is not None:
                 self._direct_imports[module_name] = stmt_idx
 
     def has_import(self, module_name: str, imported_name: str) -> bool:
@@ -226,9 +245,8 @@ class EnhancedImportManager:
                 for substmt in stmt.body:
                     if (
                         isinstance(substmt, cst.ImportFrom)
-                        and substmt.module
-                        and isinstance(substmt.module, cst.Name)
-                        and substmt.module.value == module_name
+                        and substmt.module is not None
+                        and _module_dotted_name(substmt.module) == module_name
                     ):
                         # Filter out the specific import
                         if isinstance(substmt.names, (list, tuple)):
