@@ -119,7 +119,13 @@ def convert(code: str) -> str:
     # PEP 810 ``lazy`` syntax is not parseable by libcst, so the
     # tokenize-based rewrite must run on the raw source first.
     code = convert_lazy_imports(code)
-    mod = cst.parse_module(code)
+    try:
+        mod = cst.parse_module(code)
+    except cst.ParserSyntaxError as exc:
+        err = SyntaxError(getattr(exc, "message", None) or str(exc))
+        err.lineno = getattr(exc, "raw_line", None)
+        err.offset = getattr(exc, "raw_column", None)
+        raise err from exc
     mod = convert_sequence_subscript(mod)
     mod = convert_walrus_operator(mod)
     mod = convert_type_alias(mod)
