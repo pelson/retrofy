@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pathlib
 import textwrap
+import zipfile
 
 import pytest
 
@@ -11,6 +12,7 @@ from retrofy._pep517_hooks import (
     _assert_editable_dependencies_dynamic,
     _lower_requires_python,
     _read_target_python,
+    compatibility_via_rewrite,
     inject_runtime_requirement,
 )
 
@@ -222,3 +224,88 @@ def test_read_target_python_none_when_key_missing(tmp_path):
 
 def test_read_target_python_none_when_pyproject_missing(tmp_path):
     assert _read_target_python(tmp_path) is None
+
+
+def _make_minimal_wheel(tmp_path: pathlib.Path, metadata_text: str) -> pathlib.Path:
+    whl = tmp_path / "dummypkg-0.0.0-py3-none-any.whl"
+    dist_info = "dummypkg-0.0.0.dist-info"
+    with zipfile.ZipFile(whl, "w") as z:
+        z.writestr(f"{dist_info}/METADATA", metadata_text)
+        z.writestr(
+            f"{dist_info}/WHEEL",
+            "Wheel-Version: 1.0\n"
+            "Generator: test\n"
+            "Root-Is-Purelib: true\n"
+            "Tag: py3-none-any\n",
+        )
+        z.writestr(f"{dist_info}/RECORD", "")
+    return whl
+
+
+def test_compatibility_via_rewrite_lowers_requires_python_when_opted_in(
+    tmp_path,
+    monkeypatch,
+):
+    (tmp_path / "pyproject.toml").write_text(
+        textwrap.dedent(
+            """\
+            [project]
+            name = "dummypkg"
+            [tool.retrofy]
+            target-python = "3.9"
+            """,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    metadata = (
+        "Metadata-Version: 2.1\n"
+        "Name: dummypkg\n"
+        "Version: 0.0.0\n"
+        "Requires-Python: >=3.15\n"
+        "\n"
+        "Body.\n"
+    )
+    whl = _make_minimal_wheel(tmp_path, metadata)
+
+    compatibility_via_rewrite(whl)
+
+    with zipfile.ZipFile(whl) as z:
+        new_metadata = z.read("dummypkg-0.0.0.dist-info/METADATA").decode("utf-8")
+    header, _, _ = new_metadata.partition("\n\n")
+    assert "Requires-Python: >=3.9" in header
+    assert "Requires-Python: >=3.15" not in header
+
+
+def test_compatibility_via_rewrite_leaves_requires_python_when_not_opted_in(
+    tmp_path,
+    monkeypatch,
+):
+    (tmp_path / "pyproject.toml").write_text(
+        textwrap.dedent(
+            """\
+            [project]
+            name = "dummypkg"
+            """,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    metadata = (
+        "Metadata-Version: 2.1\n"
+        "Name: dummypkg\n"
+        "Version: 0.0.0\n"
+        "Requires-Python: >=3.15\n"
+        "\n"
+        "Body.\n"
+    )
+    whl = _make_minimal_wheel(tmp_path, metadata)
+
+    compatibility_via_rewrite(whl)
+
+    with zipfile.ZipFile(whl) as z:
+        new_metadata = z.read("dummypkg-0.0.0.dist-info/METADATA").decode("utf-8")
+    assert "Requires-Python: >=3.15" in new_metadata
+    assert "Requires-Python: >=3.9" not in new_metadata

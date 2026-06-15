@@ -284,6 +284,20 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
                 )
             has_modifications = True
 
+        target_py = _read_target_python(pathlib.Path.cwd())
+        if target_py is not None:
+            metadata_name = whl.dist_info_dirname() + "/METADATA"
+            metadata_text = whl.read(metadata_name).decode("utf-8")
+            new_metadata = _lower_requires_python(metadata_text, target_py)
+            if new_metadata != metadata_text:
+                whl.write(metadata_name, new_metadata)
+                _log.info(
+                    "Lowered Requires-Python in %s to %s",
+                    metadata_name,
+                    target_py,
+                )
+                has_modifications = True
+
         if has_modifications:
             with wheel.open("wb") as whl_fh:
                 whl.write_wheel(whl_fh)
