@@ -10,6 +10,7 @@ from retrofy._pep517_hooks import (
     EditableRuntimeRequirementError,
     _assert_editable_dependencies_dynamic,
     _lower_requires_python,
+    _read_target_python,
     inject_runtime_requirement,
 )
 
@@ -181,3 +182,43 @@ def test_lower_requires_python_only_touches_header_block():
     assert "Requires-Python: >=3.9" in header
     assert "Requires-Python: >=3.15" not in header
     assert "Requires-Python: >=3.15" in body
+
+
+def test_read_target_python_returns_floor_when_set(tmp_path):
+    root = _write_pyproject(
+        tmp_path,
+        """\
+        [project]
+        name = "x"
+        [tool.retrofy]
+        target-python = "3.9"
+        """,
+    )
+    assert _read_target_python(root) == ">=3.9"
+
+
+def test_read_target_python_none_when_section_missing(tmp_path):
+    root = _write_pyproject(
+        tmp_path,
+        """\
+        [project]
+        name = "x"
+        """,
+    )
+    assert _read_target_python(root) is None
+
+
+def test_read_target_python_none_when_key_missing(tmp_path):
+    root = _write_pyproject(
+        tmp_path,
+        """\
+        [project]
+        name = "x"
+        [tool.retrofy]
+        """,
+    )
+    assert _read_target_python(root) is None
+
+
+def test_read_target_python_none_when_pyproject_missing(tmp_path):
+    assert _read_target_python(tmp_path) is None

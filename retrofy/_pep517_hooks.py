@@ -89,6 +89,25 @@ def _assert_editable_dependencies_dynamic(source_root: pathlib.Path) -> None:
     )
 
 
+def _read_target_python(source_root: pathlib.Path) -> str | None:
+    """Return the ``Requires-Python`` specifier requested by the project
+    at ``source_root`` via ``[tool.retrofy] target-python``, or ``None``
+    if the project does not opt in.
+
+    The value in pyproject is a bare floor (e.g. ``"3.9"``); the returned
+    string is a PEP 440 specifier (``">=3.9"``) suitable for splicing
+    into METADATA verbatim.
+    """
+    pyproject = source_root / "pyproject.toml"
+    if not pyproject.exists():
+        return None
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    floor = data.get("tool", {}).get("retrofy", {}).get("target-python")
+    if not floor:
+        return None
+    return f">={floor}"
+
+
 def _retrofy_version() -> str:
     # Imported lazily so this module is safe to import without retrofy's
     # own setuptools-scm-generated ``_version.py`` being on disk yet
