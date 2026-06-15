@@ -7,6 +7,7 @@ from ._transformations import (
     dataclass,
     lazy_imports,
     match_statement,
+    pep585_imports,
     type_alias,
     typing_extensions,
     walrus,
@@ -116,6 +117,10 @@ def convert_collections_abc(module: cst.Module) -> cst.Module:
     return collections_abc.convert(module)
 
 
+def convert_pep585_imports(module: cst.Module) -> cst.Module:
+    return pep585_imports.convert(module)
+
+
 def convert_lazy_imports(code: str) -> str:
     return lazy_imports.transform_lazy_imports(code)
 
@@ -137,6 +142,7 @@ def convert(code: str) -> str:
     mod = convert_dataclass(mod)
     mod = convert_typing_extensions(mod)
     mod = convert_collections_abc(mod)
+    mod = convert_pep585_imports(mod)
     mod = convert_match_statement(mod)
     mod = convert_union(mod)
     return mod.code

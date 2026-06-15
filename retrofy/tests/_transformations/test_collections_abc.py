@@ -1,8 +1,11 @@
+import collections.abc
 import sys
 import textwrap
 import types
+import typing
 from typing import Any, Dict
 
+from retrofy._converters import convert as retrofy_convert
 from retrofy._transformations.collections_abc import transform_collections_abc
 
 
@@ -87,14 +90,10 @@ def test_exec_set_unaliased_binds_set():
     converted = t(src)
     # On real >=3.9 interpreter Set is collections.abc.Set.
     ns_new = _exec_ns(converted)
-    import collections.abc
-
     assert ns_new["Set"] is collections.abc.Set
 
     # On simulated <3.9 the local binding ``Set`` should resolve to typing.AbstractSet.
     ns_old = _exec_ns(converted, fake_sys=_fake_sys((3, 8, 0)))
-    import typing
-
     assert ns_old["Set"] is typing.AbstractSet
 
 
@@ -134,8 +133,6 @@ def test_exec_attribute_access():
     converted = t(src)
     # Real interpreter: M is the real collections.abc.Mapping.
     ns_new = _exec_ns(converted)
-    import collections.abc
-
     assert ns_new["M"] is collections.abc.Mapping
 
     # Simulated <3.9: the assignment patches collections.abc.Mapping to
@@ -143,8 +140,6 @@ def test_exec_attribute_access():
     real = collections.abc.Mapping
     try:
         ns_old = _exec_ns(converted, fake_sys=_fake_sys((3, 8, 0)))
-        import typing
-
         assert ns_old["M"] is typing.Mapping
         # And the module attribute was patched too:
         assert collections.abc.Mapping is typing.Mapping
@@ -158,8 +153,6 @@ def test_runtime_version_check_used_real_sys():
     src = "from collections.abc import Mapping\nx: Mapping\n"
     converted = t(src)
     ns = _exec_ns(converted)
-    import collections.abc
-
     assert ns["Mapping"] is collections.abc.Mapping
 
 
@@ -417,15 +410,13 @@ def test_no_collections_abc_no_change():
 
 def test_full_pipeline_integration():
     """Run through the public convert() entry to catch interaction with other passes."""
-    from retrofy._converters import convert
-
     src = textwrap.dedent("""
     from collections.abc import Mapping
 
     def f(m: Mapping[str, int]) -> int:
         return len(m)
     """)
-    out = convert(src)
+    out = retrofy_convert(src)
     assert "if sys.version_info >= (3, 9):" in out
     assert "from collections.abc import Mapping" in out
     assert "from typing import Mapping" in out

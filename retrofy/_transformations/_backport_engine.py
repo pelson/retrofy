@@ -338,37 +338,71 @@ class _AnalysisVisitor(cst.CSTVisitor):
         return (major, minor)
 
     def _classify_version_check(self, node: cst.If) -> Optional[str]:
+        # Only treat an existing version-check as ours if it manipulates a
+        # name in *this* config's feature lookup. Without this, an unrelated
+        # block like ``if py>=3.9: from collections.abc import Mapping else:
+        # from typing import Mapping`` would be misidentified as a pre-existing
+        # check for the (collections -> typing) config because it also imports
+        # from typing.
         src = self.config.source_module
         fb = self.config.fallback_module
+
+        def _import_touches_a_feature(substmt: cst.ImportFrom) -> bool:
+            if not (
+                _module_matches(substmt.module, src)
+                or _module_matches(substmt.module, fb)
+            ):
+                return False
+            names = self._import_alias_names(substmt)
+            return any(n in self.lookup for n in names)
+
         for stmt in node.body.body:
             if not isinstance(stmt, cst.SimpleStatementLine):
                 continue
             for substmt in stmt.body:
                 if isinstance(substmt, cst.Assign):
                     val = substmt.value
-                    if isinstance(val, cst.Attribute) and _module_matches(
-                        val.value,
-                        fb,
+                    target = substmt.targets[0].target if substmt.targets else None
+                    if (
+                        isinstance(val, cst.Attribute)
+                        and _module_matches(val.value, fb)
+                        and isinstance(target, cst.Attribute)
+                        and _module_matches(target.value, src)
+                        and isinstance(target.attr, cst.Name)
+                        and target.attr.value in self.lookup
                     ):
                         return "assignment"
-                elif isinstance(substmt, cst.ImportFrom):
-                    if _module_matches(substmt.module, src) or _module_matches(
-                        substmt.module,
-                        fb,
-                    ):
-                        return "conditional_import"
+                elif isinstance(
+                    substmt,
+                    cst.ImportFrom,
+                ) and _import_touches_a_feature(substmt):
+                    return "conditional_import"
         if isinstance(node.orelse, cst.Else):
             for stmt in node.orelse.body.body:
                 if not isinstance(stmt, cst.SimpleStatementLine):
                     continue
                 for substmt in stmt.body:
-                    if isinstance(substmt, cst.ImportFrom):
-                        if _module_matches(
-                            substmt.module,
-                            src,
-                        ) or _module_matches(substmt.module, fb):
-                            return "conditional_import"
+                    if isinstance(
+                        substmt,
+                        cst.ImportFrom,
+                    ) and _import_touches_a_feature(substmt):
+                        return "conditional_import"
         return None
+
+    @staticmethod
+    def _import_alias_names(import_node: cst.ImportFrom) -> List[str]:
+        if isinstance(import_node.names, cst.ImportStar):
+            return []
+        names = (
+            import_node.names
+            if isinstance(import_node.names, (list, tuple))
+            else [import_node.names]
+        )
+        out: List[str] = []
+        for n in names:
+            if isinstance(n, cst.ImportAlias) and isinstance(n.name, cst.Name):
+                out.append(n.name.value)
+        return out
 
 
 # ---------------------------------------------------------------------------
