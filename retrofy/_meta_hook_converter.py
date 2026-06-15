@@ -8,6 +8,12 @@ import typing
 
 from ._converters import convert
 
+# libcst — and therefore retrofy's in-process conversion path — does
+# not install on Python 3.7/3.8. On those interpreters the editable
+# meta-hook drives an out-of-process converter running on a modern
+# Python the user has nominated; see ``_editable_converter_client``.
+_HOST_NEEDS_WORKER = sys.version_info < (3, 9)
+
 # Name of the sub-package retrofy injects into every converted package
 # that needs runtime helpers. Reserved — converters must never emit
 # code that imports from anything else under this name.
@@ -24,11 +30,14 @@ class OnTheFlyConverter(SourceLoader):
     def get_data(self, filename):
         """exec_module is already defined for us, we just have to provide a way
         of getting the source code of the module"""
+        if _HOST_NEEDS_WORKER:
+            from ._editable_converter_client import get_worker
+
+            return get_worker().convert(filename)
+
         with open(filename) as f:
             data = f.read()
-
-        new_code = convert(data)
-        return new_code
+        return convert(data)
 
 
 class _EmbeddedRuntimeLoader(Loader):
