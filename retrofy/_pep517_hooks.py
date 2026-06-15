@@ -120,6 +120,31 @@ def _splice_retrofy_requires_dist(text: str) -> str:
     return header + f"\nRequires-Dist: retrofy=={_retrofy_version()}" + suffix
 
 
+def _lower_requires_python(text: str, floor: str) -> str:
+    """Return ``text`` with the ``Requires-Python:`` line in the METADATA
+    header replaced by ``Requires-Python: {floor}``. If no such line is
+    present in the header, one is appended to the header block.
+
+    Only the header block (everything before the first blank line) is
+    touched -- a stray ``Requires-Python:`` mention in the long
+    description body is preserved verbatim.
+    """
+    header, sep, body = text.partition("\n\n")
+    new_value = f"Requires-Python: {floor}"
+    replaced = False
+    out_lines = []
+    for line in header.split("\n"):
+        if line.startswith("Requires-Python:"):
+            out_lines.append(new_value)
+            replaced = True
+        else:
+            out_lines.append(line)
+    if not replaced:
+        out_lines.append(new_value)
+    new_header = "\n".join(out_lines)
+    return new_header + (sep + body if sep else "")
+
+
 def inject_runtime_requirement(dist_info_path: pathlib.Path) -> None:
     """``post-prepare-metadata-for-build-editable`` hook.
 

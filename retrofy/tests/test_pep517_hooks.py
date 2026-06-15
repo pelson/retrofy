@@ -9,6 +9,7 @@ from retrofy import __version__ as RETROFY_VERSION
 from retrofy._pep517_hooks import (
     EditableRuntimeRequirementError,
     _assert_editable_dependencies_dynamic,
+    _lower_requires_python,
     inject_runtime_requirement,
 )
 
@@ -133,3 +134,50 @@ def test_assert_editable_dependencies_dynamic_raises_when_absent(tmp_path):
 
 def test_assert_editable_dependencies_dynamic_skips_when_no_pyproject(tmp_path):
     _assert_editable_dependencies_dynamic(tmp_path)
+
+
+def test_lower_requires_python_replaces_existing_line():
+    text = (
+        "Metadata-Version: 2.1\n"
+        "Name: retrofy\n"
+        "Version: 0.4.0\n"
+        "Requires-Python: >=3.15\n"
+        "Requires-Dist: libcst\n"
+        "\n"
+        "Long description.\n"
+    )
+    new = _lower_requires_python(text, ">=3.9")
+    assert "Requires-Python: >=3.9\n" in new
+    assert "Requires-Python: >=3.15" not in new
+    assert "Requires-Dist: libcst\n" in new
+    assert new.endswith("Long description.\n")
+
+
+def test_lower_requires_python_adds_when_missing():
+    text = (
+        "Metadata-Version: 2.1\n"
+        "Name: retrofy\n"
+        "Version: 0.4.0\n"
+        "Requires-Dist: libcst\n"
+        "\n"
+        "Body.\n"
+    )
+    new = _lower_requires_python(text, ">=3.9")
+    header, _, _ = new.partition("\n\n")
+    assert "Requires-Python: >=3.9" in header
+
+
+def test_lower_requires_python_only_touches_header_block():
+    text = (
+        "Metadata-Version: 2.1\n"
+        "Name: retrofy\n"
+        "Version: 0.4.0\n"
+        "Requires-Python: >=3.15\n"
+        "\n"
+        "See Requires-Python: >=3.15 in the docs.\n"
+    )
+    new = _lower_requires_python(text, ">=3.9")
+    header, _, body = new.partition("\n\n")
+    assert "Requires-Python: >=3.9" in header
+    assert "Requires-Python: >=3.15" not in header
+    assert "Requires-Python: >=3.15" in body
