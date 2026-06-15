@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from importlib.abc import Loader, MetaPathFinder, SourceLoader
 from importlib.machinery import ModuleSpec
-import importlib.resources
+from pathlib import Path
 import sys
 import typing
 
@@ -74,11 +74,13 @@ class _EmbeddedRuntimeLoader(Loader):
         return self._filename
 
 
-def _embedded_runtime_root():
-    # Use __package__ rather than a hardcoded "retrofy.*" so this
-    # module can be bundled into a different parent package on 3.7/3.8
-    # hosts (see ``retrofy install-editable``).
-    return importlib.resources.files(f"{__package__}._embedded_runtime._retrofy")
+def _embedded_runtime_root() -> Path:
+    # Derived from ``__file__`` so the lookup works both when this
+    # module lives under retrofy itself and when it has been bundled
+    # under a different parent (see ``retrofy setup-editable``).
+    # importlib.resources.files is 3.9+, so a plain Path is also the
+    # only thing portable to 3.7/3.8 hosts.
+    return Path(__file__).parent / "_embedded_runtime" / "_retrofy"
 
 
 def _embedded_runtime_source(modname: str) -> typing.Tuple[bytes, str] | None:
