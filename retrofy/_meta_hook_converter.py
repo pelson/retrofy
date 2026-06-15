@@ -6,14 +6,13 @@ from pathlib import Path
 import sys
 import typing
 
-# libcst — and therefore retrofy's in-process conversion path — does
-# not install on Python 3.7/3.8. On those interpreters the editable
-# meta-hook drives an out-of-process converter running on a modern
-# Python the user has nominated; see ``_editable_converter_client``.
-# ``convert`` is therefore imported lazily inside the in-process
-# branch so importing this module on 3.7/3.8 does not transitively
-# pull libcst. (Dogfooding ``lazy import`` here is the right long-term
-# answer; see ``[[retrofy-dogfood-lazy-import]]``.)
+lazy from ._converters import convert
+
+# ``_converters`` pulls libcst, which does not install on 3.7/3.8;
+# ``_editable_converter_client`` is only used on those hosts. Both
+# are lazy so each branch in ``get_data`` only pays for its own deps.
+lazy from ._editable_converter_client import get_worker
+
 _HOST_NEEDS_WORKER = sys.version_info < (3, 9)
 
 # Name of the sub-package retrofy injects into every converted package
@@ -33,13 +32,7 @@ class OnTheFlyConverter(SourceLoader):
         """exec_module is already defined for us, we just have to provide a way
         of getting the source code of the module"""
         if _HOST_NEEDS_WORKER:
-            from ._editable_converter_client import get_worker
-
             return get_worker().convert(filename)
-
-        # Deferred so that importing this module on 3.7/3.8 does not
-        # transitively pull libcst (which won't install there).
-        from ._converters import convert
 
         with open(filename) as f:
             data = f.read()

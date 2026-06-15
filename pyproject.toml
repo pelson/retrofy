@@ -1,5 +1,18 @@
 [build-system]
-requires = ["setuptools", "wheel", "setuptools_scm[toml]"]
+# retrofy's own source uses PEP 810 ``lazy from``. The wheel build runs
+# the project's ``compatibility_via_rewrite`` hook against itself so the
+# shipped wheel is plain Python. Bootstraps from a previously published
+# retrofy in this build env -- those releases predate ``lazy from`` in
+# the source and lower the new source cleanly.
+requires = [
+  "multistage-build>=0.2",
+  "setuptools",
+  "setuptools_scm[toml]",
+  "retrofy",
+]
+build-backend = "multistage_build:backend"
+
+[tool.multistage-build]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -16,7 +29,7 @@ classifiers = [
 authors = [
   { name = "Phil Elson", email = "pelson.pub@gmail.com" },
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.15"
 license = "Apache-2.0"
 
 # The core dependencies of the project.
@@ -58,7 +71,7 @@ write_to = "retrofy/_version.py"
 
 [tool.ruff]
 line-length = 88
-target-version = "py39"
+target-version = "py315"
 
 [tool.ruff.lint]
 extend-select = ["I", "COM"]
