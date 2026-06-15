@@ -2,11 +2,19 @@ from __future__ import annotations
 
 from importlib.abc import Loader, MetaPathFinder, SourceLoader
 from importlib.machinery import ModuleSpec
-import importlib.resources
+from pathlib import Path
 import sys
 import typing
 
-from ._converters import convert
+# libcst — and therefore retrofy's in-process conversion path — does
+# not install on Python 3.7/3.8. On those interpreters the editable
+# meta-hook drives an out-of-process converter running on a modern
+# Python the user has nominated; see ``_editable_converter_client``.
+# ``convert`` is therefore imported lazily inside the in-process
+# branch so importing this module on 3.7/3.8 does not transitively
+# pull libcst. (Dogfooding ``lazy import`` here is the right long-term
+# answer; see ``[[retrofy-dogfood-lazy-import]]``.)
+_HOST_NEEDS_WORKER = sys.version_info < (3, 9)
 
 # Name of the sub-package retrofy injects into every converted package
 # that needs runtime helpers. Reserved — converters must never emit
@@ -24,11 +32,18 @@ class OnTheFlyConverter(SourceLoader):
     def get_data(self, filename):
         """exec_module is already defined for us, we just have to provide a way
         of getting the source code of the module"""
+        if _HOST_NEEDS_WORKER:
+            from ._editable_converter_client import get_worker
+
+            return get_worker().convert(filename)
+
+        # Deferred so that importing this module on 3.7/3.8 does not
+        # transitively pull libcst (which won't install there).
+        from ._converters import convert
+
         with open(filename) as f:
             data = f.read()
-
-        new_code = convert(data)
-        return new_code
+        return convert(data)
 
 
 class _EmbeddedRuntimeLoader(Loader):
@@ -59,8 +74,13 @@ class _EmbeddedRuntimeLoader(Loader):
         return self._filename
 
 
-def _embedded_runtime_root():
-    return importlib.resources.files("retrofy._embedded_runtime._retrofy")
+def _embedded_runtime_root() -> Path:
+    # Derived from ``__file__`` so the lookup works both when this
+    # module lives under retrofy itself and when it has been bundled
+    # under a different parent (see ``retrofy setup-editable``).
+    # importlib.resources.files is 3.9+, so a plain Path is also the
+    # only thing portable to 3.7/3.8 hosts.
+    return Path(__file__).parent / "_embedded_runtime" / "_retrofy"
 
 
 def _embedded_runtime_source(modname: str) -> typing.Tuple[bytes, str] | None:

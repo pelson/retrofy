@@ -36,6 +36,21 @@ It is imperative that you test the produced wheels with the target versions, as 
 may be syntax which is not yet handled in retrofy, resulting in a SyntaxError on your
 desired Python version.
 
+### Editable installs on Python 3.7/3.8
+
+`libcst` does not install on 3.7/3.8, so retrofy delegates per-file conversion to
+a separate Python (3.9+) that does have retrofy installed. Prepare one venv per
+machine:
+
+```
+python3 -m venv ~/.cache/retrofy/converter-venv
+~/.cache/retrofy/converter-venv/bin/pip install retrofy
+```
+
+Override the location with `RETROFY_CONVERTER_PYTHON` (a shell command, e.g.
+`/opt/py3.13/bin/python`). If neither is present and `uv` is on `PATH`, retrofy
+falls back to `uv run --with retrofy python`.
+
 
 ## Available transformations
 

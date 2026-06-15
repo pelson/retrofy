@@ -616,7 +616,14 @@ def _inject_runtime_import(
 
 
 def transform_lazy_imports(source: str) -> str:
-    tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except tokenize.TokenError as exc:
+        msg, pos = exc.args
+        err = SyntaxError(msg)
+        if isinstance(pos, tuple) and len(pos) == 2:
+            err.lineno, err.offset = pos
+        raise err from exc
     lazy_modules_lineno = _find_lazy_modules_declaration(tokens)
     if lazy_modules_lineno is not None:
         warnings.warn(
