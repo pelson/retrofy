@@ -75,7 +75,10 @@ class _EmbeddedRuntimeLoader(Loader):
 
 
 def _embedded_runtime_root():
-    return importlib.resources.files("retrofy._embedded_runtime._retrofy")
+    # Use __package__ rather than a hardcoded "retrofy.*" so this
+    # module can be bundled into a different parent package on 3.7/3.8
+    # hosts (see ``retrofy install-editable``).
+    return importlib.resources.files(f"{__package__}._embedded_runtime._retrofy")
 
 
 def _embedded_runtime_source(modname: str) -> typing.Tuple[bytes, str] | None:

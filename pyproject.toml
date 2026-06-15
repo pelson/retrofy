@@ -23,6 +23,7 @@ license = "Apache-2.0"
 dependencies = [
   "libcst",
   "setuptools-ext",  # TODO: Get rid of this dependency when there is a wheel interface elsewhere.
+  "tomli; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
