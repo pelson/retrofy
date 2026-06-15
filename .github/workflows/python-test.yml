@@ -389,6 +389,63 @@ jobs:
       run: |
         python -m pytest ./retrofy/tests/_transformations/test_match_statement.py -ssvv
 
+  out_of_process_editable_test:
+    # Validate the worker subprocess flow on hosts that can't install libcst.
+    # The host (3.7/3.8) imports retrofy's source directly and points
+    # ``$RETROFY_CONVERTER_PYTHON`` at a separately-provisioned 3.13 venv
+    # that has the dev retrofy wheel installed.
+    needs: build
+    strategy:
+      matrix:
+        include:
+          - python-version: "3.7"
+            os: ubuntu-22.04
+          - python-version: "3.8"
+            os: ubuntu-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up host Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Set up converter Python 3.13
+      id: converter-python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+        update-environment: false
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: dist
+        path: dist/
+
+    - name: Provision the converter venv with the dev retrofy wheel
+      run: |
+        ${{ steps.converter-python.outputs.python-path }} -m venv "$HOME/.cache/retrofy/converter-venv"
+        "$HOME/.cache/retrofy/converter-venv/bin/pip" install --upgrade pip
+        "$HOME/.cache/retrofy/converter-venv/bin/pip" install dist/retrofy-*-py3-none-any.whl
+
+    - name: Install pytest on the host (no libcst)
+      run: |
+        # The whole point of the worker is that the host does not need
+        # libcst — only the converter venv does. Importing retrofy from
+        # source here proves that ``_meta_hook_converter`` /
+        # ``_editable_converter_client`` are libcst-free on 3.7/3.8.
+        python -m pip install pytest
+        echo "__version__ = 'dev'" > ./retrofy/_version.py
+
+    - name: Run the out-of-process editable tests
+      run: |
+        export RETROFY_CONVERTER_PYTHON="$HOME/.cache/retrofy/converter-venv/bin/python"
+        python -m pytest ./retrofy/tests/test_out_of_process_editable.py -ssvv
+
   pre-commit:
     runs-on: ubuntu-latest
 

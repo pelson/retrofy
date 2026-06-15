@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import textwrap
@@ -35,13 +37,27 @@ from retrofy._editable_converter_client import (
 # ---------------------------------------------------------------------------
 
 
+def _converter_argv() -> list[str]:
+    """Argv prefix for spawning a converter Python.
+
+    Honours ``$RETROFY_CONVERTER_PYTHON`` so the same tests can be driven
+    against a separate interpreter on hosts (3.7/3.8) where the running
+    interpreter cannot itself install libcst. Falls back to
+    ``sys.executable`` for the common 3.9+ case.
+    """
+    env = os.environ.get(ENV_VAR)
+    if env:
+        return shlex.split(env)
+    return [sys.executable]
+
+
 @pytest.fixture
 def server() -> Iterator[subprocess.Popen]:
-    """A fresh converter-server subprocess running on the test interpreter,
-    pre-synchronised on its READY signal and cleanly QUIT on teardown.
+    """A fresh converter-server subprocess, pre-synchronised on its READY
+    signal and cleanly QUIT on teardown.
     """
     proc = subprocess.Popen(
-        [sys.executable, "-m", "retrofy._editable_converter_server"],
+        [*_converter_argv(), "-m", "retrofy._editable_converter_server"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -102,12 +118,13 @@ def test_server_reports_syntax_error_as_err(server: subprocess.Popen, tmp_path: 
 
 @pytest.fixture
 def worker_against_self(monkeypatch) -> Iterator[ConverterWorker]:
-    """A worker whose subprocess is the interpreter running these tests.
+    """A worker whose subprocess uses the test-configured converter Python.
 
-    We monkeypatch the resolver so we don't need a prepared converter
-    venv on the test host.
+    Honours ``$RETROFY_CONVERTER_PYTHON`` (so CI can point at a 3.13
+    venv on 3.7/3.8 hosts); otherwise falls back to ``sys.executable``.
     """
-    monkeypatch.setattr(client, "resolve_converter_python", lambda: [sys.executable])
+    argv = _converter_argv()
+    monkeypatch.setattr(client, "resolve_converter_python", lambda: argv)
     # Ensure no leftover singleton bleeds across tests.
     monkeypatch.setattr(client, "_worker_singleton", None)
     worker = ConverterWorker()
@@ -218,7 +235,8 @@ def test_meta_hook_uses_worker_when_forced(monkeypatch, tmp_path: Path):
 
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setattr(meta_hook, "_HOST_NEEDS_WORKER", True)
-    monkeypatch.setattr(client, "resolve_converter_python", lambda: [sys.executable])
+    argv = _converter_argv()
+    monkeypatch.setattr(client, "resolve_converter_python", lambda: argv)
     monkeypatch.setattr(client, "_worker_singleton", None)
 
     meta_hook.register_hook(["fakepkg"])
