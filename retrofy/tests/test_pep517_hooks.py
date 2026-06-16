@@ -186,6 +186,17 @@ def test_lower_requires_python_only_touches_header_block():
     assert "Requires-Python: >=3.15" in body
 
 
+def test_lower_requires_python_matches_case_insensitively():
+    # PEP 566 headers are case-insensitive on the field name; a
+    # lowercase ``requires-python:`` line must still be recognised
+    # and replaced (with the canonical capitalisation).
+    text = "Metadata-Version: 2.1\nName: retrofy\nrequires-python: >=3.15\n\nBody.\n"
+    new = _lower_requires_python(text, ">=3.9")
+    assert "Requires-Python: >=3.9" in new
+    assert "requires-python: >=3.15" not in new
+    assert "Requires-Python: >=3.15" not in new
+
+
 def test_read_target_python_returns_floor_when_set(tmp_path):
     root = _write_pyproject(
         tmp_path,
@@ -309,3 +320,48 @@ def test_compatibility_via_rewrite_leaves_requires_python_when_not_opted_in(
         new_metadata = z.read("dummypkg-0.0.0.dist-info/METADATA").decode("utf-8")
     assert "Requires-Python: >=3.15" in new_metadata
     assert "Requires-Python: >=3.9" not in new_metadata
+
+
+def test_compatibility_via_rewrite_skipped_when_disable_env_set(
+    tmp_path,
+    monkeypatch,
+):
+    # Bootstrap escape hatch: with ``RETROFY_DISABLE_REWRITE=1``, the
+    # hook must be a complete no-op even when the project opts in to
+    # rewriting via ``[tool.retrofy] target-python``.
+    (tmp_path / "pyproject.toml").write_text(
+        textwrap.dedent(
+            """\
+            [project]
+            name = "dummypkg"
+            [tool.retrofy]
+            target-python = "3.9"
+            """,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RETROFY_DISABLE_REWRITE", "1")
+
+    raw_source = "lazy from foo import bar\n"
+    raw_metadata = (
+        "Metadata-Version: 2.1\n"
+        "Name: dummypkg\n"
+        "Version: 0.0.0\n"
+        "Requires-Python: >=3.15\n"
+        "\n"
+        "Body.\n"
+    )
+    whl = _make_minimal_wheel(tmp_path, raw_metadata)
+    # Stuff a raw-lazy .py into the wheel so we'd notice if convert
+    # ran anyway.
+    with zipfile.ZipFile(whl, "a") as z:
+        z.writestr("dummypkg/x.py", raw_source)
+
+    compatibility_via_rewrite(whl)
+
+    with zipfile.ZipFile(whl) as z:
+        py = z.read("dummypkg/x.py").decode("utf-8")
+        md = z.read("dummypkg-0.0.0.dist-info/METADATA").decode("utf-8")
+    assert py == raw_source  # not converted
+    assert "Requires-Python: >=3.15" in md  # METADATA not lowered

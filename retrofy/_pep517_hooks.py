@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.resources
 import logging
+import os
 import pathlib
 import posixpath
 import shutil
@@ -150,10 +151,12 @@ def _lower_requires_python(text: str, floor: str) -> str:
     """
     header, sep, body = text.partition("\n\n")
     new_value = f"Requires-Python: {floor}"
+    # PEP 566 / RFC 822 headers are case-insensitive on the field name,
+    # so match permissively but emit the canonical capitalisation.
     replaced = False
     out_lines = []
     for line in header.split("\n"):
-        if line.startswith("Requires-Python:"):
+        if line.lower().startswith("requires-python:"):
             out_lines.append(new_value)
             replaced = True
         else:
@@ -228,6 +231,15 @@ def compatibility_via_import_hook(wheel: pathlib.Path):
 
 def compatibility_via_rewrite(wheel: pathlib.Path):
     """Change code within the given wheel to be compatible"""
+    if os.environ.get("RETROFY_DISABLE_REWRITE") == "1":
+        # Escape hatch for the chicken-and-egg bootstrap: producing
+        # retrofy's *own* wheel from source needs a wheel-build pass
+        # whose source still contains raw ``lazy from``, run without
+        # any rewrite hook in the way. Setting this env var on that
+        # first pass keeps the hook installed (entry point intact) but
+        # makes it a no-op.
+        _log.info("RETROFY_DISABLE_REWRITE=1 — skipping wheel rewrite")
+        return
     editable_copy = wheel.parent / (wheel.name + ".copy.whl")
     shutil.copy(wheel, editable_copy)
 
