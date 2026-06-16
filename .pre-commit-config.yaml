@@ -6,7 +6,7 @@ repos:
         additional_dependencies: ["types-mock"]
         # 3.15 ``lazy`` syntax is not parseable by mypy; retrofy
         # rewrites this file at import / build.
-        exclude: '^(example-project/example_project/tests/test_lazy_imports\.py|retrofy/_meta_hook_converter\.py)$'
+        exclude: '^(example-project/example_project/tests/test_lazy_imports\.py|retrofy/_meta_hook_converter\.py|retrofy/_setup_editable\.py)$'
   - repo: https://gitlab.cern.ch/pre-commit-hook-mirrors/pre-commit/pre-commit-hooks
     rev: "v4.0.1"
     hooks:

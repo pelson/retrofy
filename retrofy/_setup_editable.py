@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -24,12 +25,26 @@ try:
 except ImportError:  # 3.9 / 3.10
     import tomli as tomllib  # type: ignore[no-redef]
 
+# Only needed in ``_copy_bootstrap`` when the source has raw ``lazy``
+# syntax (editable retrofy on 3.15). Lazy so a wheel-installed retrofy
+# running setup-editable doesn't pull libcst.
+lazy from ._meta_hook_converter import OnTheFlyConverter
 
 _BOOTSTRAP_MODULES = (
     "_meta_hook_converter.py",
     "_editable_converter_client.py",
 )
 _RUNTIME_PACKAGE_DIR = "_retrofy_rt"
+
+# Cheap, tokenize-free heuristic for "this source contains raw
+# ``lazy from`` / ``lazy import`` syntax and needs lowering before it
+# can be shipped to a pre-3.15 target". A false positive on a string
+# literal containing the substring is harmless -- convert() would just
+# pass it through. A false negative is the dangerous case (raw lazy
+# leaks to the target), so we look for the lexical pattern at line
+# start (modulo indentation), which is where retrofy's emitter would
+# produce it.
+_RAW_LAZY_RE = re.compile(r"(?m)^[ \t]*lazy[ \t]+(?:from|import)\b")
 
 BOOTSTRAP_NAME = "_retrofy_editable_bootstrap"
 DEFAULT_CONVERTER_VENV = Path("~/.cache/retrofy/converter-venv").expanduser()
@@ -123,8 +138,21 @@ def _copy_bootstrap(dst_pkg: Path) -> None:
         "from ._meta_hook_converter import register_hook  # noqa: F401,E402\n",
         encoding="utf-8",
     )
+    # Wheel-installed retrofy already ships lowered bootstrap source
+    # (via ``compatibility_via_rewrite``): plain copy, no libcst. An
+    # editable retrofy on 3.15 still has raw ``lazy from`` -- route
+    # through retrofy's own loader so the bootstrap dir never contains
+    # native ``lazy`` syntax. libcst is only pulled in this latter
+    # path, which by construction runs in a dev env where libcst is
+    # already installed.
     for module in _BOOTSTRAP_MODULES:
-        shutil.copy2(src_root / module, dst_pkg / module)
+        src = src_root / module
+        dst = dst_pkg / module
+        code = src.read_text(encoding="utf-8")
+        if not _RAW_LAZY_RE.search(code):
+            shutil.copy2(src, dst)
+            continue
+        dst.write_text(OnTheFlyConverter(str(src)).get_data(str(src)))
     shutil.copytree(
         src_root / _RUNTIME_PACKAGE_DIR,
         dst_pkg / _RUNTIME_PACKAGE_DIR,

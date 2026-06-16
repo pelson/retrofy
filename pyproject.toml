@@ -69,7 +69,7 @@ retrofy = "retrofy._pytest_plugin"
 # any other file that imports it (e.g. ``_pytest_plugin``) would still
 # drag it into the analysis via ``follow-imports``. Skip following.
 [[tool.mypy.overrides]]
-module = "retrofy._meta_hook_converter"
+module = ["retrofy._meta_hook_converter", "retrofy._setup_editable"]
 follow_imports = "skip"
 
 [tool.retrofy]
