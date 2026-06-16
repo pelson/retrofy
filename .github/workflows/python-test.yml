@@ -10,22 +10,44 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # libcst (a retrofy build/runtime dep) builds a native extension
+      # via PyO3. PyO3 0.26 caps at Python 3.14, so building from sdist
+      # on 3.15 fails unless we opt in to the stable-ABI forward-compat
+      # path. No-op for older Pythons that PyO3 already supports.
+      PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
     steps:
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0  # Full history for setuptools-scm
 
-    - name: Set up Python 3.13
+    - name: Set up Python 3.15
       uses: actions/setup-python@v5
       with:
-        python-version: "3.13"
+        python-version: "3.15"
+        allow-prereleases: true
 
-    - name: Install build dependencies
+    - name: Bootstrap in-tree retrofy into the build env
+      # retrofy's source uses native ``lazy from``; 3.15 parses it
+      # without retrofy needing to be installed first. Install
+      # non-editable, --no-build-isolation, so the multistage backend
+      # finds an empty entry-point set on this first pass and produces
+      # a raw wheel of the in-tree source. That wheel registers the
+      # post-build-wheel entry point so the *second* build below
+      # finds it and runs ``compatibility_via_rewrite`` on the wheel.
       run: |
-        python -m pip install build
+        python -m pip install --upgrade pip
+        python -m pip install build multistage-build setuptools_scm libcst setuptools-ext tomli
+        python -m pip install . --no-build-isolation --no-deps
 
-    - name: Build wheel and sdist
-      run: python -m build
+    - name: Build wheel and sdist (lowered)
+      # multistage_build now sees retrofy's entry points and runs
+      # ``compatibility_via_rewrite``, which lowers source and rewrites
+      # METADATA's Requires-Python to ``[tool.retrofy] target-python``
+      # (>=3.9 for this project). --no-isolation reuses the bootstrap
+      # env above so we don't fall back to a fresh build env that
+      # would lack the in-tree retrofy.
+      run: python -m build --no-isolation
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
@@ -150,6 +172,25 @@ jobs:
         # wheel and ``pytest`` to PyPI's release — no ``--find-links``,
         # no ``--pre``, no path-based install.
         python -m pip install pytest retrofy
+
+    - name: Assert installed retrofy contains no raw `lazy from` source
+      # The build job lowers retrofy's own source via
+      # ``compatibility_via_rewrite``. If this assertion fires, the
+      # build env lost ``--no-isolation`` or the in-tree retrofy
+      # bootstrap regressed, and the wheel ships raw ``lazy from``
+      # that pre-3.15 Pythons can't parse.
+      run: |
+        SITE=$(python -c "import retrofy, pathlib; print(pathlib.Path(retrofy.__file__).parent)")
+        # Tests are allowed to contain ``lazy from`` inside fixture
+        # string literals; filter out the tests dir.
+        BAD=$(grep -RIln --include='*.py' '^[[:space:]]*lazy[[:space:]]\+\(from\|import\)\b' "$SITE" \
+              | grep -v '/tests/' || true)
+        if [ -n "$BAD" ]; then
+          echo "::error::installed retrofy contains raw lazy syntax outside tests/:"
+          echo "$BAD"
+          exit 1
+        fi
+        echo "Confirmed installed retrofy non-test code is lowered"
 
     - name: Test with pytest (isolated from source)
       run: |
