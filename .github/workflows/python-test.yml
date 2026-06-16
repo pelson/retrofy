@@ -173,24 +173,16 @@ jobs:
         # no ``--pre``, no path-based install.
         python -m pip install pytest retrofy
 
-    - name: Assert installed retrofy contains no raw `lazy from` source
+    - name: Assert installed retrofy parses on the matrix Python
       # The build job lowers retrofy's own source via
-      # ``compatibility_via_rewrite``. If this assertion fires, the
-      # build env lost ``--no-isolation`` or the in-tree retrofy
-      # bootstrap regressed, and the wheel ships raw ``lazy from``
-      # that pre-3.15 Pythons can't parse.
+      # ``compatibility_via_rewrite``. ``compileall`` on the matrix
+      # interpreter is the ground-truth check: if any raw ``lazy
+      # from`` leaked past the rewrite, pre-3.15 Pythons raise
+      # ``SyntaxError`` here. ``lazy from`` inside string fixtures is
+      # ignored by the parser.
       run: |
         SITE=$(python -c "import retrofy, pathlib; print(pathlib.Path(retrofy.__file__).parent)")
-        # Tests are allowed to contain ``lazy from`` inside fixture
-        # string literals; filter out the tests dir.
-        BAD=$(grep -RIln --include='*.py' '^[[:space:]]*lazy[[:space:]]\+\(from\|import\)\b' "$SITE" \
-              | grep -v '/tests/' || true)
-        if [ -n "$BAD" ]; then
-          echo "::error::installed retrofy contains raw lazy syntax outside tests/:"
-          echo "$BAD"
-          exit 1
-        fi
-        echo "Confirmed installed retrofy non-test code is lowered"
+        python -m compileall -q -f "$SITE"
 
     - name: Test with pytest (isolated from source)
       run: |
