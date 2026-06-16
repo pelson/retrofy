@@ -128,7 +128,7 @@ def pytest_sessionstart(session):
 
     from ._meta_hook_converter import MyMetaPathFinder, register_runtime_synthesiser
 
-    # Converted test source emits ``from ._retrofy.lazy_runtime import
+    # Converted test source emits ``from ._retrofy_rt.lazy_imports import
     # ...``; tests don't live under a registered retrofy hook prefix,
     # so install a permissive synthesiser at the end of the meta path
     # to serve the payload for any user package.

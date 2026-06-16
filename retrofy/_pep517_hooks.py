@@ -22,18 +22,18 @@ else:
 
 # Marker that ``transform_lazy_imports`` injects into any module it
 # rewrites. The wheel-build hook uses this to identify which converted
-# modules need the ``_retrofy`` sub-package dropped alongside them.
+# modules need the ``_retrofy_rt`` sub-package dropped alongside them.
 # Trailing space is significant — it pins the form
-# ``from ._retrofy.lazy_runtime import <alias>, ...`` and avoids
-# false positives on, say, ``from .._retrofy.lazy_runtime import ...``
+# ``from ._retrofy_rt.lazy_imports import <alias>, ...`` and avoids
+# false positives on, say, ``from .._retrofy_rt.lazy_imports import ...``
 # (different package depth that retrofy never emits).
-_LAZY_RUNTIME_IMPORT_MARKER = "from ._retrofy.lazy_runtime import "
+_LAZY_RUNTIME_IMPORT_MARKER = "from ._retrofy_rt.lazy_imports import "
 
 
 class _EmbeddedRuntimeCollisionError(RuntimeError):
-    """The wheel already contains a ``_retrofy`` entry in a directory
-    where retrofy needs to inject its runtime helpers. ``_retrofy`` is
-    reserved as the retrofy runtime namespace inside converted
+    """The wheel already contains a ``_retrofy_rt`` entry in a directory
+    where retrofy needs to inject its runtime helpers. ``_retrofy_rt``
+    is reserved as the retrofy runtime namespace inside converted
     packages."""
 
 
@@ -45,14 +45,14 @@ class EditableRuntimeRequirementError(RuntimeError):
 
 
 def _embedded_runtime_files() -> dict[str, bytes]:
-    """Return ``{relpath: bytes}`` for the ``_retrofy`` payload that
+    """Return ``{relpath: bytes}`` for the ``_retrofy_rt`` payload that
     gets dropped into converted packages.
 
-    The payload tree lives at ``retrofy/_embedded_runtime/_retrofy/`` in the
-    source distribution and is the single canonical home for any
-    runtime helper a converter needs to ship into user code.
+    The payload tree lives at ``retrofy/_retrofy_rt/`` in the source
+    distribution and is the single canonical home for any runtime helper
+    a converter needs to ship into user code.
     """
-    root = importlib.resources.files("retrofy._embedded_runtime._retrofy")
+    root = importlib.resources.files("retrofy._retrofy_rt")
     out: dict[str, bytes] = {}
     for entry in root.iterdir():
         if not entry.is_file():
@@ -233,8 +233,8 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
 
     has_modifications = False
     # Directories within the wheel whose converted modules emitted a
-    # ``from ._retrofy.lazy_runtime import (...)`` line. Each one needs
-    # a sibling ``_retrofy/`` sub-package dropped in.
+    # ``from ._retrofy_rt.lazy_imports import (...)`` line. Each one
+    # needs a sibling ``_retrofy_rt/`` sub-package dropped in.
     lazy_runtime_dirs: set[str] = set()
 
     with zipfile.ZipFile(str(editable_copy), "r") as whl_zip:
@@ -255,8 +255,16 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
         if lazy_runtime_dirs:
             payload = _embedded_runtime_files()
             for pkg_dir in sorted(lazy_runtime_dirs):
-                target_dir = f"{pkg_dir}/_retrofy" if pkg_dir else "_retrofy"
-                # ``_retrofy`` is retrofy's reserved namespace inside
+                target_dir = f"{pkg_dir}/_retrofy_rt" if pkg_dir else "_retrofy_rt"
+                # The canonical home of the runtime lives at
+                # ``retrofy/_retrofy_rt/`` -- that is the source we are
+                # otherwise copying from. When the wheel under rewrite
+                # IS retrofy's own wheel, the converted module's own
+                # sibling already contains the payload byte-for-byte, so
+                # skip the inject (and the clash check below).
+                if f"{target_dir}/lazy_imports.py" in existing_entries:
+                    continue
+                # ``_retrofy_rt`` is retrofy's reserved namespace inside
                 # converted packages. If a user already ships anything
                 # under that name we'd silently shadow it — refuse to.
                 clash = [
@@ -269,8 +277,8 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
                 if clash:
                     raise _EmbeddedRuntimeCollisionError(
                         f"package directory {pkg_dir!r} already contains a "
-                        f"`_retrofy` entry ({clash[0]!r}); `_retrofy` is "
-                        f"reserved as retrofy's runtime namespace inside "
+                        f"`_retrofy_rt` entry ({clash[0]!r}); `_retrofy_rt` "
+                        f"is reserved as retrofy's runtime namespace inside "
                         f"converted packages.",
                     )
                 for relpath, data in payload.items():

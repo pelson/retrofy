@@ -12,7 +12,7 @@ The expected output reflects PEP 810's runtime semantics:
 
 Most tests use the ``{_RUNTIME_IMPORT}`` placeholder at the start of
 the expected output. ``_assert_transform`` replaces it with a
-``from ._retrofy.lazy_runtime import ...`` line containing **only**
+``from ._retrofy_rt.lazy_imports import ...`` line containing **only**
 the helpers whose mangled names appear in the rest of the expected
 body — the converter now imports the subset it actually uses, not
 all four helpers unconditionally.
@@ -43,7 +43,7 @@ def _build_runtime_import(body: str) -> str:
         for role in _BASE_HELPERS
         if _BASE_HELPERS[role] in body
     ]
-    return "from ._retrofy.lazy_runtime import " + ", ".join(aliases)
+    return "from ._retrofy_rt.lazy_imports import " + ", ".join(aliases)
 
 
 def _assert_transform(src: str, expected: str) -> None:
@@ -358,7 +358,7 @@ def test_emitted_import_contains_wheel_build_marker() -> None:
 
     ``retrofy._pep517_hooks.compatibility_via_rewrite`` greps each
     converted module for a marker substring to decide whether to drop
-    the ``_retrofy/`` payload sub-package alongside it. If the
+    the ``_retrofy_rt/`` payload sub-package alongside it. If the
     converter ever emits the runtime import in a form that doesn't
     contain the marker, the wheel-build hook silently skips the
     payload drop and the installed wheel is unusable. Catch that here.

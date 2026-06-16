@@ -29,7 +29,7 @@ _BOOTSTRAP_MODULES = (
     "_meta_hook_converter.py",
     "_editable_converter_client.py",
 )
-_EMBEDDED_RUNTIME_DIR = "_embedded_runtime"
+_RUNTIME_PACKAGE_DIR = "_retrofy_rt"
 
 BOOTSTRAP_NAME = "_retrofy_editable_bootstrap"
 DEFAULT_CONVERTER_VENV = Path("~/.cache/retrofy/converter-venv").expanduser()
@@ -126,8 +126,8 @@ def _copy_bootstrap(dst_pkg: Path) -> None:
     for module in _BOOTSTRAP_MODULES:
         shutil.copy2(src_root / module, dst_pkg / module)
     shutil.copytree(
-        src_root / _EMBEDDED_RUNTIME_DIR,
-        dst_pkg / _EMBEDDED_RUNTIME_DIR,
+        src_root / _RUNTIME_PACKAGE_DIR,
+        dst_pkg / _RUNTIME_PACKAGE_DIR,
     )
 
 

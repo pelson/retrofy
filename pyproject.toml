@@ -63,6 +63,15 @@ post-prepare-metadata-for-build-editable = "retrofy._pep517_hooks:inject_runtime
 # post-current-Python syntax that retrofy backports.
 retrofy = "retrofy._pytest_plugin"
 
+[tool.mypy]
+# ``_meta_hook_converter`` uses native PEP 810 ``lazy from`` syntax
+# that mypy doesn't parse. Pre-commit excludes the file as input, but
+# any other file that imports it (e.g. ``_pytest_plugin``) would still
+# drag it into the analysis via ``follow-imports``. Skip following.
+[[tool.mypy.overrides]]
+module = "retrofy._meta_hook_converter"
+follow_imports = "skip"
+
 [tool.retrofy]
 # Floor for the lowered wheel produced by compatibility_via_rewrite.
 # Source builds on 3.15 (native ``lazy from``); the rewritten wheel
