@@ -183,8 +183,13 @@ jobs:
       # interpreter is the ground-truth check: if any raw ``lazy
       # from`` leaked past the rewrite, pre-3.15 Pythons raise
       # ``SyntaxError`` here.
+      #
+      # ``importlib.metadata`` rather than ``import retrofy`` because
+      # the checkout itself contains a retrofy source tree that wins
+      # the cwd-first import lookup and has no setuptools-scm
+      # generated ``_version.py``.
       run: |
-        SITE=$(python -c "import retrofy, pathlib; print(pathlib.Path(retrofy.__file__).parent)")
+        SITE=$(python -c "from importlib.metadata import files; from pathlib import Path; print(Path(next(f for f in files('retrofy') if f.name == '__init__.py' and f.parent.name == 'retrofy').locate()).parent)")
         python -m compileall -q -f "$SITE"
 
     - name: Test with pytest (isolated from source)
@@ -446,9 +451,6 @@ jobs:
     - name: Install pytest on the host (no libcst, no retrofy)
       run: |
         python -m pip install pytest
-        # Stand-in version so ``import retrofy`` works from source for
-        # the worker-test step below.
-        echo "__version__ = 'dev'" > ./retrofy/_version.py
 
     # ----- Wheel-install path ------------------------------------------
     - name: Build example-project wheel via the converter Python
@@ -482,9 +484,20 @@ jobs:
 
     # ----- Editable path (setup-editable + worker subprocess) ----------
     - name: Out-of-process worker unit tests
+      # These tests exercise the host<->worker subprocess protocol,
+      # not the 3.7/3.8 host environment itself. Run them from the
+      # converter venv (3.13 with the lowered wheel installed) so the
+      # host's ``import retrofy._meta_hook_converter`` resolves to a
+      # lowered file -- the in-tree source has native ``lazy from``
+      # syntax that the 3.7/3.8 host can't parse. The worker
+      # subprocess path is covered end-to-end by the next step against
+      # an actual 3.7/3.8 target.
       run: |
-        export RETROFY_CONVERTER_PYTHON="$HOME/.cache/retrofy/converter-venv/bin/python"
-        python -m pytest ./retrofy/tests/test_out_of_process_editable.py -ssvv
+        CONV="$HOME/.cache/retrofy/converter-venv"
+        "$CONV/bin/pip" install pytest
+        export RETROFY_CONVERTER_PYTHON="$CONV/bin/python"
+        cd /tmp
+        "$CONV/bin/python" -m pytest --pyargs retrofy.tests.test_out_of_process_editable -ssvv
 
     - name: setup-editable + example-project pytest end-to-end
       run: |
