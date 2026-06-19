@@ -507,11 +507,18 @@ jobs:
         /tmp/editable-venv/bin/pip install --upgrade pip
         /tmp/editable-venv/bin/pip install pytest
 
+        # ``cd not-the-source`` so the repo's source tree (which lacks
+        # the setuptools-scm-generated ``_version.py``) doesn't shadow
+        # the converter venv's installed retrofy via cwd-first import.
+        PROJECT="$PWD/example-project"
+        mkdir -p not-the-source
+        cd not-the-source
         "$HOME/.cache/retrofy/converter-venv/bin/python" -m retrofy \
-            setup-editable ./example-project \
+            setup-editable "$PROJECT" \
             --target-python /tmp/editable-venv/bin/python \
             --converter-venv "$HOME/.cache/retrofy/converter-venv" \
             --no-create-converter-env
+        cd ..
 
         # Run from /tmp so the repo's cwd doesn't accidentally put
         # retrofy on sys.path. ``--assert=plain`` because pytest's
