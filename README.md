@@ -36,6 +36,29 @@ It is imperative that you test the produced wheels with the target versions, as 
 may be syntax which is not yet handled in retrofy, resulting in a SyntaxError on your
 desired Python version.
 
+### Lowering `Requires-Python` on the built wheel
+
+By default `retrofy` only rewrites your project's source. The built wheel's
+`Requires-Python` metadata still reflects whatever `requires-python` you declared in
+`[project]` — which is normally your *source* target, not the target you've lowered
+to. Opt in to lowering the wheel's `Requires-Python` floor by adding
+`[tool.retrofy] target-python` to your `pyproject.toml`:
+
+```toml
+[project]
+requires-python = ">=3.13"      # your source target
+
+[tool.retrofy]
+target-python = "3.9"           # what the built wheel can install onto
+```
+
+With this set, retrofy's `compatibility_via_rewrite` post-build-wheel hook also
+rewrites the wheel's METADATA so `pip install your-pkg` accepts Python 3.9+.
+
+Note that the source still declares `requires-python = ">=3.13"`, so installing
+from an sdist on Python 3.9 will fail loudly at parse time — that's expected, since
+the source contains syntax that 3.9 cannot parse. Only the *wheel* has been lowered.
+
 ### Editable installs on Python 3.7/3.8
 
 `libcst` does not install on 3.7/3.8, so retrofy delegates per-file conversion to
