@@ -106,6 +106,13 @@ def _read_target_python(source_root: pathlib.Path) -> str | None:
     floor = data.get("tool", {}).get("retrofy", {}).get("target-python")
     if not floor:
         return None
+    if not isinstance(floor, str):
+        raise TypeError(
+            f'[tool.retrofy] target-python must be a string (e.g. "3.9"), '
+            f"got {type(floor).__name__} {floor!r}. Quote the value in "
+            f"pyproject.toml -- TOML floats like ``3.10`` lose their "
+            f"trailing zero and silently lower the floor.",
+        )
     return f">={floor}"
 
 
@@ -302,7 +309,7 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
                     "Injected retrofy runtime payload into %s/",
                     target_dir,
                 )
-            has_modifications = True
+                has_modifications = True
 
         target_py = _read_target_python(pathlib.Path.cwd())
         if target_py is not None:

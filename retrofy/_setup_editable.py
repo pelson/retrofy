@@ -152,7 +152,10 @@ def _copy_bootstrap(dst_pkg: Path) -> None:
         if not _RAW_LAZY_RE.search(code):
             shutil.copy2(src, dst)
             continue
-        dst.write_text(OnTheFlyConverter(str(src)).get_data(str(src)))
+        dst.write_text(
+            OnTheFlyConverter(str(src)).get_data(str(src)),
+            encoding="utf-8",
+        )
     shutil.copytree(
         src_root / _RUNTIME_PACKAGE_DIR,
         dst_pkg / _RUNTIME_PACKAGE_DIR,

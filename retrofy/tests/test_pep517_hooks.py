@@ -237,6 +237,23 @@ def test_read_target_python_none_when_pyproject_missing(tmp_path):
     assert _read_target_python(tmp_path) is None
 
 
+def test_read_target_python_rejects_non_string(tmp_path):
+    # Unquoted ``target-python = 3.10`` parses as the TOML float 3.10,
+    # which str()s to "3.1" -- silently lowering the floor below what
+    # the user intended. Reject anything that isn't a string.
+    root = _write_pyproject(
+        tmp_path,
+        """\
+        [project]
+        name = "x"
+        [tool.retrofy]
+        target-python = 3.10
+        """,
+    )
+    with pytest.raises(TypeError, match="must be a string"):
+        _read_target_python(root)
+
+
 def _make_minimal_wheel(tmp_path: pathlib.Path, metadata_text: str) -> pathlib.Path:
     whl = tmp_path / "dummypkg-0.0.0-py3-none-any.whl"
     dist_info = "dummypkg-0.0.0.dist-info"
