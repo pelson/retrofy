@@ -1,6 +1,6 @@
 """Tests for retrofy's meta-path finder, with a focus on the
 synthesised ``_retrofy`` runtime payload that converted code imports
-from (``from ._retrofy.lazy_runtime import ...``).
+from (``from ._retrofy_rt.lazy_imports import ...``).
 
 The on-the-fly converter rewrites modules at import time, so there is
 no ``_retrofy/`` directory on disk to import from in editable /
@@ -30,7 +30,7 @@ def test_embedded_runtime_source_returns_init_for_empty_name():
 
 
 def test_embedded_runtime_source_returns_module():
-    payload = _embedded_runtime_source("lazy_runtime")
+    payload = _embedded_runtime_source("lazy_imports")
     assert payload is not None
     source, _ = payload
     assert b"class LazyProxy" in source
@@ -42,7 +42,7 @@ def test_embedded_runtime_source_unknown_returns_none():
 
 def test_embedded_runtime_spec_for_registered_package_returns_package_spec():
     finder = MyMetaPathFinder(["fakepkg"])
-    spec = finder._embedded_runtime_spec("fakepkg._retrofy")
+    spec = finder._embedded_runtime_spec("fakepkg._retrofy_rt")
     assert spec is not None
     assert spec.submodule_search_locations == []
     assert isinstance(spec.loader, _EmbeddedRuntimeLoader)
@@ -50,7 +50,7 @@ def test_embedded_runtime_spec_for_registered_package_returns_package_spec():
 
 def test_embedded_runtime_spec_for_registered_package_returns_module_spec():
     finder = MyMetaPathFinder(["fakepkg"])
-    spec = finder._embedded_runtime_spec("fakepkg._retrofy.lazy_runtime")
+    spec = finder._embedded_runtime_spec("fakepkg._retrofy_rt.lazy_imports")
     assert spec is not None
     assert spec.submodule_search_locations is None
     assert isinstance(spec.loader, _EmbeddedRuntimeLoader)
@@ -58,29 +58,29 @@ def test_embedded_runtime_spec_for_registered_package_returns_module_spec():
 
 def test_embedded_runtime_spec_for_nested_subpackage():
     finder = MyMetaPathFinder(["fakepkg"])
-    spec = finder._embedded_runtime_spec("fakepkg.sub.deeper._retrofy.lazy_runtime")
+    spec = finder._embedded_runtime_spec("fakepkg.sub.deeper._retrofy_rt.lazy_imports")
     assert spec is not None
     assert isinstance(spec.loader, _EmbeddedRuntimeLoader)
 
 
 def test_embedded_runtime_spec_returns_none_for_unregistered_prefix():
     finder = MyMetaPathFinder(["fakepkg"])
-    assert finder._embedded_runtime_spec("other._retrofy") is None
-    assert finder._embedded_runtime_spec("other._retrofy.lazy_runtime") is None
+    assert finder._embedded_runtime_spec("other._retrofy_rt") is None
+    assert finder._embedded_runtime_spec("other._retrofy_rt.lazy_imports") is None
 
 
 def test_embedded_runtime_spec_returns_none_for_unknown_submodule():
     finder = MyMetaPathFinder(["fakepkg"])
-    assert finder._embedded_runtime_spec("fakepkg._retrofy.does_not_exist") is None
+    assert finder._embedded_runtime_spec("fakepkg._retrofy_rt.does_not_exist") is None
 
 
 def test_embedded_runtime_spec_returns_none_for_nested_under_retrofy():
-    # Payload tree is flat; ``_retrofy.lazy_runtime.x`` shouldn't
+    # Payload tree is flat; ``_retrofy_rt.lazy_imports.x`` shouldn't
     # resolve.
     finder = MyMetaPathFinder(["fakepkg"])
     assert (
         finder._embedded_runtime_spec(
-            "fakepkg._retrofy.lazy_runtime.something",
+            "fakepkg._retrofy_rt.lazy_imports.something",
         )
         is None
     )
@@ -91,7 +91,7 @@ def test_end_to_end_lazy_import_via_meta_hook(tmp_path, monkeypatch):
     register the hook, and verify the module imports and executes.
 
     The payload is not on disk; the meta-path finder must synthesise
-    ``synthpkg._retrofy.lazy_runtime`` for the converted import to
+    ``synthpkg._retrofy_rt.lazy_imports`` for the converted import to
     resolve.
     """
     pkg_root = tmp_path / "synthpkg"
@@ -120,15 +120,15 @@ def test_end_to_end_lazy_import_via_meta_hook(tmp_path, monkeypatch):
     assert mod.loads('{"a": 1}') == {"a": 1}
 
     # The synthesised runtime package is importable too.
-    rt = importlib.import_module("synthpkg._retrofy.lazy_runtime")
+    rt = importlib.import_module("synthpkg._retrofy_rt.lazy_imports")
     assert hasattr(rt, "LazyProxy")
 
 
 def test_nested_subpackage_lazy_import_via_meta_hook(tmp_path, monkeypatch):
     """Same end-to-end check as above but for a module several levels
     deep — ``synthpkg.sub.deeper.lazyuser``. The converted source emits
-    ``from ._retrofy.lazy_runtime import ...`` which resolves to
-    ``synthpkg.sub.deeper._retrofy.lazy_runtime``; the finder must
+    ``from ._retrofy_rt.lazy_imports import ...`` which resolves to
+    ``synthpkg.sub.deeper._retrofy_rt.lazy_imports``; the finder must
     synthesise that nested payload.
     """
     pkg_root = tmp_path / "synthpkg"
@@ -166,6 +166,6 @@ def test_nested_subpackage_lazy_import_via_meta_hook(tmp_path, monkeypatch):
 
     # The nested synthesised runtime package is reachable.
     rt = importlib.import_module(
-        "synthpkg.sub.deeper._retrofy.lazy_runtime",
+        "synthpkg.sub.deeper._retrofy_rt.lazy_imports",
     )
     assert hasattr(rt, "LazyProxy")

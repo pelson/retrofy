@@ -4,26 +4,24 @@ repos:
     hooks:
       - id: mypy
         additional_dependencies: ["types-mock"]
-        # 3.15 ``lazy`` syntax is not parseable by mypy; retrofy
-        # rewrites this file at import / build.
-        exclude: ^example-project/example_project/tests/test_lazy_imports\.py$
+        # mypy doesn't parse PEP 810 ``lazy`` syntax; exclude files
+        # that use it natively. Tracked at
+        # https://github.com/pelson/retrofy/issues/32 — fix is to run
+        # mypy under retrofy's own rewriter.
+        exclude: '^(example-project/example_project/tests/test_lazy_imports\.py|retrofy/_meta_hook_converter\.py|retrofy/_setup_editable\.py)$'
   - repo: https://gitlab.cern.ch/pre-commit-hook-mirrors/pre-commit/pre-commit-hooks
     rev: "v4.0.1"
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
-  - repo: https://gitlab.cern.ch/pre-commit-hook-mirrors/asottile/add-trailing-comma
-    rev: "v2.1.0"
-    hooks:
-      - id: add-trailing-comma
-        args: ["--py36-plus"]
-  - repo: https://gitlab.cern.ch/pre-commit-hook-mirrors/PyCQA/isort
-    rev: "5.11.5"
-    hooks:
-      - id: isort
   - repo: https://gitlab.cern.ch/pre-commit-hook-mirrors/astral-sh/ruff-pre-commit
     rev: v0.15.16
     hooks:
       - id: ruff-check
         args: [ --fix ]
       - id: ruff-format
+        # --quiet hides ruff's spurious "COM812 may conflict with the
+        # formatter" warning. In our hook order COM812 runs in
+        # ruff-check first to add commas, and the formatter then
+        # preserves them via magic-trailing-comma -- no actual conflict.
+        args: ["--quiet"]

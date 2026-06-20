@@ -333,7 +333,10 @@ class _AnalysisVisitor(cst.CSTVisitor):
         try:
             major = int(comparator.elements[0].value.value)  # type: ignore[attr-defined]
             minor = int(comparator.elements[1].value.value)  # type: ignore[attr-defined]
-        except (AttributeError, ValueError):
+        # Parens kept until PEP 758 backport (#23) lands; without them
+        # ruff format on target-version=py315 emits the PEP 758 form
+        # which pre-3.14 Pythons can't parse.
+        except (AttributeError, ValueError):  # fmt: skip
             return None
         return (major, minor)
 

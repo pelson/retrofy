@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.resources
 import logging
+import os
 import pathlib
 import posixpath
 import shutil
@@ -22,18 +23,18 @@ else:
 
 # Marker that ``transform_lazy_imports`` injects into any module it
 # rewrites. The wheel-build hook uses this to identify which converted
-# modules need the ``_retrofy`` sub-package dropped alongside them.
+# modules need the ``_retrofy_rt`` sub-package dropped alongside them.
 # Trailing space is significant — it pins the form
-# ``from ._retrofy.lazy_runtime import <alias>, ...`` and avoids
-# false positives on, say, ``from .._retrofy.lazy_runtime import ...``
+# ``from ._retrofy_rt.lazy_imports import <alias>, ...`` and avoids
+# false positives on, say, ``from .._retrofy_rt.lazy_imports import ...``
 # (different package depth that retrofy never emits).
-_LAZY_RUNTIME_IMPORT_MARKER = "from ._retrofy.lazy_runtime import "
+_LAZY_RUNTIME_IMPORT_MARKER = "from ._retrofy_rt.lazy_imports import "
 
 
 class _EmbeddedRuntimeCollisionError(RuntimeError):
-    """The wheel already contains a ``_retrofy`` entry in a directory
-    where retrofy needs to inject its runtime helpers. ``_retrofy`` is
-    reserved as the retrofy runtime namespace inside converted
+    """The wheel already contains a ``_retrofy_rt`` entry in a directory
+    where retrofy needs to inject its runtime helpers. ``_retrofy_rt``
+    is reserved as the retrofy runtime namespace inside converted
     packages."""
 
 
@@ -45,14 +46,14 @@ class EditableRuntimeRequirementError(RuntimeError):
 
 
 def _embedded_runtime_files() -> dict[str, bytes]:
-    """Return ``{relpath: bytes}`` for the ``_retrofy`` payload that
+    """Return ``{relpath: bytes}`` for the ``_retrofy_rt`` payload that
     gets dropped into converted packages.
 
-    The payload tree lives at ``retrofy/_embedded_runtime/_retrofy/`` in the
-    source distribution and is the single canonical home for any
-    runtime helper a converter needs to ship into user code.
+    The payload tree lives at ``retrofy/_retrofy_rt/`` in the source
+    distribution and is the single canonical home for any runtime helper
+    a converter needs to ship into user code.
     """
-    root = importlib.resources.files("retrofy._embedded_runtime._retrofy")
+    root = importlib.resources.files("retrofy._retrofy_rt")
     out: dict[str, bytes] = {}
     for entry in root.iterdir():
         if not entry.is_file():
@@ -89,6 +90,32 @@ def _assert_editable_dependencies_dynamic(source_root: pathlib.Path) -> None:
     )
 
 
+def _read_target_python(source_root: pathlib.Path) -> str | None:
+    """Return the ``Requires-Python`` specifier requested by the project
+    at ``source_root`` via ``[tool.retrofy] target-python``, or ``None``
+    if the project does not opt in.
+
+    The value in pyproject is a bare floor (e.g. ``"3.9"``); the returned
+    string is a PEP 440 specifier (``">=3.9"``) suitable for splicing
+    into METADATA verbatim.
+    """
+    pyproject = source_root / "pyproject.toml"
+    if not pyproject.exists():
+        return None
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    floor = data.get("tool", {}).get("retrofy", {}).get("target-python")
+    if not floor:
+        return None
+    if not isinstance(floor, str):
+        raise TypeError(
+            f'[tool.retrofy] target-python must be a string (e.g. "3.9"), '
+            f"got {type(floor).__name__} {floor!r}. Quote the value in "
+            f"pyproject.toml -- TOML floats like ``3.10`` lose their "
+            f"trailing zero and silently lower the floor.",
+        )
+    return f">={floor}"
+
+
 def _retrofy_version() -> str:
     # Imported lazily so this module is safe to import without retrofy's
     # own setuptools-scm-generated ``_version.py`` being on disk yet
@@ -118,6 +145,33 @@ def _splice_retrofy_requires_dist(text: str) -> str:
     header = header.rstrip("\n")
     suffix = sep + body if sep else "\n"
     return header + f"\nRequires-Dist: retrofy=={_retrofy_version()}" + suffix
+
+
+def _lower_requires_python(text: str, floor: str) -> str:
+    """Return ``text`` with the ``Requires-Python:`` line in the METADATA
+    header replaced by ``Requires-Python: {floor}``. If no such line is
+    present in the header, one is appended to the header block.
+
+    Only the header block (everything before the first blank line) is
+    touched -- a stray ``Requires-Python:`` mention in the long
+    description body is preserved verbatim.
+    """
+    header, sep, body = text.partition("\n\n")
+    new_value = f"Requires-Python: {floor}"
+    # PEP 566 / RFC 822 headers are case-insensitive on the field name,
+    # so match permissively but emit the canonical capitalisation.
+    replaced = False
+    out_lines = []
+    for line in header.split("\n"):
+        if line.lower().startswith("requires-python:"):
+            out_lines.append(new_value)
+            replaced = True
+        else:
+            out_lines.append(line)
+    if not replaced:
+        out_lines.append(new_value)
+    new_header = "\n".join(out_lines)
+    return new_header + (sep + body if sep else "")
 
 
 def inject_runtime_requirement(dist_info_path: pathlib.Path) -> None:
@@ -184,13 +238,22 @@ def compatibility_via_import_hook(wheel: pathlib.Path):
 
 def compatibility_via_rewrite(wheel: pathlib.Path):
     """Change code within the given wheel to be compatible"""
+    if os.environ.get("RETROFY_DISABLE_REWRITE") == "1":
+        # Escape hatch for the chicken-and-egg bootstrap: producing
+        # retrofy's *own* wheel from source needs a wheel-build pass
+        # whose source still contains raw ``lazy from``, run without
+        # any rewrite hook in the way. Setting this env var on that
+        # first pass keeps the hook installed (entry point intact) but
+        # makes it a no-op.
+        _log.info("RETROFY_DISABLE_REWRITE=1 — skipping wheel rewrite")
+        return
     editable_copy = wheel.parent / (wheel.name + ".copy.whl")
     shutil.copy(wheel, editable_copy)
 
     has_modifications = False
     # Directories within the wheel whose converted modules emitted a
-    # ``from ._retrofy.lazy_runtime import (...)`` line. Each one needs
-    # a sibling ``_retrofy/`` sub-package dropped in.
+    # ``from ._retrofy_rt.lazy_imports import (...)`` line. Each one
+    # needs a sibling ``_retrofy_rt/`` sub-package dropped in.
     lazy_runtime_dirs: set[str] = set()
 
     with zipfile.ZipFile(str(editable_copy), "r") as whl_zip:
@@ -211,8 +274,16 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
         if lazy_runtime_dirs:
             payload = _embedded_runtime_files()
             for pkg_dir in sorted(lazy_runtime_dirs):
-                target_dir = f"{pkg_dir}/_retrofy" if pkg_dir else "_retrofy"
-                # ``_retrofy`` is retrofy's reserved namespace inside
+                target_dir = f"{pkg_dir}/_retrofy_rt" if pkg_dir else "_retrofy_rt"
+                # The canonical home of the runtime lives at
+                # ``retrofy/_retrofy_rt/`` -- that is the source we are
+                # otherwise copying from. When the wheel under rewrite
+                # IS retrofy's own wheel, the converted module's own
+                # sibling already contains the payload byte-for-byte, so
+                # skip the inject (and the clash check below).
+                if f"{target_dir}/lazy_imports.py" in existing_entries:
+                    continue
+                # ``_retrofy_rt`` is retrofy's reserved namespace inside
                 # converted packages. If a user already ships anything
                 # under that name we'd silently shadow it — refuse to.
                 clash = [
@@ -225,8 +296,8 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
                 if clash:
                     raise _EmbeddedRuntimeCollisionError(
                         f"package directory {pkg_dir!r} already contains a "
-                        f"`_retrofy` entry ({clash[0]!r}); `_retrofy` is "
-                        f"reserved as retrofy's runtime namespace inside "
+                        f"`_retrofy_rt` entry ({clash[0]!r}); `_retrofy_rt` "
+                        f"is reserved as retrofy's runtime namespace inside "
                         f"converted packages.",
                     )
                 for relpath, data in payload.items():
@@ -238,7 +309,21 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
                     "Injected retrofy runtime payload into %s/",
                     target_dir,
                 )
-            has_modifications = True
+                has_modifications = True
+
+        target_py = _read_target_python(pathlib.Path.cwd())
+        if target_py is not None:
+            metadata_name = whl.dist_info_dirname() + "/METADATA"
+            metadata_text = whl.read(metadata_name).decode("utf-8")
+            new_metadata = _lower_requires_python(metadata_text, target_py)
+            if new_metadata != metadata_text:
+                whl.write(metadata_name, new_metadata)
+                _log.info(
+                    "Lowered Requires-Python in %s to %s",
+                    metadata_name,
+                    target_py,
+                )
+                has_modifications = True
 
         if has_modifications:
             with wheel.open("wb") as whl_fh:

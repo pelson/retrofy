@@ -96,7 +96,7 @@ def test_setup_editable_writes_pth_and_bootstrap(project_and_target):
     assert (purelib / BOOTSTRAP_NAME / "__init__.py").exists()
     assert (purelib / BOOTSTRAP_NAME / "_meta_hook_converter.py").exists()
     assert (purelib / BOOTSTRAP_NAME / "_editable_converter_client.py").exists()
-    assert (purelib / BOOTSTRAP_NAME / "_embedded_runtime").is_dir()
+    assert (purelib / BOOTSTRAP_NAME / "_retrofy_rt" / "lazy_imports.py").exists()
 
     pth_files = list(purelib.glob("_retrofy_editable_*.pth"))
     assert len(pth_files) == 1

@@ -6,20 +6,19 @@ from pathlib import Path
 import sys
 import typing
 
-# libcst — and therefore retrofy's in-process conversion path — does
-# not install on Python 3.7/3.8. On those interpreters the editable
-# meta-hook drives an out-of-process converter running on a modern
-# Python the user has nominated; see ``_editable_converter_client``.
-# ``convert`` is therefore imported lazily inside the in-process
-# branch so importing this module on 3.7/3.8 does not transitively
-# pull libcst. (Dogfooding ``lazy import`` here is the right long-term
-# answer; see ``[[retrofy-dogfood-lazy-import]]``.)
+lazy from ._converters import convert
+
+# ``_converters`` pulls libcst, which does not install on 3.7/3.8;
+# ``_editable_converter_client`` is only used on those hosts. Both
+# are lazy so each branch in ``get_data`` only pays for its own deps.
+lazy from ._editable_converter_client import get_worker
+
 _HOST_NEEDS_WORKER = sys.version_info < (3, 9)
 
 # Name of the sub-package retrofy injects into every converted package
 # that needs runtime helpers. Reserved — converters must never emit
 # code that imports from anything else under this name.
-_RUNTIME_SUBPKG = "_retrofy"
+_RUNTIME_SUBPKG = "_retrofy_rt"
 
 
 class OnTheFlyConverter(SourceLoader):
@@ -33,13 +32,7 @@ class OnTheFlyConverter(SourceLoader):
         """exec_module is already defined for us, we just have to provide a way
         of getting the source code of the module"""
         if _HOST_NEEDS_WORKER:
-            from ._editable_converter_client import get_worker
-
             return get_worker().convert(filename)
-
-        # Deferred so that importing this module on 3.7/3.8 does not
-        # transitively pull libcst (which won't install there).
-        from ._converters import convert
 
         with open(filename) as f:
             data = f.read()
@@ -80,12 +73,12 @@ def _embedded_runtime_root() -> Path:
     # under a different parent (see ``retrofy setup-editable``).
     # importlib.resources.files is 3.9+, so a plain Path is also the
     # only thing portable to 3.7/3.8 hosts.
-    return Path(__file__).parent / "_embedded_runtime" / "_retrofy"
+    return Path(__file__).parent / "_retrofy_rt"
 
 
 def _embedded_runtime_source(modname: str) -> typing.Tuple[bytes, str] | None:
     """Return ``(source_bytes, synthetic_filename)`` for the payload
-    module *modname* (e.g. ``"lazy_runtime"`` or ``""`` for the
+    module *modname* (e.g. ``"lazy_imports"`` or ``""`` for the
     package's own ``__init__``), or ``None`` if it doesn't exist."""
     root = _embedded_runtime_root()
     if modname == "":
@@ -112,12 +105,13 @@ class MyMetaPathFinder(MetaPathFinder):
         return False
 
     def _embedded_runtime_spec(self, fullname: str) -> typing.Optional[ModuleSpec]:
-        """Synthesise a spec for the reserved ``_retrofy`` sub-package
-        (or any module beneath it) inside a converted package.
+        """Synthesise a spec for the reserved ``_retrofy_rt``
+        sub-package (or any module beneath it) inside a converted
+        package.
 
-        Converted modules emit ``from ._retrofy.lazy_runtime import
+        Converted modules emit ``from ._retrofy_rt.lazy_imports import
         ...``; in the editable / pytest paths there is no
-        ``_retrofy/`` directory on disk, so this finder serves the
+        ``_retrofy_rt/`` directory on disk, so this finder serves the
         payload sources directly from retrofy's own install.
         """
         parts = fullname.split(".")
@@ -130,7 +124,7 @@ class MyMetaPathFinder(MetaPathFinder):
 
         tail = parts[idx + 1 :]
         if len(tail) == 0:
-            # ``<parent>._retrofy`` — the package itself.
+            # ``<parent>._retrofy_rt`` — the package itself.
             payload = _embedded_runtime_source("")
             if payload is None:
                 return None
@@ -150,7 +144,7 @@ class MyMetaPathFinder(MetaPathFinder):
             loader = _EmbeddedRuntimeLoader(source, filename)
             return ModuleSpec(fullname, loader, origin=filename)
 
-        # Nested under ``_retrofy.<x>.<y>...`` — payload is flat for
+        # Nested under ``_retrofy_rt.<x>.<y>...`` — payload is flat for
         # now, nothing to serve.
         return None
 
@@ -198,8 +192,8 @@ class RetrofyRuntimeFinder(MetaPathFinder):
             return None
         idx = parts.index(_RUNTIME_SUBPKG)
         if idx == 0:
-            # Top-level ``_retrofy`` is not ours — only the sub-package
-            # form (``somepkg._retrofy``) is reserved.
+            # Top-level ``_retrofy_rt`` is not ours — only the
+            # sub-package form (``somepkg._retrofy_rt``) is reserved.
             return None
         tail = parts[idx + 1 :]
         if len(tail) == 0:

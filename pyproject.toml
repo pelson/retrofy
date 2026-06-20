@@ -1,5 +1,18 @@
 [build-system]
-requires = ["setuptools", "wheel", "setuptools_scm[toml]"]
+# retrofy's own source uses PEP 810 ``lazy from``. The wheel build runs
+# the project's ``compatibility_via_rewrite`` hook against itself so the
+# shipped wheel is plain Python. Bootstraps from a previously published
+# retrofy in this build env -- those releases predate ``lazy from`` in
+# the source and lower the new source cleanly.
+requires = [
+  "multistage-build>=0.2",
+  "setuptools",
+  "setuptools_scm[toml]",
+  "retrofy",
+]
+build-backend = "multistage_build:backend"
+
+[tool.multistage-build]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -16,7 +29,7 @@ classifiers = [
 authors = [
   { name = "Phil Elson", email = "pelson.pub@gmail.com" },
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.15"
 license = "Apache-2.0"
 
 # The core dependencies of the project.
@@ -50,17 +63,35 @@ post-prepare-metadata-for-build-editable = "retrofy._pep517_hooks:inject_runtime
 # post-current-Python syntax that retrofy backports.
 retrofy = "retrofy._pytest_plugin"
 
+[tool.mypy]
+# ``_meta_hook_converter`` uses native PEP 810 ``lazy from`` syntax
+# that mypy doesn't parse. Pre-commit excludes the file as input, but
+# any other file that imports it (e.g. ``_pytest_plugin``) would still
+# drag it into the analysis via ``follow-imports``. Skip following.
+[[tool.mypy.overrides]]
+module = ["retrofy._meta_hook_converter", "retrofy._setup_editable"]
+follow_imports = "skip"
+
+[tool.retrofy]
+# Floor for the lowered wheel produced by compatibility_via_rewrite.
+# Source builds on 3.15 (native ``lazy from``); the rewritten wheel
+# installs on 3.9+. 3.7/3.8 are unsupported for retrofy itself --
+# libcst does not build there. Use ``retrofy setup-editable`` from a
+# 3.9+ converter venv to drive 3.7/3.8 targets.
+target-python = "3.9"
+
 [tool.setuptools.packages.find]
 include = ["retrofy", "retrofy.*"]
 
 [tool.setuptools_scm]
 write_to = "retrofy/_version.py"
 
-[tool.isort]
-multi_line_output = 3
-include_trailing_comma = true
-force_grid_wrap = 0
-use_parentheses = true
-ensure_newline_before_comments = true
-line_length = 88
-force_sort_within_sections = true
+[tool.ruff]
+line-length = 88
+target-version = "py315"
+
+[tool.ruff.lint]
+extend-select = ["I", "COM"]
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true

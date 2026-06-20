@@ -9,9 +9,9 @@ syntax (PEP 810 ``lazy import``). The plugin must:
 * leave assertion introspection enabled (a failing ``assert a == b``
   must produce the dict/list diff that the rewriter generates, not the
   bare ``AssertionError`` you get with ``--assert=plain``);
-* arrange for the converted source's ``from ._retrofy.lazy_runtime``
+* arrange for the converted source's ``from ._retrofy_rt.lazy_imports``
   import to resolve via the in-memory payload synthesiser, since
-  there's no on-disk ``_retrofy/`` next to a pytester test file.
+  there's no on-disk ``_retrofy_rt/`` next to a pytester test file.
 """
 
 import textwrap
@@ -23,7 +23,7 @@ pytest_plugins = ["pytester"]
 
 def _make_lazy_pkg(pytester: pytest.Pytester, modname: str, body: str) -> None:
     """Drop *body* into a ``synthpkg.<modname>`` test file. Lazy
-    converted code emits ``from ._retrofy.lazy_runtime`` — a relative
+    converted code emits ``from ._retrofy_rt.lazy_imports`` — a relative
     import — so test files must live inside a package.
     """
     pkg = pytester.mkpydir("synthpkg")

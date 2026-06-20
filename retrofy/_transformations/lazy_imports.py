@@ -2,7 +2,7 @@
 
 Phase 1 (tokenize): strip ``lazy`` from ``lazy import`` / ``lazy from``
 statements and replace each with assignments calling helpers from the
-converted package's sibling ``_retrofy.lazy_runtime`` module. libcst
+converted package's sibling ``_retrofy_rt.lazy_imports`` module. libcst
 does not yet parse the 3.15 ``lazy`` soft keyword (see #13), so this
 phase has to run on the raw source. Once libcst grows ``lazy``
 support upstream — or someone contributes it — Phase 1 collapses
@@ -16,9 +16,9 @@ binding targets.
 Phase 3: inject the runtime helper import after the preamble (module
 docstring + ``from __future__`` block), using libcst to find the
 insertion point in the AST rather than poking at lines. The import
-is a *relative* one — ``from ._retrofy.lazy_runtime import ...`` —
+is a *relative* one — ``from ._retrofy_rt.lazy_imports import ...`` —
 so the converted module never references ``retrofy`` at runtime. The
-wheel-build hook drops a copy of the ``_retrofy`` sub-package into
+wheel-build hook drops a copy of the ``_retrofy_rt`` sub-package into
 the converted package; the on-the-fly meta-path converter synthesises
 it for editable / pytest contexts. Only the helpers a particular
 module actually uses are imported.
@@ -39,13 +39,13 @@ import warnings
 import libcst as cst
 from libcst.metadata import GlobalScope, ScopeProvider
 
-_RUNTIME_MODULE_RELATIVE_PACKAGE = "_retrofy"
-_RUNTIME_MODULE_NAME = "lazy_runtime"
+_RUNTIME_MODULE_RELATIVE_PACKAGE = "_retrofy_rt"
+_RUNTIME_MODULE_NAME = "lazy_imports"
 
 # Base helper names. ``_helper_names`` may append a ``_<n>`` suffix
 # before the trailing ``__`` if the un-suffixed names collide with
 # identifiers already present in the source being converted. Keys are
-# the public function names in ``lazy_runtime.py``; values are the
+# the public function names in ``lazy_imports.py``; values are the
 # default mangled aliases used in converted code.
 _BASE_HELPERS = {
     "lazy_import": "__lazy_import__",
@@ -159,7 +159,7 @@ class _LazyStmt:
     bindings: list[str]
     replacement: str
     # Roles in ``_BASE_HELPERS`` that this statement's emitted code
-    # references. Used so the final ``from ._retrofy.lazy_runtime
+    # references. Used so the final ``from ._retrofy_rt.lazy_imports
     # import ...`` only pulls in helpers that are actually called.
     used_helpers: set[str]
 
@@ -545,7 +545,7 @@ def _build_runtime_import(
     helpers: _HelperNames,
     used: set[str],
 ) -> cst.SimpleStatementLine:
-    """Build ``from ._retrofy.lazy_runtime import (<helpers>)`` as a
+    """Build ``from ._retrofy_rt.lazy_imports import (<helpers>)`` as a
     libcst node, importing only the helpers that *used* names."""
     # Stable order: matches ``_BASE_HELPERS`` declaration order so the
     # generated source diff stays predictable.

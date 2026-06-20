@@ -127,7 +127,7 @@ def _exec_converted(source: str, tmp_path, monkeypatch) -> Any:
     synthesised package, and return its ``result`` attribute.
 
     A package context is required because the converted source emits
-    a relative import (``from ._retrofy.lazy_runtime import ...``);
+    a relative import (``from ._retrofy_rt.lazy_imports import ...``);
     the meta-path finder synthesises that runtime on demand.
     """
     pkg_root = tmp_path / "synthcase"
