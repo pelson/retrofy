@@ -9,8 +9,11 @@ build-backend = "setuptools.build_meta"
 name = "retrofy-test-project"
 version = "0.1"
 description = "A project full of the latest and greatest Python (syntax) features"
-# The syntax in the repository is Python 3.13+, but we use retrofy to support older versions.
-requires-python = ">=3.9"
+# Declares the Python version the on-disk *source* needs. The source
+# uses PEP 810 ``lazy from`` and other 3.15+ syntax; retrofy's
+# ``post-build-wheel`` / ``post-build-sdist`` hooks lower this floor
+# in the built artefacts according to ``[tool.retrofy] target-python``.
+requires-python = ">=3.15"
 # Retrofy injects ``Requires-Dist: retrofy`` for editable installs (it
 # needs retrofy at runtime for the import-time rewriter). PEP 621
 # requires this to be opted into via ``dynamic``; wheel installs are
@@ -32,8 +35,9 @@ include = ["example_project", "example_project.*"]
 [tool.retrofy]
 # Target floor for both the lowered wheel (post-build-wheel) and the
 # lowered sdist (post-build-sdist). The on-disk source is 3.15+;
-# retrofy rewrites both artefacts so they install on 3.9+.
-target-python = "3.9"
+# retrofy rewrites both artefacts so they install on the floor below.
+# Set deliberately broad to exercise retrofy's lowering reach.
+target-python = "3.7"
 
 # The on-disk source uses post-current-Python syntax that retrofy
 # backports at build / import time. Tell ruff to lint it against the
