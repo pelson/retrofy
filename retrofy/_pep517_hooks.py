@@ -5,8 +5,11 @@ import logging
 import os
 import pathlib
 import posixpath
+import re
 import shutil
 import sys
+import tarfile
+import tempfile
 import zipfile
 
 from setuptools_ext import WheelModifier
@@ -330,3 +333,294 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
                 whl.write_wheel(whl_fh)
 
     editable_copy.unlink()
+
+
+def _strip_top_level(member_name: str) -> tuple[str, str]:
+    """Return ``(top_level, relpath)`` for a tar member name.
+
+    Sdists are canonically packaged as ``name-version/...`` -- one
+    top-level directory containing everything. We don't accept anything
+    else.
+    """
+    head, _, rest = member_name.partition("/")
+    return head, rest
+
+
+def _build_requires_drop_retrofy(requires: list[str]) -> list[str]:
+    """Return ``requires`` with any entry whose PEP 508-normalised name is
+    ``retrofy`` removed. Entries that are not parseable as PEP 508
+    requirements are passed through unchanged.
+    """
+    out: list[str] = []
+    for spec in requires:
+        # Cheap parse: name is everything up to the first
+        # ``<``, ``=``, ``>``, ``!``, ``~``, ``;``, ``[``, or whitespace.
+        # Normalize per PEP 503 (lowercase, ``-``/``_``/``.`` collapsed).
+        m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", spec)
+        if not m:
+            out.append(spec)
+            continue
+        name = re.sub(r"[-_.]+", "-", m.group(1)).lower()
+        if name == "retrofy":
+            continue
+        out.append(spec)
+    return out
+
+
+def _patch_pyproject_for_lowered_sdist(text: str, floor: str) -> str:
+    """Patch a sdist's ``pyproject.toml`` text for the lowered sdist:
+
+    - rewrite ``[project].requires-python`` to ``>={floor}``; if
+      ``requires-python`` was in ``[project].dynamic``, drop it.
+    - drop ``retrofy`` from ``[build-system].requires``.
+
+    Implementation note: round-tripping TOML losslessly is hard, so we
+    keep the rewrite line-based. The pyproject files we touch are written
+    by humans (or other tools that emit human-readable TOML); the cases
+    we need to handle are the standard ones, not pathological TOML.
+    """
+    # Parse with tomllib for correctness; rewrite by string edits to
+    # preserve formatting/comments where it doesn't matter.
+    data = tomllib.loads(text)
+    project = data.get("project", {})
+    build_system = data.get("build-system", {})
+
+    # --- [build-system].requires ---------------------------------------
+    new_text = text
+    requires = build_system.get("requires")
+    if requires:
+        new_requires = _build_requires_drop_retrofy(requires)
+        if new_requires != requires:
+            new_text = _rewrite_array_value(
+                new_text,
+                "build-system",
+                "requires",
+                new_requires,
+            )
+
+    # --- [project].dynamic --------------------------------------------
+    dynamic = project.get("dynamic", []) or []
+    if "requires-python" in dynamic:
+        new_dynamic = [d for d in dynamic if d != "requires-python"]
+        new_text = _rewrite_array_value(
+            new_text,
+            "project",
+            "dynamic",
+            new_dynamic,
+        )
+
+    # --- [project].requires-python -------------------------------------
+    new_text = _set_requires_python(new_text, floor)
+
+    return new_text
+
+
+_TABLE_HEADER_RE = re.compile(r"^\s*\[([^\]]+)\]\s*$")
+
+
+def _find_table_span(text: str, table_name: str) -> tuple[int, int] | None:
+    """Return ``(start, end)`` byte offsets of the body of ``[table_name]``
+    in ``text``, or ``None`` if the table is absent. ``start`` is just
+    after the header line; ``end`` is at the start of the next table
+    header (or EOF).
+    """
+    lines = text.splitlines(keepends=True)
+    start_line: int | None = None
+    for i, line in enumerate(lines):
+        m = _TABLE_HEADER_RE.match(line)
+        if m and m.group(1).strip() == table_name:
+            start_line = i + 1
+            break
+    if start_line is None:
+        return None
+    end_line = len(lines)
+    for j in range(start_line, len(lines)):
+        m = _TABLE_HEADER_RE.match(lines[j])
+        if m:
+            end_line = j
+            break
+    start = sum(len(line) for line in lines[:start_line])
+    end = sum(len(line) for line in lines[:end_line])
+    return start, end
+
+
+_KEY_RE_TMPL = r"^(\s*){key}\s*=\s*"
+
+
+def _rewrite_array_value(
+    text: str,
+    table: str,
+    key: str,
+    new_value: list[str],
+) -> str:
+    """Replace the value of ``table.key`` (assumed to be an inline array)
+    with ``new_value`` rendered as a single-line inline array. Leaves
+    other formatting untouched. If the key isn't found, returns text
+    unchanged.
+    """
+    span = _find_table_span(text, table)
+    if span is None:
+        return text
+    start, end = span
+    body = text[start:end]
+    pattern = re.compile(
+        _KEY_RE_TMPL.format(key=re.escape(key)) + r"(\[[^\]]*\])",
+        flags=re.MULTILINE,
+    )
+    rendered = "[" + ", ".join(f'"{v}"' for v in new_value) + "]"
+    new_body, n = pattern.subn(
+        lambda m: f"{m.group(1)}{key} = {rendered}",
+        body,
+        count=1,
+    )
+    if n == 0:
+        return text
+    return text[:start] + new_body + text[end:]
+
+
+def _set_requires_python(text: str, floor: str) -> str:
+    """Set ``[project].requires-python = ">={floor}"``. If the table
+    exists but the key doesn't, append the key inside the table; if the
+    table is missing, return text unchanged (a pyproject without
+    ``[project]`` isn't a PEP 621 project and we have nothing to lower).
+    """
+    span = _find_table_span(text, "project")
+    if span is None:
+        return text
+    start, end = span
+    body = text[start:end]
+    pattern = re.compile(
+        _KEY_RE_TMPL.format(key=re.escape("requires-python")) + r'"[^"]*"',
+        flags=re.MULTILINE,
+    )
+    new_body, n = pattern.subn(
+        lambda m: f'{m.group(1)}requires-python = ">={floor}"',
+        body,
+        count=1,
+    )
+    if n == 0:
+        # Append at the end of the table body.
+        trailing_blank = ""
+        if not body.endswith("\n"):
+            trailing_blank = "\n"
+        new_body = body + trailing_blank + f'requires-python = ">={floor}"\n'
+    return text[:start] + new_body + text[end:]
+
+
+def lower_sdist(sdist_path: pathlib.Path) -> None:
+    """``post-build-sdist`` hook.
+
+    When ``[tool.retrofy] target-python`` is set, rewrite the sdist in
+    place so it is installable on the target Python without retrofy in
+    the build environment: convert source files, inject ``_retrofy_rt/``
+    where needed, lower ``Requires-Python`` in pyproject + PKG-INFO,
+    and strip ``retrofy`` from ``[build-system].requires``.
+
+    ``RETROFY_DISABLE_REWRITE=1`` short-circuits to a no-op, mirroring
+    the wheel hook's bootstrap escape.
+    """
+    if os.environ.get("RETROFY_DISABLE_REWRITE") == "1":
+        _log.info("RETROFY_DISABLE_REWRITE=1 — skipping sdist rewrite")
+        return
+    target_py = _read_target_python(pathlib.Path.cwd())
+    if target_py is None:
+        return
+    floor = target_py.lstrip(">=")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = pathlib.Path(tmpdir)
+        with tarfile.open(sdist_path, "r:gz") as tar:
+            members = tar.getmembers()
+            top_levels = {_strip_top_level(m.name)[0] for m in members if m.name}
+            if len(top_levels) != 1:
+                raise RuntimeError(
+                    f"sdist {sdist_path.name} does not have a single "
+                    f"top-level directory (found {sorted(top_levels)!r}); "
+                    f"retrofy's sdist lowering only supports the standard "
+                    f"name-version layout.",
+                )
+            top = next(iter(top_levels))
+            # ``filter="data"`` lands in 3.12; on 3.9-3.11 it emits a
+            # DeprecationWarning and behaves like fully-trusted. We're
+            # opening a sdist we just produced ourselves, not user-
+            # supplied input, so trusted-extraction is acceptable.
+            if sys.version_info >= (3, 12):
+                tar.extractall(tmp, filter="data")
+            else:
+                tar.extractall(tmp)  # noqa: S202  # see comment above
+
+        root = tmp / top
+        existing_entries = {
+            str(p.relative_to(root)).replace(os.sep, "/")
+            for p in root.rglob("*")
+            if p.is_file()
+        }
+
+        # Convert sources + collect lazy runtime dirs.
+        lazy_runtime_dirs: set[str] = set()
+        for py in root.rglob("*.py"):
+            text = py.read_text(encoding="utf-8")
+            new_text = convert(text)
+            if new_text != text:
+                py.write_text(new_text, encoding="utf-8")
+                _log.info(
+                    "Converted %s to compatibility syntax",
+                    py.relative_to(root),
+                )
+                if _LAZY_RUNTIME_IMPORT_MARKER in new_text:
+                    rel = posixpath.dirname(
+                        str(py.relative_to(root)).replace(os.sep, "/"),
+                    )
+                    lazy_runtime_dirs.add(rel)
+
+        # Inject _retrofy_rt/ payload where needed.
+        if lazy_runtime_dirs:
+            payload = _embedded_runtime_files()
+            for pkg_dir in sorted(lazy_runtime_dirs):
+                target_dir = f"{pkg_dir}/_retrofy_rt" if pkg_dir else "_retrofy_rt"
+                if f"{target_dir}/lazy_imports.py" in existing_entries:
+                    continue
+                clash = [
+                    e
+                    for e in existing_entries
+                    if e == target_dir
+                    or e == f"{target_dir}/"
+                    or e.startswith(f"{target_dir}/")
+                ]
+                if clash:
+                    raise _EmbeddedRuntimeCollisionError(
+                        f"package directory {pkg_dir!r} already contains a "
+                        f"`_retrofy_rt` entry ({clash[0]!r}); `_retrofy_rt` "
+                        f"is reserved as retrofy's runtime namespace inside "
+                        f"converted packages.",
+                    )
+                inject_dir = root / target_dir.replace("/", os.sep)
+                inject_dir.mkdir(parents=True, exist_ok=True)
+                for relpath, data in payload.items():
+                    (inject_dir / relpath).write_bytes(data)
+                _log.info(
+                    "Injected retrofy runtime payload into %s/",
+                    target_dir,
+                )
+
+        # Patch pyproject.toml.
+        pyproj = root / "pyproject.toml"
+        if pyproj.exists():
+            text = pyproj.read_text(encoding="utf-8")
+            new_text = _patch_pyproject_for_lowered_sdist(text, floor)
+            if new_text != text:
+                pyproj.write_text(new_text, encoding="utf-8")
+
+        # Patch PKG-INFO.
+        pkg_info = root / "PKG-INFO"
+        if pkg_info.exists():
+            text = pkg_info.read_text(encoding="utf-8")
+            new_text = _lower_requires_python(text, target_py)
+            if new_text != text:
+                pkg_info.write_text(new_text, encoding="utf-8")
+
+        # Repack.
+        tmp_sdist = sdist_path.with_suffix(sdist_path.suffix + ".tmp")
+        with tarfile.open(tmp_sdist, "w:gz") as tar:
+            tar.add(root, arcname=top, recursive=True)
+        os.replace(tmp_sdist, sdist_path)

@@ -29,6 +29,12 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["example_project", "example_project.*"]
 
+[tool.retrofy]
+# Target floor for both the lowered wheel (post-build-wheel) and the
+# lowered sdist (post-build-sdist). The on-disk source is 3.15+;
+# retrofy rewrites both artefacts so they install on 3.9+.
+target-python = "3.9"
+
 # The on-disk source uses post-current-Python syntax that retrofy
 # backports at build / import time. Tell ruff to lint it against the
 # Python version where that syntax is native, not the ``requires-python``
