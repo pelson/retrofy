@@ -199,6 +199,24 @@ jobs:
         cd not-the-source
         python -m pytest --pyargs retrofy -ssvv
 
+    - name: Install retrofy from its own lowered sdist (build-via-sdist smoke)
+      run: |
+        # The build job runs ``lower_sdist`` against retrofy's own sdist;
+        # this step exercises the resulting tarball end-to-end on the
+        # matrix Python. It catches breakage in the sdist's pyproject
+        # rewrite (e.g. bad TOML emission, multi-line array mangling,
+        # nested ``]``) that the wheel-install path above cannot see.
+        #
+        # No ``PIP_BUILD_CONSTRAINT`` is needed: ``lower_sdist`` strips
+        # retrofy from ``[build-system].requires``, so the build-
+        # isolation env never tries to install retrofy and the
+        # build-from-sdist succeeds with no retrofy on the host.
+        python -m venv /tmp/sdist-venv
+        /tmp/sdist-venv/bin/pip install --upgrade pip
+        RETROFY_SDIST=$(ls dist/retrofy-*.tar.gz)
+        /tmp/sdist-venv/bin/pip install "$RETROFY_SDIST"
+        /tmp/sdist-venv/bin/python -c "import retrofy; print(retrofy.__version__)"
+
     - name: Build example-project (exercises the retrofy build rewrite)
       run: |
         # Build with pip's build isolation (mirrors how end users build
@@ -270,6 +288,49 @@ jobs:
       run: |
         cd not-the-source
         /tmp/wheel-venv/bin/pytest --pyargs example_project -ssvv
+
+    - name: Build example-project sdist (exercises retrofy's lower_sdist hook)
+      run: |
+        # ``pip wheel`` only produces wheels, so for sdists we use
+        # ``python -m build``. To avoid ``build``'s default fresh-venv
+        # path (whose ensurepip-bundled pip is too old to honour
+        # ``PIP_BUILD_CONSTRAINT`` and would silently drift to released
+        # retrofy), set up a dedicated builder venv, install the dev
+        # retrofy into it from the local index, and run ``build
+        # --no-isolation`` so it reuses that venv as the build env.
+        mkdir -p example-project/sdist
+        python -m venv /tmp/sdist-builder
+        /tmp/sdist-builder/bin/pip install --upgrade pip
+        # PIP_INDEX_URL is exported by the merged-index step; the dev
+        # retrofy resolves locally, all other deps resolve from PyPI.
+        /tmp/sdist-builder/bin/pip install \
+          build multistage-build setuptools setuptools_scm retrofy
+        /tmp/sdist-builder/bin/python -m build --sdist --no-isolation \
+          --outdir example-project/sdist ./example-project
+        ls example-project/sdist/
+
+    - name: Install built example-project sdist in a fresh venv
+      run: |
+        # The lowered sdist must install on the matrix Python without
+        # retrofy in the build environment (lower_sdist strips retrofy
+        # from [build-system].requires). A failure here means the
+        # sdist's pyproject is malformed or the lowered source still
+        # contains post-3.9 syntax.
+        python -m venv /tmp/sdist-example-venv
+        /tmp/sdist-example-venv/bin/pip install --upgrade pip
+        /tmp/sdist-example-venv/bin/pip install pytest
+        /tmp/sdist-example-venv/bin/pip install example-project/sdist/*.tar.gz
+
+        if /tmp/sdist-example-venv/bin/pip list --format=freeze | grep -qE '^retrofy=='; then
+          echo "::error::retrofy unexpectedly installed in /tmp/sdist-example-venv — lower_sdist did not strip it from build-system.requires"
+          /tmp/sdist-example-venv/bin/pip list --format=freeze | grep -E '^retrofy'
+          exit 1
+        fi
+
+    - name: Test example-project from isolation (sdist install)
+      run: |
+        cd not-the-source
+        /tmp/sdist-example-venv/bin/pytest --pyargs example_project -ssvv
 
     - name: Install example-project as editable in a fresh venv
       run: |
@@ -365,12 +426,9 @@ jobs:
         # ``--no-project`` + ``--with-editable .`` mode rather than
         # full project mode because the latter would try to produce a
         # universal ``uv.lock`` across example-project's whole
-        # ``requires-python`` range (>=3.7), which is unsatisfiable —
-        # retrofy itself requires >=3.9, so editable installs simply
-        # cannot resolve for Python 3.7 / 3.8 (non-editable wheel
-        # installs of example-project still work on 3.7+). The
-        # ``--no-project`` path resolves only for the active
-        # interpreter and writes no lockfile.
+        # ``requires-python`` range, which adds matrix overhead for no
+        # benefit here. The ``--no-project`` path resolves only for the
+        # active interpreter and writes no lockfile.
         #
         # ``UV_BUILD_CONSTRAINT`` / ``UV_CONSTRAINT`` are NOT honoured by
         # ``uv run`` (only by ``uv pip install``), so we can't pin the

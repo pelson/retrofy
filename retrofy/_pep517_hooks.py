@@ -13,6 +13,7 @@ import tempfile
 import zipfile
 
 from setuptools_ext import WheelModifier
+import tomlkit
 
 from ._converters import convert
 
@@ -94,13 +95,13 @@ def _assert_editable_dependencies_dynamic(source_root: pathlib.Path) -> None:
 
 
 def _read_target_python(source_root: pathlib.Path) -> str | None:
-    """Return the ``Requires-Python`` specifier requested by the project
-    at ``source_root`` via ``[tool.retrofy] target-python``, or ``None``
-    if the project does not opt in.
+    """Return the bare floor (e.g. ``"3.9"``) requested by the project at
+    ``source_root`` via ``[tool.retrofy] target-python``, or ``None`` if
+    the project does not opt in.
 
-    The value in pyproject is a bare floor (e.g. ``"3.9"``); the returned
-    string is a PEP 440 specifier (``">=3.9"``) suitable for splicing
-    into METADATA verbatim.
+    Callers format the floor into a PEP 440 specifier (``">=3.9"``)
+    themselves -- the bare value matches what users write in pyproject
+    and avoids a round-trip strip at every consumer.
     """
     pyproject = source_root / "pyproject.toml"
     if not pyproject.exists():
@@ -116,7 +117,7 @@ def _read_target_python(source_root: pathlib.Path) -> str | None:
             f"pyproject.toml -- TOML floats like ``3.10`` lose their "
             f"trailing zero and silently lower the floor.",
         )
-    return f">={floor}"
+    return floor
 
 
 def _retrofy_version() -> str:
@@ -314,17 +315,18 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
                 )
                 has_modifications = True
 
-        target_py = _read_target_python(pathlib.Path.cwd())
-        if target_py is not None:
+        floor = _read_target_python(pathlib.Path.cwd())
+        if floor is not None:
+            spec = f">={floor}"
             metadata_name = whl.dist_info_dirname() + "/METADATA"
             metadata_text = whl.read(metadata_name).decode("utf-8")
-            new_metadata = _lower_requires_python(metadata_text, target_py)
+            new_metadata = _lower_requires_python(metadata_text, spec)
             if new_metadata != metadata_text:
                 whl.write(metadata_name, new_metadata)
                 _log.info(
                     "Lowered Requires-Python in %s to %s",
                     metadata_name,
-                    target_py,
+                    spec,
                 )
                 has_modifications = True
 
@@ -368,164 +370,52 @@ def _build_requires_drop_retrofy(requires: list[str]) -> list[str]:
 
 
 def _patch_pyproject_for_lowered_sdist(text: str, floor: str) -> str:
-    """Patch a sdist's ``pyproject.toml`` text for the lowered sdist:
+    """Patch a sdist's ``pyproject.toml`` for the lowered sdist:
 
     - rewrite ``[project].requires-python`` to ``>={floor}``; if
       ``requires-python`` was in ``[project].dynamic``, drop it.
-    - drop ``retrofy`` from ``[build-system].requires``.
+    - drop ``retrofy`` from ``[build-system].requires`` (PEP 503
+      normalised match).
 
-    Implementation note: round-tripping TOML losslessly is hard, so we
-    keep the rewrite line-based. The pyproject files we touch are written
-    by humans (or other tools that emit human-readable TOML); the cases
-    we need to handle are the standard ones, not pathological TOML.
+    Uses ``tomlkit`` for a round-trip edit that preserves comments and
+    formatting wherever it doesn't conflict with the edit.
     """
-    # Parse with tomllib for correctness; rewrite by string edits to
-    # preserve formatting/comments where it doesn't matter.
-    data = tomllib.loads(text)
-    project = data.get("project", {})
-    build_system = data.get("build-system", {})
+    doc = tomlkit.parse(text)
 
-    # --- [build-system].requires ---------------------------------------
-    new_text = text
-    requires = build_system.get("requires")
-    if requires:
-        new_requires = _build_requires_drop_retrofy(requires)
-        if new_requires != requires:
-            new_text = _rewrite_array_value(
-                new_text,
-                "build-system",
-                "requires",
-                new_requires,
-            )
+    build_system = doc.get("build-system")
+    if build_system is not None:
+        requires = build_system.get("requires")
+        if requires is not None:
+            new_requires = _build_requires_drop_retrofy(list(requires))
+            if new_requires != list(requires):
+                build_system["requires"] = new_requires
 
-    # --- [project].dynamic --------------------------------------------
-    dynamic = project.get("dynamic", []) or []
-    if "requires-python" in dynamic:
-        new_dynamic = [d for d in dynamic if d != "requires-python"]
-        new_text = _rewrite_array_value(
-            new_text,
-            "project",
-            "dynamic",
-            new_dynamic,
-        )
+    project = doc.get("project")
+    if project is not None:
+        dynamic = project.get("dynamic")
+        if dynamic is not None and "requires-python" in dynamic:
+            project["dynamic"] = [d for d in dynamic if d != "requires-python"]
+        project["requires-python"] = f">={floor}"
 
-    # --- [project].requires-python -------------------------------------
-    new_text = _set_requires_python(new_text, floor)
-
-    return new_text
-
-
-_TABLE_HEADER_RE = re.compile(r"^\s*\[([^\]]+)\]\s*$")
-
-
-def _find_table_span(text: str, table_name: str) -> tuple[int, int] | None:
-    """Return ``(start, end)`` byte offsets of the body of ``[table_name]``
-    in ``text``, or ``None`` if the table is absent. ``start`` is just
-    after the header line; ``end`` is at the start of the next table
-    header (or EOF).
-    """
-    lines = text.splitlines(keepends=True)
-    start_line: int | None = None
-    for i, line in enumerate(lines):
-        m = _TABLE_HEADER_RE.match(line)
-        if m and m.group(1).strip() == table_name:
-            start_line = i + 1
-            break
-    if start_line is None:
-        return None
-    end_line = len(lines)
-    for j in range(start_line, len(lines)):
-        m = _TABLE_HEADER_RE.match(lines[j])
-        if m:
-            end_line = j
-            break
-    start = sum(len(line) for line in lines[:start_line])
-    end = sum(len(line) for line in lines[:end_line])
-    return start, end
-
-
-_KEY_RE_TMPL = r"^(\s*){key}\s*=\s*"
-
-
-def _rewrite_array_value(
-    text: str,
-    table: str,
-    key: str,
-    new_value: list[str],
-) -> str:
-    """Replace the value of ``table.key`` (assumed to be an inline array)
-    with ``new_value`` rendered as a single-line inline array. Leaves
-    other formatting untouched. If the key isn't found, returns text
-    unchanged.
-    """
-    span = _find_table_span(text, table)
-    if span is None:
-        return text
-    start, end = span
-    body = text[start:end]
-    pattern = re.compile(
-        _KEY_RE_TMPL.format(key=re.escape(key)) + r"(\[[^\]]*\])",
-        flags=re.MULTILINE,
-    )
-    rendered = "[" + ", ".join(f'"{v}"' for v in new_value) + "]"
-    new_body, n = pattern.subn(
-        lambda m: f"{m.group(1)}{key} = {rendered}",
-        body,
-        count=1,
-    )
-    if n == 0:
-        return text
-    return text[:start] + new_body + text[end:]
-
-
-def _set_requires_python(text: str, floor: str) -> str:
-    """Set ``[project].requires-python = ">={floor}"``. If the table
-    exists but the key doesn't, append the key inside the table; if the
-    table is missing, return text unchanged (a pyproject without
-    ``[project]`` isn't a PEP 621 project and we have nothing to lower).
-    """
-    span = _find_table_span(text, "project")
-    if span is None:
-        return text
-    start, end = span
-    body = text[start:end]
-    pattern = re.compile(
-        _KEY_RE_TMPL.format(key=re.escape("requires-python")) + r'"[^"]*"',
-        flags=re.MULTILINE,
-    )
-    new_body, n = pattern.subn(
-        lambda m: f'{m.group(1)}requires-python = ">={floor}"',
-        body,
-        count=1,
-    )
-    if n == 0:
-        # Append at the end of the table body.
-        trailing_blank = ""
-        if not body.endswith("\n"):
-            trailing_blank = "\n"
-        new_body = body + trailing_blank + f'requires-python = ">={floor}"\n'
-    return text[:start] + new_body + text[end:]
+    return tomlkit.dumps(doc)
 
 
 def lower_sdist(sdist_path: pathlib.Path) -> None:
     """``post-build-sdist`` hook.
 
-    When ``[tool.retrofy] target-python`` is set, rewrite the sdist in
-    place so it is installable on the target Python without retrofy in
-    the build environment: convert source files, inject ``_retrofy_rt/``
-    where needed, lower ``Requires-Python`` in pyproject + PKG-INFO,
-    and strip ``retrofy`` from ``[build-system].requires``.
+    Mirrors the wheel hook (``compatibility_via_rewrite``): source
+    conversion runs unconditionally, ``_retrofy_rt/`` is injected
+    wherever converted source references it, and the
+    ``Requires-Python`` / ``[build-system].requires`` rewrites are
+    gated on ``[tool.retrofy] target-python``.
 
-    ``RETROFY_DISABLE_REWRITE=1`` short-circuits to a no-op, mirroring
-    the wheel hook's bootstrap escape.
+    ``RETROFY_DISABLE_REWRITE=1`` short-circuits to a no-op for the
+    retrofy self-build bootstrap, matching the wheel hook.
     """
     if os.environ.get("RETROFY_DISABLE_REWRITE") == "1":
         _log.info("RETROFY_DISABLE_REWRITE=1 — skipping sdist rewrite")
         return
-    target_py = _read_target_python(pathlib.Path.cwd())
-    if target_py is None:
-        return
-    floor = target_py.lstrip(">=")
+    floor = _read_target_python(pathlib.Path.cwd())
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = pathlib.Path(tmpdir)
@@ -544,6 +434,8 @@ def lower_sdist(sdist_path: pathlib.Path) -> None:
             # DeprecationWarning and behaves like fully-trusted. We're
             # opening a sdist we just produced ourselves, not user-
             # supplied input, so trusted-extraction is acceptable.
+            # Tracked in pelson/retrofy#39 -- candidate for a retrofy
+            # converter that emits this fallback automatically.
             if sys.version_info >= (3, 12):
                 tar.extractall(tmp, filter="data")
             else:
@@ -556,7 +448,12 @@ def lower_sdist(sdist_path: pathlib.Path) -> None:
             if p.is_file()
         }
 
-        # Convert sources + collect lazy runtime dirs.
+        has_modifications = False
+
+        # Convert sources unconditionally -- the same modern syntax that
+        # the wheel hook lowers is unparseable on any older Python, so
+        # source lowering is universally useful even when the project
+        # has not opted into metadata lowering via ``target-python``.
         lazy_runtime_dirs: set[str] = set()
         for py in root.rglob("*.py"):
             text = py.read_text(encoding="utf-8")
@@ -567,6 +464,7 @@ def lower_sdist(sdist_path: pathlib.Path) -> None:
                     "Converted %s to compatibility syntax",
                     py.relative_to(root),
                 )
+                has_modifications = True
                 if _LAZY_RUNTIME_IMPORT_MARKER in new_text:
                     rel = posixpath.dirname(
                         str(py.relative_to(root)).replace(os.sep, "/"),
@@ -602,22 +500,28 @@ def lower_sdist(sdist_path: pathlib.Path) -> None:
                     "Injected retrofy runtime payload into %s/",
                     target_dir,
                 )
+                has_modifications = True
 
-        # Patch pyproject.toml.
-        pyproj = root / "pyproject.toml"
-        if pyproj.exists():
-            text = pyproj.read_text(encoding="utf-8")
-            new_text = _patch_pyproject_for_lowered_sdist(text, floor)
-            if new_text != text:
-                pyproj.write_text(new_text, encoding="utf-8")
+        # Metadata lowering is opt-in via ``[tool.retrofy] target-python``.
+        if floor is not None:
+            spec = f">={floor}"
+            pyproj = root / "pyproject.toml"
+            if pyproj.exists():
+                text = pyproj.read_text(encoding="utf-8")
+                new_text = _patch_pyproject_for_lowered_sdist(text, floor)
+                if new_text != text:
+                    pyproj.write_text(new_text, encoding="utf-8")
+                    has_modifications = True
+            pkg_info = root / "PKG-INFO"
+            if pkg_info.exists():
+                text = pkg_info.read_text(encoding="utf-8")
+                new_text = _lower_requires_python(text, spec)
+                if new_text != text:
+                    pkg_info.write_text(new_text, encoding="utf-8")
+                    has_modifications = True
 
-        # Patch PKG-INFO.
-        pkg_info = root / "PKG-INFO"
-        if pkg_info.exists():
-            text = pkg_info.read_text(encoding="utf-8")
-            new_text = _lower_requires_python(text, target_py)
-            if new_text != text:
-                pkg_info.write_text(new_text, encoding="utf-8")
+        if not has_modifications:
+            return
 
         # Repack.
         tmp_sdist = sdist_path.with_suffix(sdist_path.suffix + ".tmp")

@@ -37,6 +37,10 @@ dependencies = [
   "libcst",
   "setuptools-ext",  # TODO: Get rid of this dependency when there is a wheel interface elsewhere.
   "tomli; python_version < '3.11'",
+  # tomlkit drives the sdist-lowering pyproject rewrite (round-trip
+  # TOML preserves multi-line arrays, nested ``]``, and user comments
+  # that the previous regex approach mangled).
+  "tomlkit",
 ]
 
 [project.optional-dependencies]

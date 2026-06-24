@@ -213,7 +213,7 @@ def test_read_target_python_returns_floor_when_set(tmp_path):
         target-python = "3.9"
         """,
     )
-    assert _read_target_python(root) == ">=3.9"
+    assert _read_target_python(root) == "3.9"
 
 
 def test_read_target_python_none_when_section_missing(tmp_path):
@@ -618,19 +618,30 @@ def test_lower_sdist_patches_pkg_info(tmp_path, monkeypatch):
     assert "Requires-Python: >=3.15" not in pkg_info
 
 
-def test_lower_sdist_skipped_when_target_python_unset(tmp_path, monkeypatch):
-    (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "dummypkg"\n',
-        encoding="utf-8",
-    )
+def test_lower_sdist_converts_source_even_without_target_python(tmp_path, monkeypatch):
+    # Without ``[tool.retrofy] target-python`` the metadata edits are
+    # skipped, but source conversion still runs -- modern syntax is
+    # unparseable on older Pythons regardless of whether the project
+    # has opted into Requires-Python lowering, so emitting unconverted
+    # source would leave a half-broken sdist behind.
+    pyproject = '[project]\nname = "dummypkg"\nrequires-python = ">=3.15"\n'
+    (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     raw_source = "lazy from foo import bar\n"
-    sdist = _make_minimal_sdist(tmp_path, {"dummypkg/x.py": raw_source})
+    sdist = _make_minimal_sdist(
+        tmp_path,
+        {"dummypkg/x.py": raw_source, "pyproject.toml": pyproject},
+    )
 
     lower_sdist(sdist)
 
     files = _read_sdist(sdist)
-    assert files["dummypkg/x.py"].decode("utf-8") == raw_source
+    # Source was converted...
+    assert files["dummypkg/x.py"].decode("utf-8") != raw_source
+    assert "__lazy_from__" in files["dummypkg/x.py"].decode("utf-8")
+    # ...but pyproject/PKG-INFO were left alone.
+    assert ">=3.15" in files["pyproject.toml"].decode("utf-8")
+    assert "Requires-Python: >=3.15" in files["PKG-INFO"].decode("utf-8")
 
 
 def test_lower_sdist_skipped_when_disable_env_set(tmp_path, monkeypatch):
