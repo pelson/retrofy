@@ -5,7 +5,6 @@ import logging
 import os
 import pathlib
 import posixpath
-import re
 import shutil
 import sys
 import tarfile
@@ -349,21 +348,21 @@ def _strip_top_level(member_name: str) -> tuple[str, str]:
 
 
 def _build_requires_drop_retrofy(requires: list[str]) -> list[str]:
-    """Return ``requires`` with any entry whose PEP 508-normalised name is
+    """Return ``requires`` with any entry whose PEP 503-normalised name is
     ``retrofy`` removed. Entries that are not parseable as PEP 508
     requirements are passed through unchanged.
     """
+    from packaging.requirements import InvalidRequirement, Requirement
+    from packaging.utils import canonicalize_name
+
     out: list[str] = []
     for spec in requires:
-        # Cheap parse: name is everything up to the first
-        # ``<``, ``=``, ``>``, ``!``, ``~``, ``;``, ``[``, or whitespace.
-        # Normalize per PEP 503 (lowercase, ``-``/``_``/``.`` collapsed).
-        m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", spec)
-        if not m:
+        try:
+            req = Requirement(spec)
+        except InvalidRequirement:
             out.append(spec)
             continue
-        name = re.sub(r"[-_.]+", "-", m.group(1)).lower()
-        if name == "retrofy":
+        if canonicalize_name(req.name) == "retrofy":
             continue
         out.append(spec)
     return out

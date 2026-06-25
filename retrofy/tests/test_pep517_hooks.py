@@ -565,8 +565,8 @@ def test_lower_sdist_patches_pyproject_dynamic_requires_python(tmp_path, monkeyp
         "retrofy>=0.3",
         "retrofy[extra]",
         "retrofy ; python_version < '3.13'",
-        "RetroFy",  # PEP 503 normalisation
-        "retro_fy",  # PEP 503 normalisation (underscore -> hyphen)
+        "RetroFy",  # PEP 503 case-insensitivity
+        "RETROFY",  # PEP 503 case-insensitivity
     ],
 )
 def test_lower_sdist_strips_retrofy_from_build_requires(spec, tmp_path, monkeypatch):
@@ -592,7 +592,7 @@ def test_lower_sdist_strips_retrofy_from_build_requires(spec, tmp_path, monkeypa
     requires_line = next(
         line for line in new.splitlines() if line.strip().startswith("requires =")
     )
-    assert "retrofy" not in requires_line.lower().replace("retro_fy", "")
+    assert "retrofy" not in requires_line.lower()
     assert "multistage-build" in requires_line
 
 

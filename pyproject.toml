@@ -41,6 +41,9 @@ dependencies = [
   # TOML preserves multi-line arrays, nested ``]``, and user comments
   # that the previous regex approach mangled).
   "tomlkit",
+  # packaging.Requirement / canonicalize_name parse PEP 508 specs in
+  # ``[build-system].requires`` when ``lower_sdist`` strips retrofy.
+  "packaging",
 ]
 
 [project.optional-dependencies]
