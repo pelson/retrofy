@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
 import pathlib
+import re
+import tarfile
 import textwrap
 import zipfile
 
@@ -10,10 +13,12 @@ from retrofy import __version__ as RETROFY_VERSION
 from retrofy._pep517_hooks import (
     EditableRuntimeRequirementError,
     _assert_editable_dependencies_dynamic,
+    _EmbeddedRuntimeCollisionError,
     _lower_requires_python,
     _read_target_python,
     compatibility_via_rewrite,
     inject_runtime_requirement,
+    lower_sdist,
 )
 
 PINNED_REQUIRES = f"Requires-Dist: retrofy=={RETROFY_VERSION}"
@@ -207,7 +212,7 @@ def test_read_target_python_returns_floor_when_set(tmp_path):
         target-python = "3.9"
         """,
     )
-    assert _read_target_python(root) == ">=3.9"
+    assert _read_target_python(root) == "3.9"
 
 
 def test_read_target_python_none_when_section_missing(tmp_path):
@@ -382,3 +387,343 @@ def test_compatibility_via_rewrite_skipped_when_disable_env_set(
         md = z.read("dummypkg-0.0.0.dist-info/METADATA").decode("utf-8")
     assert py == raw_source  # not converted
     assert "Requires-Python: >=3.15" in md  # METADATA not lowered
+
+
+# ---------------------------------------------------------------------------
+# lower_sdist
+# ---------------------------------------------------------------------------
+
+
+def _make_minimal_sdist(
+    tmp_path: pathlib.Path,
+    files: dict[str, str | bytes],
+    *,
+    name: str = "dummypkg-0.0.0",
+) -> pathlib.Path:
+    """Build a ``{name}.tar.gz`` at ``tmp_path`` whose top-level directory
+    is ``{name}/`` and whose contents are ``files`` (mapping of
+    ``relative/path`` -> text or bytes).
+
+    PKG-INFO is auto-supplied if not in ``files``.
+    """
+    files = dict(files)
+    files.setdefault(
+        "PKG-INFO",
+        "Metadata-Version: 2.1\n"
+        "Name: dummypkg\n"
+        "Version: 0.0.0\n"
+        "Requires-Python: >=3.15\n",
+    )
+    sdist = tmp_path / f"{name}.tar.gz"
+    with tarfile.open(sdist, "w:gz") as tar:
+        for relpath, content in files.items():
+            data = content.encode("utf-8") if isinstance(content, str) else content
+            info = tarfile.TarInfo(f"{name}/{relpath}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return sdist
+
+
+def _read_sdist(sdist: pathlib.Path, name: str = "dummypkg-0.0.0") -> dict[str, bytes]:
+    """Read every regular file in the sdist into a dict keyed by the
+    relative path under the top-level ``{name}/`` directory."""
+    out: dict[str, bytes] = {}
+    with tarfile.open(sdist, "r:gz") as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            prefix = f"{name}/"
+            assert member.name.startswith(prefix), member.name
+            fh = tar.extractfile(member)
+            assert fh is not None  # isfile() above guarantees this
+            out[member.name[len(prefix) :]] = fh.read()
+    return out
+
+
+def _opt_in_pyproject(text: str) -> str:
+    return textwrap.dedent(text)
+
+
+def test_lower_sdist_converts_py_files(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text(
+        _opt_in_pyproject(
+            """\
+            [project]
+            name = "dummypkg"
+            [tool.retrofy]
+            target-python = "3.9"
+            """,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    sdist = _make_minimal_sdist(
+        tmp_path,
+        {
+            "dummypkg/__init__.py": "",
+            "dummypkg/x.py": "lazy from foo import bar\n",
+        },
+    )
+
+    lower_sdist(sdist)
+
+    files = _read_sdist(sdist)
+    assert "lazy from foo import bar" not in files["dummypkg/x.py"].decode("utf-8")
+    assert "__lazy_from__" in files["dummypkg/x.py"].decode("utf-8")
+
+
+def test_lower_sdist_injects_runtime_payload(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text(
+        _opt_in_pyproject(
+            """\
+            [project]
+            name = "dummypkg"
+            [tool.retrofy]
+            target-python = "3.9"
+            """,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    sdist = _make_minimal_sdist(
+        tmp_path,
+        {
+            "dummypkg/__init__.py": "",
+            "dummypkg/x.py": "lazy from foo import bar\n",
+        },
+    )
+
+    lower_sdist(sdist)
+
+    files = _read_sdist(sdist)
+    assert "dummypkg/_retrofy_rt/lazy_imports.py" in files
+    assert b"def lazy_from" in files["dummypkg/_retrofy_rt/lazy_imports.py"]
+
+
+def test_lower_sdist_patches_pyproject_requires_python(tmp_path, monkeypatch):
+    pyproject = _opt_in_pyproject(
+        """\
+        [build-system]
+        requires = ["multistage-build>=0.2", "setuptools", "retrofy>=0.3"]
+        build-backend = "multistage_build:backend"
+
+        [project]
+        name = "dummypkg"
+        version = "0.1"
+        requires-python = ">=3.15"
+
+        [tool.retrofy]
+        target-python = "3.9"
+        """,
+    )
+    (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    sdist = _make_minimal_sdist(tmp_path, {"pyproject.toml": pyproject})
+
+    lower_sdist(sdist)
+
+    new = _read_sdist(sdist)["pyproject.toml"].decode("utf-8")
+    assert 'requires-python = ">=3.9"' in new
+    assert ">=3.15" not in new
+
+
+def test_lower_sdist_patches_pyproject_dynamic_requires_python(tmp_path, monkeypatch):
+    pyproject = _opt_in_pyproject(
+        """\
+        [build-system]
+        requires = ["multistage-build>=0.2", "setuptools", "retrofy>=0.3"]
+        build-backend = "multistage_build:backend"
+
+        [project]
+        name = "dummypkg"
+        version = "0.1"
+        dynamic = ["requires-python", "dependencies"]
+
+        [tool.retrofy]
+        target-python = "3.9"
+        """,
+    )
+    (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    sdist = _make_minimal_sdist(tmp_path, {"pyproject.toml": pyproject})
+
+    lower_sdist(sdist)
+
+    new = _read_sdist(sdist)["pyproject.toml"].decode("utf-8")
+    assert 'requires-python = ">=3.9"' in new
+    # requires-python is gone from dynamic; dependencies is still there.
+    # Match the rendered inline-array line we emit.
+    assert 'dynamic = ["dependencies"]' in new
+    assert '"requires-python"' not in new
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "retrofy",
+        "retrofy>=0.3",
+        "retrofy[extra]",
+        "retrofy ; python_version < '3.13'",
+        "RetroFy",  # PEP 503 case-insensitivity
+        "RETROFY",  # PEP 503 case-insensitivity
+    ],
+)
+def test_lower_sdist_strips_retrofy_from_build_requires(spec, tmp_path, monkeypatch):
+    pyproject = (
+        "[build-system]\n"
+        f'requires = ["multistage-build>=0.2", "setuptools", "{spec}"]\n'
+        'build-backend = "multistage_build:backend"\n'
+        "\n"
+        "[project]\n"
+        'name = "dummypkg"\n'
+        'version = "0.1"\n'
+        "\n"
+        "[tool.retrofy]\n"
+        'target-python = "3.9"\n'
+    )
+    (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    sdist = _make_minimal_sdist(tmp_path, {"pyproject.toml": pyproject})
+
+    lower_sdist(sdist)
+
+    new = _read_sdist(sdist)["pyproject.toml"].decode("utf-8")
+    requires_line = next(
+        line for line in new.splitlines() if line.strip().startswith("requires =")
+    )
+    assert "retrofy" not in requires_line.lower()
+    assert "multistage-build" in requires_line
+
+
+def test_lower_sdist_patches_pkg_info(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text(
+        _opt_in_pyproject(
+            """\
+            [project]
+            name = "dummypkg"
+            [tool.retrofy]
+            target-python = "3.9"
+            """,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    sdist = _make_minimal_sdist(tmp_path, {})
+
+    lower_sdist(sdist)
+
+    pkg_info = _read_sdist(sdist)["PKG-INFO"].decode("utf-8")
+    assert "Requires-Python: >=3.9" in pkg_info
+    assert "Requires-Python: >=3.15" not in pkg_info
+
+
+def test_lower_sdist_converts_source_even_without_target_python(tmp_path, monkeypatch):
+    # Without ``[tool.retrofy] target-python`` the metadata edits are
+    # skipped, but source conversion still runs -- modern syntax is
+    # unparseable on older Pythons regardless of whether the project
+    # has opted into Requires-Python lowering, so emitting unconverted
+    # source would leave a half-broken sdist behind.
+    pyproject = '[project]\nname = "dummypkg"\nrequires-python = ">=3.15"\n'
+    (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    raw_source = "lazy from foo import bar\n"
+    sdist = _make_minimal_sdist(
+        tmp_path,
+        {"dummypkg/x.py": raw_source, "pyproject.toml": pyproject},
+    )
+
+    lower_sdist(sdist)
+
+    files = _read_sdist(sdist)
+    # Source was converted...
+    assert files["dummypkg/x.py"].decode("utf-8") != raw_source
+    assert "__lazy_from__" in files["dummypkg/x.py"].decode("utf-8")
+    # ...but pyproject/PKG-INFO were left alone.
+    assert ">=3.15" in files["pyproject.toml"].decode("utf-8")
+    assert "Requires-Python: >=3.15" in files["PKG-INFO"].decode("utf-8")
+
+
+def test_lower_sdist_skipped_when_disable_env_set(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text(
+        _opt_in_pyproject(
+            """\
+            [project]
+            name = "dummypkg"
+            [tool.retrofy]
+            target-python = "3.9"
+            """,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RETROFY_DISABLE_REWRITE", "1")
+    raw_source = "lazy from foo import bar\n"
+    sdist = _make_minimal_sdist(tmp_path, {"dummypkg/x.py": raw_source})
+
+    lower_sdist(sdist)
+
+    files = _read_sdist(sdist)
+    assert files["dummypkg/x.py"].decode("utf-8") == raw_source
+    assert "Requires-Python: >=3.15" in files["PKG-INFO"].decode("utf-8")
+
+
+def test_lower_sdist_collision_on_existing_retrofy_rt(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text(
+        _opt_in_pyproject(
+            """\
+            [project]
+            name = "dummypkg"
+            [tool.retrofy]
+            target-python = "3.9"
+            """,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    sdist = _make_minimal_sdist(
+        tmp_path,
+        {
+            "dummypkg/__init__.py": "",
+            "dummypkg/x.py": "lazy from foo import bar\n",
+            "dummypkg/_retrofy_rt/preexisting.py": "# user-owned\n",
+        },
+    )
+
+    with pytest.raises(_EmbeddedRuntimeCollisionError):
+        lower_sdist(sdist)
+
+
+def test_lower_sdist_strip_name_matches_retrofy_distribution_name():
+    """Contract: the name ``lower_sdist`` looks for in
+    ``[build-system].requires`` must match retrofy's installed
+    distribution name (PEP 503 normalised). If retrofy is ever renamed
+    on PyPI, this test catches the silent miss.
+    """
+    import importlib.metadata
+
+    from retrofy._pep517_hooks import _build_requires_drop_retrofy
+
+    dist_name = importlib.metadata.distribution("retrofy").metadata["Name"]
+    normalized = re.sub(r"[-_.]+", "-", dist_name).lower()
+    assert normalized == "retrofy"
+    # And a sanity round-trip: dropping the live dist name works.
+    assert _build_requires_drop_retrofy([dist_name, "multistage-build"]) == [
+        "multistage-build",
+    ]
+
+
+def test_lower_sdist_entry_point_registered():
+    """Contract: the installed retrofy distribution advertises
+    ``post-build-sdist = retrofy._pep517_hooks:lower_sdist`` in the
+    ``multistage_build`` entry-point group, so multistage-build's hook
+    discovery picks it up at build time.
+    """
+    import importlib.metadata
+
+    eps = importlib.metadata.entry_points(
+        group="multistage_build",
+        name="post-build-sdist",
+    )
+    retrofy_eps = [ep for ep in eps if ep.value.startswith("retrofy.")]
+    assert len(retrofy_eps) == 1
+    assert retrofy_eps[0].value == "retrofy._pep517_hooks:lower_sdist"

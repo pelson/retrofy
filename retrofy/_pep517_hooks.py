@@ -7,9 +7,12 @@ import pathlib
 import posixpath
 import shutil
 import sys
+import tarfile
+import tempfile
 import zipfile
 
 from setuptools_ext import WheelModifier
+import tomlkit
 
 from ._converters import convert
 
@@ -91,13 +94,13 @@ def _assert_editable_dependencies_dynamic(source_root: pathlib.Path) -> None:
 
 
 def _read_target_python(source_root: pathlib.Path) -> str | None:
-    """Return the ``Requires-Python`` specifier requested by the project
-    at ``source_root`` via ``[tool.retrofy] target-python``, or ``None``
-    if the project does not opt in.
+    """Return the bare floor (e.g. ``"3.9"``) requested by the project at
+    ``source_root`` via ``[tool.retrofy] target-python``, or ``None`` if
+    the project does not opt in.
 
-    The value in pyproject is a bare floor (e.g. ``"3.9"``); the returned
-    string is a PEP 440 specifier (``">=3.9"``) suitable for splicing
-    into METADATA verbatim.
+    Callers format the floor into a PEP 440 specifier (``">=3.9"``)
+    themselves -- the bare value matches what users write in pyproject
+    and avoids a round-trip strip at every consumer.
     """
     pyproject = source_root / "pyproject.toml"
     if not pyproject.exists():
@@ -113,7 +116,7 @@ def _read_target_python(source_root: pathlib.Path) -> str | None:
             f"pyproject.toml -- TOML floats like ``3.10`` lose their "
             f"trailing zero and silently lower the floor.",
         )
-    return f">={floor}"
+    return floor
 
 
 def _retrofy_version() -> str:
@@ -311,17 +314,18 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
                 )
                 has_modifications = True
 
-        target_py = _read_target_python(pathlib.Path.cwd())
-        if target_py is not None:
+        floor = _read_target_python(pathlib.Path.cwd())
+        if floor is not None:
+            spec = f">={floor}"
             metadata_name = whl.dist_info_dirname() + "/METADATA"
             metadata_text = whl.read(metadata_name).decode("utf-8")
-            new_metadata = _lower_requires_python(metadata_text, target_py)
+            new_metadata = _lower_requires_python(metadata_text, spec)
             if new_metadata != metadata_text:
                 whl.write(metadata_name, new_metadata)
                 _log.info(
                     "Lowered Requires-Python in %s to %s",
                     metadata_name,
-                    target_py,
+                    spec,
                 )
                 has_modifications = True
 
@@ -330,3 +334,196 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
                 whl.write_wheel(whl_fh)
 
     editable_copy.unlink()
+
+
+def _strip_top_level(member_name: str) -> tuple[str, str]:
+    """Return ``(top_level, relpath)`` for a tar member name.
+
+    Sdists are canonically packaged as ``name-version/...`` -- one
+    top-level directory containing everything. We don't accept anything
+    else.
+    """
+    head, _, rest = member_name.partition("/")
+    return head, rest
+
+
+def _build_requires_drop_retrofy(requires: list[str]) -> list[str]:
+    """Return ``requires`` with any entry whose PEP 503-normalised name is
+    ``retrofy`` removed. Entries that are not parseable as PEP 508
+    requirements are passed through unchanged.
+    """
+    from packaging.requirements import InvalidRequirement, Requirement
+    from packaging.utils import canonicalize_name
+
+    out: list[str] = []
+    for spec in requires:
+        try:
+            req = Requirement(spec)
+        except InvalidRequirement:
+            out.append(spec)
+            continue
+        if canonicalize_name(req.name) == "retrofy":
+            continue
+        out.append(spec)
+    return out
+
+
+def _patch_pyproject_for_lowered_sdist(text: str, floor: str) -> str:
+    """Patch a sdist's ``pyproject.toml`` for the lowered sdist:
+
+    - rewrite ``[project].requires-python`` to ``>={floor}``; if
+      ``requires-python`` was in ``[project].dynamic``, drop it.
+    - drop ``retrofy`` from ``[build-system].requires`` (PEP 503
+      normalised match).
+
+    Uses ``tomlkit`` for a round-trip edit that preserves comments and
+    formatting wherever it doesn't conflict with the edit.
+    """
+    doc = tomlkit.parse(text)
+
+    build_system = doc.get("build-system")
+    if build_system is not None:
+        requires = build_system.get("requires")
+        if requires is not None:
+            new_requires = _build_requires_drop_retrofy(list(requires))
+            if new_requires != list(requires):
+                build_system["requires"] = new_requires
+
+    project = doc.get("project")
+    if project is not None:
+        dynamic = project.get("dynamic")
+        if dynamic is not None and "requires-python" in dynamic:
+            project["dynamic"] = [d for d in dynamic if d != "requires-python"]
+        project["requires-python"] = f">={floor}"
+
+    return tomlkit.dumps(doc)
+
+
+def lower_sdist(sdist_path: pathlib.Path) -> None:
+    """``post-build-sdist`` hook.
+
+    Mirrors the wheel hook (``compatibility_via_rewrite``): source
+    conversion runs unconditionally, ``_retrofy_rt/`` is injected
+    wherever converted source references it, and the
+    ``Requires-Python`` / ``[build-system].requires`` rewrites are
+    gated on ``[tool.retrofy] target-python``.
+
+    ``RETROFY_DISABLE_REWRITE=1`` short-circuits to a no-op for the
+    retrofy self-build bootstrap, matching the wheel hook.
+    """
+    if os.environ.get("RETROFY_DISABLE_REWRITE") == "1":
+        _log.info("RETROFY_DISABLE_REWRITE=1 — skipping sdist rewrite")
+        return
+    floor = _read_target_python(pathlib.Path.cwd())
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = pathlib.Path(tmpdir)
+        with tarfile.open(sdist_path, "r:gz") as tar:
+            members = tar.getmembers()
+            top_levels = {_strip_top_level(m.name)[0] for m in members if m.name}
+            if len(top_levels) != 1:
+                raise RuntimeError(
+                    f"sdist {sdist_path.name} does not have a single "
+                    f"top-level directory (found {sorted(top_levels)!r}); "
+                    f"retrofy's sdist lowering only supports the standard "
+                    f"name-version layout.",
+                )
+            top = next(iter(top_levels))
+            # ``filter="data"`` lands in 3.12; on 3.9-3.11 it emits a
+            # DeprecationWarning and behaves like fully-trusted. We're
+            # opening a sdist we just produced ourselves, not user-
+            # supplied input, so trusted-extraction is acceptable.
+            # Tracked in pelson/retrofy#39 -- candidate for a retrofy
+            # converter that emits this fallback automatically.
+            if sys.version_info >= (3, 12):
+                tar.extractall(tmp, filter="data")
+            else:
+                tar.extractall(tmp)  # noqa: S202  # see comment above
+
+        root = tmp / top
+        existing_entries = {
+            str(p.relative_to(root)).replace(os.sep, "/")
+            for p in root.rglob("*")
+            if p.is_file()
+        }
+
+        has_modifications = False
+
+        # Convert sources unconditionally -- the same modern syntax that
+        # the wheel hook lowers is unparseable on any older Python, so
+        # source lowering is universally useful even when the project
+        # has not opted into metadata lowering via ``target-python``.
+        lazy_runtime_dirs: set[str] = set()
+        for py in root.rglob("*.py"):
+            text = py.read_text(encoding="utf-8")
+            new_text = convert(text)
+            if new_text != text:
+                py.write_text(new_text, encoding="utf-8")
+                _log.info(
+                    "Converted %s to compatibility syntax",
+                    py.relative_to(root),
+                )
+                has_modifications = True
+                if _LAZY_RUNTIME_IMPORT_MARKER in new_text:
+                    rel = posixpath.dirname(
+                        str(py.relative_to(root)).replace(os.sep, "/"),
+                    )
+                    lazy_runtime_dirs.add(rel)
+
+        # Inject _retrofy_rt/ payload where needed.
+        if lazy_runtime_dirs:
+            payload = _embedded_runtime_files()
+            for pkg_dir in sorted(lazy_runtime_dirs):
+                target_dir = f"{pkg_dir}/_retrofy_rt" if pkg_dir else "_retrofy_rt"
+                if f"{target_dir}/lazy_imports.py" in existing_entries:
+                    continue
+                clash = [
+                    e
+                    for e in existing_entries
+                    if e == target_dir
+                    or e == f"{target_dir}/"
+                    or e.startswith(f"{target_dir}/")
+                ]
+                if clash:
+                    raise _EmbeddedRuntimeCollisionError(
+                        f"package directory {pkg_dir!r} already contains a "
+                        f"`_retrofy_rt` entry ({clash[0]!r}); `_retrofy_rt` "
+                        f"is reserved as retrofy's runtime namespace inside "
+                        f"converted packages.",
+                    )
+                inject_dir = root / target_dir.replace("/", os.sep)
+                inject_dir.mkdir(parents=True, exist_ok=True)
+                for relpath, data in payload.items():
+                    (inject_dir / relpath).write_bytes(data)
+                _log.info(
+                    "Injected retrofy runtime payload into %s/",
+                    target_dir,
+                )
+                has_modifications = True
+
+        # Metadata lowering is opt-in via ``[tool.retrofy] target-python``.
+        if floor is not None:
+            spec = f">={floor}"
+            pyproj = root / "pyproject.toml"
+            if pyproj.exists():
+                text = pyproj.read_text(encoding="utf-8")
+                new_text = _patch_pyproject_for_lowered_sdist(text, floor)
+                if new_text != text:
+                    pyproj.write_text(new_text, encoding="utf-8")
+                    has_modifications = True
+            pkg_info = root / "PKG-INFO"
+            if pkg_info.exists():
+                text = pkg_info.read_text(encoding="utf-8")
+                new_text = _lower_requires_python(text, spec)
+                if new_text != text:
+                    pkg_info.write_text(new_text, encoding="utf-8")
+                    has_modifications = True
+
+        if not has_modifications:
+            return
+
+        # Repack.
+        tmp_sdist = sdist_path.with_suffix(sdist_path.suffix + ".tmp")
+        with tarfile.open(tmp_sdist, "w:gz") as tar:
+            tar.add(root, arcname=top, recursive=True)
+        os.replace(tmp_sdist, sdist_path)
