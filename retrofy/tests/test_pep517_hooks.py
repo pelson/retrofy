@@ -720,10 +720,12 @@ def test_lower_sdist_entry_point_registered():
     """
     import importlib.metadata
 
-    eps = importlib.metadata.entry_points(
-        group="multistage_build",
-        name="post-build-sdist",
-    )
-    retrofy_eps = [ep for ep in eps if ep.value.startswith("retrofy.")]
+    retrofy_eps = [
+        ep
+        for ep in importlib.metadata.distribution("retrofy").entry_points
+        if ep.group == "multistage_build"
+        and ep.name == "post-build-sdist"
+        and ep.value.startswith("retrofy.")
+    ]
     assert len(retrofy_eps) == 1
     assert retrofy_eps[0].value == "retrofy._pep517_hooks:lower_sdist"
