@@ -210,6 +210,10 @@ jobs:
         /tmp/sdist-venv/bin/pip install --upgrade pip
         RETROFY_SDIST=$(ls dist/retrofy-*.tar.gz)
         /tmp/sdist-venv/bin/pip install "$RETROFY_SDIST"
+        # ``cd /tmp`` to dodge cwd-first import shadowing -- the
+        # checkout's ``retrofy/`` source has no setuptools-scm
+        # ``_version.py`` and would mask the installed dist.
+        cd /tmp
         /tmp/sdist-venv/bin/python -c "import retrofy; print(retrofy.__version__)"
 
     - name: Build example-project (exercises the retrofy build rewrite)
@@ -505,9 +509,16 @@ jobs:
         # carries the backend chain (retrofy, multistage-build,
         # setuptools); ``--no-deps`` so pip doesn't try to install
         # example-project's deps into the wheel-build dir.
+        # ``--ignore-requires-python`` because example-project declares
+        # ``requires-python = ">=3.15"`` (the on-disk source syntax),
+        # but the converter Python is 3.13. pip would otherwise refuse
+        # to build; the actual install target -- the host venv below --
+        # uses the *lowered* wheel, whose Requires-Python is set from
+        # ``[tool.retrofy] target-python``.
         mkdir -p /tmp/expr-dist
         "$HOME/.cache/retrofy/converter-venv/bin/pip" wheel ./example-project \
-          --no-build-isolation --no-deps --wheel-dir /tmp/expr-dist
+          --no-build-isolation --no-deps --ignore-requires-python \
+          --wheel-dir /tmp/expr-dist
 
     - name: Install + test example-project wheel on the host
       run: |
