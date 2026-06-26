@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import pathlib
 import re
-import sys
 import tarfile
 import textwrap
 import zipfile
@@ -713,23 +712,18 @@ def test_lower_sdist_strip_name_matches_retrofy_distribution_name():
     ]
 
 
-def test_lower_sdist_entry_point_registered_in_pyproject():
-    """Contract: retrofy's source ``pyproject.toml`` wires
-    ``post-build-sdist`` to ``lower_sdist`` so multistage-build's hook
-    discovery picks it up after install. Parses the source pyproject
-    rather than ``importlib.metadata`` so the contract is verifiable
-    without a fresh editable reinstall.
+def test_lower_sdist_entry_point_registered():
+    """Contract: the installed retrofy distribution advertises
+    ``post-build-sdist = retrofy._pep517_hooks:lower_sdist`` in the
+    ``multistage_build`` entry-point group, so multistage-build's hook
+    discovery picks it up at build time.
     """
-    import retrofy._pep517_hooks as hooks
+    import importlib.metadata
 
-    if sys.version_info >= (3, 11):
-        import tomllib as _tomllib
-    else:
-        import tomli as _tomllib
-
-    src_pyproject = (
-        pathlib.Path(hooks.__file__).resolve().parent.parent / "pyproject.toml"
+    eps = importlib.metadata.entry_points(
+        group="multistage_build",
+        name="post-build-sdist",
     )
-    data = _tomllib.loads(src_pyproject.read_text(encoding="utf-8"))
-    entry = data["project"]["entry-points"]["multistage_build"]["post-build-sdist"]
-    assert entry == "retrofy._pep517_hooks:lower_sdist"
+    retrofy_eps = [ep for ep in eps if ep.value.startswith("retrofy.")]
+    assert len(retrofy_eps) == 1
+    assert retrofy_eps[0].value == "retrofy._pep517_hooks:lower_sdist"
