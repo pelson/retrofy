@@ -37,6 +37,8 @@ dependencies = [
   "libcst",
   "setuptools-ext",  # TODO: Get rid of this dependency when there is a wheel interface elsewhere.
   "tomli; python_version < '3.11'",
+  "tomlkit",
+  "packaging",
 ]
 
 [project.optional-dependencies]
@@ -55,8 +57,10 @@ Homepage = "https://github.com/pelson/retrofy"
 [project.entry-points.multistage_build]
 # Declare automatic hooks for a multistage-build using project.
 post-build-wheel = "retrofy._pep517_hooks:compatibility_via_rewrite"
+post-build-sdist = "retrofy._pep517_hooks:lower_sdist"
 post-build-editable = "retrofy._pep517_hooks:compatibility_via_import_hook"
 post-prepare-metadata-for-build-editable = "retrofy._pep517_hooks:inject_runtime_requirement"
+post-prepare-metadata-for-build-wheel = "retrofy._pep517_hooks:lower_metadata_requires_python"
 
 [project.entry-points.pytest11]
 # Cooperate with pytest's assertion rewriter when test files use

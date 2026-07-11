@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import importlib.resources
 import logging
 import os
@@ -7,9 +8,16 @@ import pathlib
 import posixpath
 import shutil
 import sys
+import tarfile
+import tempfile
 import zipfile
 
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 from setuptools_ext import WheelModifier
+import tomlkit
 
 from ._converters import convert
 
@@ -91,13 +99,15 @@ def _assert_editable_dependencies_dynamic(source_root: pathlib.Path) -> None:
 
 
 def _read_target_python(source_root: pathlib.Path) -> str | None:
-    """Return the ``Requires-Python`` specifier requested by the project
-    at ``source_root`` via ``[tool.retrofy] target-python``, or ``None``
-    if the project does not opt in.
+    """Return the bare floor (e.g. ``"3.9"``) requested by the project at
+    ``source_root`` via ``[tool.retrofy] target-python``, or ``None`` if
+    the project does not opt in.
 
-    The value in pyproject is a bare floor (e.g. ``"3.9"``); the returned
-    string is a PEP 440 specifier (``">=3.9"``) suitable for splicing
-    into METADATA verbatim.
+    The value must be a single PEP 440 version (``"3.9"``, ``"3.9.7"``)
+    -- range specifiers like ``">=3.9"`` or ``"3.9,!=3.12.*"`` are
+    rejected. ``target-python`` names the exact floor to lower to, not a
+    specifier; any range-shaped exclusions belong in the project's own
+    ``[project].requires-python`` and are preserved by the rewrite.
     """
     pyproject = source_root / "pyproject.toml"
     if not pyproject.exists():
@@ -113,7 +123,20 @@ def _read_target_python(source_root: pathlib.Path) -> str | None:
             f"pyproject.toml -- TOML floats like ``3.10`` lose their "
             f"trailing zero and silently lower the floor.",
         )
-    return f">={floor}"
+    try:
+        parsed = Version(floor)
+    except InvalidVersion:
+        parsed = None
+    if parsed is None or len(parsed.release) < 2:
+        raise ValueError(
+            f"[tool.retrofy] target-python must be a single version like "
+            f'"3.9" or "3.9.7"; got {floor!r}. Range specifiers '
+            f'(">=3.9", "3.9,!=3.12.*") and lone-major values ("3") are '
+            f"not accepted here -- put any such exclusions in "
+            f"``[project].requires-python`` instead, and retrofy will "
+            f"preserve them when lowering the floor.",
+        )
+    return floor
 
 
 def _retrofy_version() -> str:
@@ -147,44 +170,128 @@ def _splice_retrofy_requires_dist(text: str) -> str:
     return header + f"\nRequires-Dist: retrofy=={_retrofy_version()}" + suffix
 
 
+def _rewrite_requires_python_floor(existing: str | None, floor: str) -> str:
+    """Return the ``Requires-Python`` value for the lowered artefact.
+
+    ``existing`` is the project's declared spec (from ``[project]
+    .requires-python`` or the ``Requires-Python:`` METADATA line), or
+    ``None`` / empty if unset. ``floor`` is the bare version from
+    ``[tool.retrofy] target-python``.
+
+    The new value is ``>={floor}`` combined with every clause from
+    ``existing`` that isn't a lower bound. This preserves user
+    exclusions like ``!=3.12.*`` while overwriting the ``>=`` / ``>``
+    that named the pre-retrofy source floor.
+    """
+    keep: list[str] = []
+    if existing:
+        for spec in SpecifierSet(existing):
+            if spec.operator not in (">=", ">"):
+                keep.append(str(spec))
+    keep.insert(0, f">={floor}")
+    return str(SpecifierSet(",".join(keep)))
+
+
 def _lower_requires_python(text: str, floor: str) -> str:
     """Return ``text`` with the ``Requires-Python:`` line in the METADATA
-    header replaced by ``Requires-Python: {floor}``. If no such line is
-    present in the header, one is appended to the header block.
+    header rewritten to lower the floor to ``floor`` while preserving
+    any other clauses (``!=``, ``<``, ...) from the existing value. If
+    no such line is present in the header, one is appended.
 
     Only the header block (everything before the first blank line) is
     touched -- a stray ``Requires-Python:`` mention in the long
     description body is preserved verbatim.
     """
     header, sep, body = text.partition("\n\n")
-    new_value = f"Requires-Python: {floor}"
     # PEP 566 / RFC 822 headers are case-insensitive on the field name,
     # so match permissively but emit the canonical capitalisation.
     replaced = False
     out_lines = []
     for line in header.split("\n"):
         if line.lower().startswith("requires-python:"):
-            out_lines.append(new_value)
+            existing = line.split(":", 1)[1].strip()
+            new_spec = _rewrite_requires_python_floor(existing, floor)
+            out_lines.append(f"Requires-Python: {new_spec}")
             replaced = True
         else:
             out_lines.append(line)
     if not replaced:
-        out_lines.append(new_value)
+        out_lines.append(
+            f"Requires-Python: {_rewrite_requires_python_floor(None, floor)}",
+        )
     new_header = "\n".join(out_lines)
     return new_header + (sep + body if sep else "")
+
+
+def _apply_wheel_metadata_edits(text: str) -> str:
+    """Single source of truth for the ``METADATA`` transformation on the
+    wheel install path.
+
+    Called from both ``lower_metadata_requires_python`` (the
+    ``post-prepare-metadata-for-build-wheel`` hook) and
+    ``compatibility_via_rewrite`` (the ``post-build-wheel`` hook).
+    PEP 517 requires the metadata returned by
+    ``prepare_metadata_for_build_wheel`` to match what appears in the
+    wheel ``build_wheel`` produces; routing both hooks through this
+    function is how retrofy honours that.
+
+    Any new ``METADATA`` edit for wheel installs goes here, not in the
+    hooks.
+    """
+    floor = _read_target_python(pathlib.Path.cwd())
+    if floor is not None:
+        text = _lower_requires_python(text, floor)
+    return text
+
+
+def _apply_editable_metadata_edits(text: str) -> str:
+    """Single source of truth for the ``METADATA`` transformation on the
+    editable install path.
+
+    Called from both ``inject_runtime_requirement`` (the
+    ``post-prepare-metadata-for-build-editable`` hook) and
+    ``compatibility_via_import_hook`` (the ``post-build-editable``
+    hook). PEP 660 requires the metadata returned by
+    ``prepare_metadata_for_build_editable`` to match what appears in
+    the editable wheel; routing both hooks through this function is
+    how retrofy honours that.
+
+    Any new ``METADATA`` edit for editable installs goes here, not in
+    the hooks.
+    """
+    text = _splice_retrofy_requires_dist(text)
+    floor = _read_target_python(pathlib.Path.cwd())
+    if floor is not None:
+        text = _lower_requires_python(text, floor)
+    return text
 
 
 def inject_runtime_requirement(dist_info_path: pathlib.Path) -> None:
     """``post-prepare-metadata-for-build-editable`` hook.
 
-    Editable installs of a retrofy-using project keep their original
-    source on disk and rely on retrofy's import-time rewriter, so retrofy
-    must be present at runtime. Splice ``Requires-Dist: retrofy`` into
-    the prepared ``METADATA`` so pip resolves it as a runtime dep.
+    Runs the editable-install METADATA policy (see
+    ``_apply_editable_metadata_edits``) on the prepared ``METADATA`` so
+    the frontend sees the final field values before deciding whether
+    to invoke ``build_editable``.
     """
     metadata_path = dist_info_path / "METADATA"
     text = metadata_path.read_text(encoding="utf-8")
-    new_text = _splice_retrofy_requires_dist(text)
+    new_text = _apply_editable_metadata_edits(text)
+    if new_text != text:
+        metadata_path.write_text(new_text, encoding="utf-8")
+
+
+def lower_metadata_requires_python(dist_info_path: pathlib.Path) -> None:
+    """``post-prepare-metadata-for-build-wheel`` hook.
+
+    Runs the wheel-install METADATA policy (see
+    ``_apply_wheel_metadata_edits``) on the prepared ``METADATA`` so
+    the frontend sees the final field values before deciding whether
+    to invoke ``build_wheel``.
+    """
+    metadata_path = dist_info_path / "METADATA"
+    text = metadata_path.read_text(encoding="utf-8")
+    new_text = _apply_wheel_metadata_edits(text)
     if new_text != text:
         metadata_path.write_text(new_text, encoding="utf-8")
 
@@ -219,12 +326,14 @@ def compatibility_via_import_hook(wheel: pathlib.Path):
             )
             whl.write(zipfile.ZipInfo(fn), script)
 
-        # Mirror the prepare_metadata_for_build_editable splice into the
-        # final wheel so the installed dist-info also advertises retrofy
-        # as a runtime dep.
+        # PEP 660: the METADATA in the built editable wheel must match
+        # what ``prepare_metadata_for_build_editable`` returned. Route
+        # the edit through ``_apply_editable_metadata_edits`` so this
+        # hook and the pre-flight ``inject_runtime_requirement`` share
+        # one policy definition.
         metadata_name = whl.dist_info_dirname() + "/METADATA"
         metadata_text = whl.read(metadata_name).decode("utf-8")
-        new_metadata = _splice_retrofy_requires_dist(metadata_text)
+        new_metadata = _apply_editable_metadata_edits(metadata_text)
         if new_metadata != metadata_text:
             whl.write(metadata_name, new_metadata)
 
@@ -311,22 +420,249 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
                 )
                 has_modifications = True
 
-        target_py = _read_target_python(pathlib.Path.cwd())
-        if target_py is not None:
-            metadata_name = whl.dist_info_dirname() + "/METADATA"
-            metadata_text = whl.read(metadata_name).decode("utf-8")
-            new_metadata = _lower_requires_python(metadata_text, target_py)
-            if new_metadata != metadata_text:
-                whl.write(metadata_name, new_metadata)
-                _log.info(
-                    "Lowered Requires-Python in %s to %s",
-                    metadata_name,
-                    target_py,
-                )
-                has_modifications = True
+        # PEP 517: the METADATA in the built wheel must match what
+        # ``prepare_metadata_for_build_wheel`` returned. Route the edit
+        # through ``_apply_wheel_metadata_edits`` so this hook and the
+        # pre-flight ``lower_metadata_requires_python`` share one policy
+        # definition.
+        metadata_name = whl.dist_info_dirname() + "/METADATA"
+        metadata_text = whl.read(metadata_name).decode("utf-8")
+        new_metadata = _apply_wheel_metadata_edits(metadata_text)
+        if new_metadata != metadata_text:
+            whl.write(metadata_name, new_metadata)
+            _log.info("Applied wheel-install METADATA edits to %s", metadata_name)
+            has_modifications = True
 
         if has_modifications:
             with wheel.open("wb") as whl_fh:
                 whl.write_wheel(whl_fh)
 
     editable_copy.unlink()
+
+
+def _strip_top_level(member_name: str) -> tuple[str, str]:
+    """Return ``(top_level, relpath)`` for a tar member name.
+
+    Sdists are canonically packaged as ``name-version/...`` -- one
+    top-level directory containing everything. We don't accept anything
+    else.
+    """
+    head, _, rest = member_name.partition("/")
+    return head, rest
+
+
+def _build_requires_drop_retrofy(requires: list[str]) -> list[str]:
+    """Return ``requires`` with any entry whose PEP 503-normalised name is
+    ``retrofy`` removed. Entries that are not parseable as PEP 508
+    requirements are passed through unchanged.
+    """
+    out: list[str] = []
+    for spec in requires:
+        try:
+            req = Requirement(spec)
+        except InvalidRequirement:
+            out.append(spec)
+            continue
+        if canonicalize_name(req.name) == "retrofy":
+            continue
+        out.append(spec)
+    return out
+
+
+def _patch_pyproject_for_lowered_sdist(text: str, floor: str) -> str:
+    """Patch a sdist's ``pyproject.toml`` for the lowered sdist:
+
+    - rewrite ``[project].requires-python`` so its lower bound is
+      ``>={floor}``, preserving other clauses (``!=``, ``<``, ...) from
+      the source spec; if ``requires-python`` was in
+      ``[project].dynamic``, drop it.
+    - drop ``retrofy`` from ``[build-system].requires`` (PEP 503
+      normalised match).
+
+    Uses ``tomlkit`` for a round-trip edit that preserves comments and
+    formatting wherever it doesn't conflict with the edit.
+    """
+    doc = tomlkit.parse(text)
+
+    build_system = doc.get("build-system")
+    if build_system is not None:
+        requires = build_system.get("requires")
+        if requires is not None:
+            new_requires = _build_requires_drop_retrofy(list(requires))
+            if new_requires != list(requires):
+                build_system["requires"] = new_requires
+
+    project = doc.get("project")
+    if project is not None:
+        dynamic = project.get("dynamic")
+        if dynamic is not None and "requires-python" in dynamic:
+            project["dynamic"] = [d for d in dynamic if d != "requires-python"]
+        existing = project.get("requires-python")
+        project["requires-python"] = _rewrite_requires_python_floor(
+            str(existing) if existing else None,
+            floor,
+        )
+
+    return tomlkit.dumps(doc)
+
+
+def lower_sdist(sdist_path: pathlib.Path) -> None:
+    """``post-build-sdist`` hook.
+
+    Mirrors the wheel hook (``compatibility_via_rewrite``): source
+    conversion runs unconditionally, ``_retrofy_rt/`` is injected
+    wherever converted source references it, and the
+    ``Requires-Python`` / ``[build-system].requires`` rewrites are
+    gated on ``[tool.retrofy] target-python``.
+
+    ``RETROFY_DISABLE_REWRITE=1`` short-circuits to a no-op for the
+    retrofy self-build bootstrap, matching the wheel hook.
+    """
+    if os.environ.get("RETROFY_DISABLE_REWRITE") == "1":
+        _log.info("RETROFY_DISABLE_REWRITE=1 — skipping sdist rewrite")
+        return
+    floor = _read_target_python(pathlib.Path.cwd())
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = pathlib.Path(tmpdir)
+        with tarfile.open(sdist_path, "r:gz") as tar:
+            members = tar.getmembers()
+            top_levels = {_strip_top_level(m.name)[0] for m in members if m.name}
+            if len(top_levels) != 1:
+                raise RuntimeError(
+                    f"sdist {sdist_path.name} does not have a single "
+                    f"top-level directory (found {sorted(top_levels)!r}); "
+                    f"retrofy's sdist lowering only supports the standard "
+                    f"name-version layout.",
+                )
+            top = next(iter(top_levels))
+            # ``filter="data"`` lands in 3.12; on 3.9-3.11 it emits a
+            # DeprecationWarning and behaves like fully-trusted. We're
+            # opening a sdist we just produced ourselves, not user-
+            # supplied input, so trusted-extraction is acceptable.
+            # Tracked in pelson/retrofy#39 -- candidate for a retrofy
+            # converter that emits this fallback automatically.
+            if sys.version_info >= (3, 12):
+                tar.extractall(tmp, filter="data")
+            else:
+                tar.extractall(tmp)  # noqa: S202  # see comment above
+
+        root = tmp / top
+        existing_entries = {
+            str(p.relative_to(root)).replace(os.sep, "/")
+            for p in root.rglob("*")
+            if p.is_file()
+        }
+
+        has_modifications = False
+
+        # Convert sources unconditionally -- the same modern syntax that
+        # the wheel hook lowers is unparseable on any older Python, so
+        # source lowering is universally useful even when the project
+        # has not opted into metadata lowering via ``target-python``.
+        lazy_runtime_dirs: set[str] = set()
+        for py in root.rglob("*.py"):
+            text = py.read_text(encoding="utf-8")
+            new_text = convert(text)
+            if new_text != text:
+                py.write_text(new_text, encoding="utf-8")
+                _log.info(
+                    "Converted %s to compatibility syntax",
+                    py.relative_to(root),
+                )
+                has_modifications = True
+                if _LAZY_RUNTIME_IMPORT_MARKER in new_text:
+                    rel = posixpath.dirname(
+                        str(py.relative_to(root)).replace(os.sep, "/"),
+                    )
+                    lazy_runtime_dirs.add(rel)
+
+        # Inject _retrofy_rt/ payload where needed.
+        if lazy_runtime_dirs:
+            payload = _embedded_runtime_files()
+            for pkg_dir in sorted(lazy_runtime_dirs):
+                target_dir = f"{pkg_dir}/_retrofy_rt" if pkg_dir else "_retrofy_rt"
+                if f"{target_dir}/lazy_imports.py" in existing_entries:
+                    continue
+                clash = [
+                    e
+                    for e in existing_entries
+                    if e == target_dir
+                    or e == f"{target_dir}/"
+                    or e.startswith(f"{target_dir}/")
+                ]
+                if clash:
+                    raise _EmbeddedRuntimeCollisionError(
+                        f"package directory {pkg_dir!r} already contains a "
+                        f"`_retrofy_rt` entry ({clash[0]!r}); `_retrofy_rt` "
+                        f"is reserved as retrofy's runtime namespace inside "
+                        f"converted packages.",
+                    )
+                inject_dir = root / target_dir.replace("/", os.sep)
+                inject_dir.mkdir(parents=True, exist_ok=True)
+                for relpath, data in payload.items():
+                    (inject_dir / relpath).write_bytes(data)
+                _log.info(
+                    "Injected retrofy runtime payload into %s/",
+                    target_dir,
+                )
+                has_modifications = True
+
+        # Metadata lowering is opt-in via ``[tool.retrofy] target-python``.
+        if floor is not None:
+            pyproj = root / "pyproject.toml"
+            if pyproj.exists():
+                text = pyproj.read_text(encoding="utf-8")
+                new_text = _patch_pyproject_for_lowered_sdist(text, floor)
+                if new_text != text:
+                    pyproj.write_text(new_text, encoding="utf-8")
+                    has_modifications = True
+            pkg_info = root / "PKG-INFO"
+            if pkg_info.exists():
+                text = pkg_info.read_text(encoding="utf-8")
+                new_text = _lower_requires_python(text, floor)
+                if new_text != text:
+                    pkg_info.write_text(new_text, encoding="utf-8")
+                    has_modifications = True
+
+        if not has_modifications:
+            return
+
+        # Repack. Both the tar member order and the per-entry
+        # tarinfo metadata (mtime, uid, gid, uname, gname, mode) affect
+        # the sdist byte content, and so does the gzip mtime header.
+        # Walk sorted so member order is stable across filesystems, use
+        # a tarfile filter to normalise per-entry metadata, and open
+        # the gzip stream with a fixed mtime. SOURCE_DATE_EPOCH is
+        # honoured for the mtime when set (PEP 517-compatible frontends
+        # use it to opt into reproducible builds); otherwise fall back
+        # to 0.
+        source_date_epoch = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
+
+        def _normalise(info: tarfile.TarInfo) -> tarfile.TarInfo:
+            info.mtime = source_date_epoch
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            # 0755 for dirs, 0644 for files, mirroring what setuptools
+            # emits and what pip's sdist unpack expects.
+            info.mode = 0o755 if info.isdir() else 0o644
+            return info
+
+        tmp_sdist = sdist_path.with_suffix(sdist_path.suffix + ".tmp")
+        with (
+            open(tmp_sdist, "wb") as raw,
+            gzip.GzipFile(
+                filename="",
+                mode="wb",
+                fileobj=raw,
+                mtime=source_date_epoch,
+            ) as gz,
+            tarfile.open(fileobj=gz, mode="w") as tar,
+        ):
+            tar.add(root, arcname=top, recursive=False, filter=_normalise)
+            for path in sorted(root.rglob("*")):
+                arc = f"{top}/{path.relative_to(root).as_posix()}"
+                tar.add(path, arcname=arc, recursive=False, filter=_normalise)
+        os.replace(tmp_sdist, sdist_path)

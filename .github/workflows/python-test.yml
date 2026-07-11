@@ -41,7 +41,22 @@ jobs:
         RETROFY_DISABLE_REWRITE: "1"
       run: |
         python -m pip install --upgrade pip
-        python -m pip install build multistage-build setuptools_scm libcst setuptools-ext tomli
+        python -m pip install build
+        # ``pip install . --no-build-isolation --no-deps`` needs both
+        # [build-system].requires and [project].dependencies already
+        # present in the env: --no-build-isolation cascades to
+        # transitively-built sdists, so on interpreters that lack a
+        # binary wheel for a dep (e.g. libcst on 3.15-beta) that dep's
+        # own source build would inherit --no-build-isolation and fail
+        # on its build requirements. Install both lists in one pip
+        # call with build isolation ON so each sdist-built dep still
+        # gets its own clean build env; then install retrofy with
+        # --no-deps. Derive the list from pyproject.toml so it stays
+        # in one place, dropping retrofy's own self-reference.
+        python -c "import tomllib; d=tomllib.load(open('pyproject.toml','rb')); print('\n'.join(r for r in d['build-system']['requires'] + d['project']['dependencies'] if not r.startswith('retrofy')))" \
+          > /tmp/build-and-run-dependencies.txt
+        cat /tmp/build-and-run-dependencies.txt
+        python -m pip install -r /tmp/build-and-run-dependencies.txt
         python -m pip install . --no-build-isolation --no-deps
 
     - name: Build wheel and sdist (lowered)
@@ -199,6 +214,23 @@ jobs:
         cd not-the-source
         python -m pytest --pyargs retrofy -ssvv
 
+    - name: Install retrofy from its own lowered sdist (build-via-sdist smoke)
+      run: |
+        # Exercise ``lower_sdist`` end-to-end on the matrix Python. Builds
+        # retrofy from its own sdist into a fresh venv; catches breakage
+        # in the sdist's pyproject rewrite (bad TOML emission, multi-line
+        # array mangling, nested ``]``) that the wheel-install path above
+        # cannot see.
+        python -m venv /tmp/sdist-venv
+        /tmp/sdist-venv/bin/pip install --upgrade pip
+        RETROFY_SDIST=$(ls dist/retrofy-*.tar.gz)
+        /tmp/sdist-venv/bin/pip install "$RETROFY_SDIST"
+        # ``cd /tmp`` to dodge cwd-first import shadowing -- the
+        # checkout's ``retrofy/`` source has no setuptools-scm
+        # ``_version.py`` and would mask the installed dist.
+        cd /tmp
+        /tmp/sdist-venv/bin/python -c "import retrofy; print(retrofy.__version__)"
+
     - name: Build example-project (exercises the retrofy build rewrite)
       run: |
         # Build with pip's build isolation (mirrors how end users build
@@ -270,6 +302,49 @@ jobs:
       run: |
         cd not-the-source
         /tmp/wheel-venv/bin/pytest --pyargs example_project -ssvv
+
+    - name: Build example-project sdist (exercises retrofy's lower_sdist hook)
+      run: |
+        # ``python -m build --sdist`` with default build isolation. The
+        # build-env pip honours ``PIP_INDEX_URL`` (set earlier to the
+        # merged local+PyPI simple-repository server), so retrofy
+        # resolves to the dev wheel from ``dist/`` and everything else
+        # falls through to PyPI.
+        mkdir -p example-project/sdist
+        python -m pip install build
+        python -m build --sdist --outdir example-project/sdist ./example-project
+        ls example-project/sdist/
+
+    - name: Install built example-project sdist in a fresh venv
+      run: |
+        # The lowered sdist must install on the matrix Python without
+        # retrofy in the build environment (lower_sdist strips retrofy
+        # from [build-system].requires). A failure here means the
+        # sdist's pyproject is malformed or the lowered source still
+        # contains post-3.9 syntax.
+        python -m venv /tmp/sdist-example-venv
+        /tmp/sdist-example-venv/bin/pip install --upgrade pip
+        /tmp/sdist-example-venv/bin/pip install pytest
+        /tmp/sdist-example-venv/bin/pip install example-project/sdist/*.tar.gz
+
+        # Sanity that the freeze/grep check itself works: the sdist we
+        # just installed must show up in the venv. A no-match here
+        # means the retrofy-absence check below is a false negative.
+        if ! /tmp/sdist-example-venv/bin/pip list --format=freeze | grep -qE '^retrofy-test-project=='; then
+          echo "::error::retrofy-test-project not found in /tmp/sdist-example-venv — the sdist install did not take, and the retrofy-absence check below would be a false negative"
+          /tmp/sdist-example-venv/bin/pip list --format=freeze
+          exit 1
+        fi
+        if /tmp/sdist-example-venv/bin/pip list --format=freeze | grep -qE '^retrofy=='; then
+          echo "::error::retrofy unexpectedly installed in /tmp/sdist-example-venv — lower_sdist did not strip it from build-system.requires"
+          /tmp/sdist-example-venv/bin/pip list --format=freeze | grep -E '^retrofy'
+          exit 1
+        fi
+
+    - name: Test example-project from isolation (sdist install)
+      run: |
+        cd not-the-source
+        /tmp/sdist-example-venv/bin/pytest --pyargs example_project -ssvv
 
     - name: Install example-project as editable in a fresh venv
       run: |
@@ -365,12 +440,9 @@ jobs:
         # ``--no-project`` + ``--with-editable .`` mode rather than
         # full project mode because the latter would try to produce a
         # universal ``uv.lock`` across example-project's whole
-        # ``requires-python`` range (>=3.7), which is unsatisfiable —
-        # retrofy itself requires >=3.9, so editable installs simply
-        # cannot resolve for Python 3.7 / 3.8 (non-editable wheel
-        # installs of example-project still work on 3.7+). The
-        # ``--no-project`` path resolves only for the active
-        # interpreter and writes no lockfile.
+        # ``requires-python`` range, which adds matrix overhead for no
+        # benefit here. The ``--no-project`` path resolves only for the
+        # active interpreter and writes no lockfile.
         #
         # ``UV_BUILD_CONSTRAINT`` / ``UV_CONSTRAINT`` are NOT honoured by
         # ``uv run`` (only by ``uv pip install``), so we can't pin the
@@ -462,7 +534,8 @@ jobs:
         # example-project's deps into the wheel-build dir.
         mkdir -p /tmp/expr-dist
         "$HOME/.cache/retrofy/converter-venv/bin/pip" wheel ./example-project \
-          --no-build-isolation --no-deps --wheel-dir /tmp/expr-dist
+          --no-build-isolation --no-deps \
+          --wheel-dir /tmp/expr-dist
 
     - name: Install + test example-project wheel on the host
       run: |
