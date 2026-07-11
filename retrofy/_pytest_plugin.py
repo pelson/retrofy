@@ -8,20 +8,29 @@ asserts, and even where parsing succeeds retrofy's editable-install
 meta-path loader claims the import first, bypassing pytest's rewriter
 entirely (so ``assert x == y`` shows no introspection diff).
 
-The plugin does two things during ``pytest_configure`` /
-``pytest_sessionstart``:
+The plugin does three things:
 
-1. Monkey-patch ``_pytest.assertion.rewrite._rewrite_test`` so the
-   source bytes are piped through :func:`retrofy._converters.convert`
-   before ``ast.parse``. Pytest's assertion rewriter then runs on the
+1. At **plugin import** (top-level side effect), monkey-patch
+   ``_pytest.assertion.rewrite._rewrite_test`` so the source bytes are
+   piped through :func:`retrofy._converters.convert` before
+   ``ast.parse``. Pytest's assertion rewriter then runs on the
    *converted* AST, producing bytecode whose asserts have full
-   introspection over the transformed expressions.
+   introspection over the transformed expressions. The patch is
+   installed at import (not at ``pytest_configure``) because pytest
+   loads initial conftests during ``pytest_load_initial_conftests`` —
+   *before* ``pytest_configure`` fires — and those conftests may
+   themselves contain retrofy-backported syntax.
 
-2. Reorder ``sys.meta_path`` so pytest's ``AssertionRewritingHook``
-   sits in front of retrofy's :class:`MyMetaPathFinder`. Without this,
-   the retrofy hook (registered by the ``.pth`` script for editable
-   installs, or by a project conftest) claims test modules first and
-   replaces the loader, so pytest never sees them.
+2. Also at plugin import, wrap ``AssertionRewritingHook.exec_module``
+   to pre-stash converted source in ``linecache`` for traceback
+   fidelity, since the ``.pyc``-cached path skips ``_rewrite_test``.
+
+3. During ``pytest_sessionstart``, reorder ``sys.meta_path`` so
+   pytest's ``AssertionRewritingHook`` sits in front of retrofy's
+   :class:`MyMetaPathFinder`. Without this, the retrofy hook
+   (registered by the ``.pth`` script for editable installs, or by a
+   project conftest) claims test modules first and replaces the
+   loader, so pytest never sees them.
 
 The converted source is also injected into ``linecache.cache`` (with
 ``mtime=None`` so ``checkcache`` won't evict it). Pytest's source
@@ -39,8 +48,15 @@ import linecache
 import os
 from pathlib import Path
 import sys
+from types import CodeType, ModuleType
+from typing import TYPE_CHECKING
 
 from ._converters import convert
+from ._meta_hook_converter import register_runtime_synthesiser
+
+if TYPE_CHECKING:
+    from _pytest.assertion.rewrite import AssertionRewritingHook
+    from _pytest.config import Config
 
 
 def _stash_converted_source(filename: str, converted: str) -> None:
@@ -82,15 +98,27 @@ def _read_and_convert(fn) -> str | None:
     return converted
 
 
-def pytest_configure(config):
-    from _pytest.assertion import rewrite as _r
+_PATCHES_INSTALLED = False
 
-    if getattr(_r._rewrite_test, "_retrofy_patched", False):
+
+def _install_rewriter_patches() -> None:
+    """Install the ``_rewrite_test`` / ``exec_module`` monkey-patches.
+
+    Called at plugin import so the patches are in place before pytest
+    loads initial conftests (which happens during
+    ``pytest_load_initial_conftests`` — earlier than
+    ``pytest_configure``). Idempotent.
+    """
+    global _PATCHES_INSTALLED
+    if _PATCHES_INSTALLED:
         return
+    _PATCHES_INSTALLED = True
+
+    from _pytest.assertion import rewrite as _r
 
     orig_rewrite_test = _r._rewrite_test
 
-    def _rewrite_test(fn, cfg):
+    def _rewrite_test(fn: Path, cfg: Config) -> tuple[os.stat_result, CodeType]:
         converted = _read_and_convert(fn)
         if converted is None:
             return orig_rewrite_test(fn, cfg)
@@ -102,7 +130,6 @@ def pytest_configure(config):
         _stash_converted_source(strfn, converted)
         return stat, co
 
-    _rewrite_test._retrofy_patched = True
     _r._rewrite_test = _rewrite_test
 
     # The pyc-cached path in ``AssertionRewritingHook.exec_module``
@@ -111,7 +138,7 @@ def pytest_configure(config):
     # source on every load.
     orig_exec_module = _r.AssertionRewritingHook.exec_module
 
-    def exec_module(self, module):
+    def exec_module(self: AssertionRewritingHook, module: ModuleType) -> None:
         spec = module.__spec__
         if spec is not None and spec.origin:
             converted = _read_and_convert(spec.origin)
@@ -119,19 +146,23 @@ def pytest_configure(config):
                 _stash_converted_source(spec.origin, converted)
         return orig_exec_module(self, module)
 
-    exec_module._retrofy_patched = True
-    _r.AssertionRewritingHook.exec_module = exec_module
+    _r.AssertionRewritingHook.exec_module = exec_module  # type: ignore[method-assign]
+
+
+_install_rewriter_patches()
+
+# Converted test/conftest source emits ``from <pkg>._retrofy_rt.lazy_imports
+# import ...``; those imports may resolve during
+# ``pytest_load_initial_conftests`` — before ``pytest_sessionstart``
+# fires — so register the synthesiser eagerly too. Idempotent.
+register_runtime_synthesiser()
 
 
 def pytest_sessionstart(session):
     from _pytest.assertion.rewrite import AssertionRewritingHook
 
-    from ._meta_hook_converter import MyMetaPathFinder, register_runtime_synthesiser
+    from ._meta_hook_converter import MyMetaPathFinder
 
-    # Converted test source emits ``from ._retrofy_rt.lazy_imports import
-    # ...``; tests don't live under a registered retrofy hook prefix,
-    # so install a permissive synthesiser at the end of the meta path
-    # to serve the payload for any user package.
     register_runtime_synthesiser()
 
     rewriter_idx = None
