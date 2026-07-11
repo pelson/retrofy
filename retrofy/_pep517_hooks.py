@@ -11,6 +11,10 @@ import tarfile
 import tempfile
 import zipfile
 
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 from setuptools_ext import WheelModifier
 import tomlkit
 
@@ -98,9 +102,11 @@ def _read_target_python(source_root: pathlib.Path) -> str | None:
     ``source_root`` via ``[tool.retrofy] target-python``, or ``None`` if
     the project does not opt in.
 
-    Callers format the floor into a PEP 440 specifier (``">=3.9"``)
-    themselves -- the bare value matches what users write in pyproject
-    and avoids a round-trip strip at every consumer.
+    The value must be a single PEP 440 version (``"3.9"``, ``"3.9.7"``)
+    -- range specifiers like ``">=3.9"`` or ``"3.9,!=3.12.*"`` are
+    rejected. ``target-python`` names the exact floor to lower to, not a
+    specifier; any range-shaped exclusions belong in the project's own
+    ``[project].requires-python`` and are preserved by the rewrite.
     """
     pyproject = source_root / "pyproject.toml"
     if not pyproject.exists():
@@ -115,6 +121,19 @@ def _read_target_python(source_root: pathlib.Path) -> str | None:
             f"got {type(floor).__name__} {floor!r}. Quote the value in "
             f"pyproject.toml -- TOML floats like ``3.10`` lose their "
             f"trailing zero and silently lower the floor.",
+        )
+    try:
+        parsed = Version(floor)
+    except InvalidVersion:
+        parsed = None
+    if parsed is None or len(parsed.release) < 2:
+        raise ValueError(
+            f"[tool.retrofy] target-python must be a single version like "
+            f'"3.9" or "3.9.7"; got {floor!r}. Range specifiers '
+            f'(">=3.9", "3.9,!=3.12.*") and lone-major values ("3") are '
+            f"not accepted here -- put any such exclusions in "
+            f"``[project].requires-python`` instead, and retrofy will "
+            f"preserve them when lowering the floor.",
         )
     return floor
 
@@ -150,29 +169,55 @@ def _splice_retrofy_requires_dist(text: str) -> str:
     return header + f"\nRequires-Dist: retrofy=={_retrofy_version()}" + suffix
 
 
+def _rewrite_requires_python_floor(existing: str | None, floor: str) -> str:
+    """Return the ``Requires-Python`` value for the lowered artefact.
+
+    ``existing`` is the project's declared spec (from ``[project]
+    .requires-python`` or the ``Requires-Python:`` METADATA line), or
+    ``None`` / empty if unset. ``floor`` is the bare version from
+    ``[tool.retrofy] target-python``.
+
+    The new value is ``>={floor}`` combined with every clause from
+    ``existing`` that isn't a lower bound. This preserves user
+    exclusions like ``!=3.12.*`` while overwriting the ``>=`` / ``>``
+    that named the pre-retrofy source floor.
+    """
+    keep: list[str] = []
+    if existing:
+        for spec in SpecifierSet(existing):
+            if spec.operator not in (">=", ">"):
+                keep.append(str(spec))
+    keep.insert(0, f">={floor}")
+    return str(SpecifierSet(",".join(keep)))
+
+
 def _lower_requires_python(text: str, floor: str) -> str:
     """Return ``text`` with the ``Requires-Python:`` line in the METADATA
-    header replaced by ``Requires-Python: {floor}``. If no such line is
-    present in the header, one is appended to the header block.
+    header rewritten to lower the floor to ``floor`` while preserving
+    any other clauses (``!=``, ``<``, ...) from the existing value. If
+    no such line is present in the header, one is appended.
 
     Only the header block (everything before the first blank line) is
     touched -- a stray ``Requires-Python:`` mention in the long
     description body is preserved verbatim.
     """
     header, sep, body = text.partition("\n\n")
-    new_value = f"Requires-Python: {floor}"
     # PEP 566 / RFC 822 headers are case-insensitive on the field name,
     # so match permissively but emit the canonical capitalisation.
     replaced = False
     out_lines = []
     for line in header.split("\n"):
         if line.lower().startswith("requires-python:"):
-            out_lines.append(new_value)
+            existing = line.split(":", 1)[1].strip()
+            new_spec = _rewrite_requires_python_floor(existing, floor)
+            out_lines.append(f"Requires-Python: {new_spec}")
             replaced = True
         else:
             out_lines.append(line)
     if not replaced:
-        out_lines.append(new_value)
+        out_lines.append(
+            f"Requires-Python: {_rewrite_requires_python_floor(None, floor)}",
+        )
     new_header = "\n".join(out_lines)
     return new_header + (sep + body if sep else "")
 
@@ -316,16 +361,15 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
 
         floor = _read_target_python(pathlib.Path.cwd())
         if floor is not None:
-            spec = f">={floor}"
             metadata_name = whl.dist_info_dirname() + "/METADATA"
             metadata_text = whl.read(metadata_name).decode("utf-8")
-            new_metadata = _lower_requires_python(metadata_text, spec)
+            new_metadata = _lower_requires_python(metadata_text, floor)
             if new_metadata != metadata_text:
                 whl.write(metadata_name, new_metadata)
                 _log.info(
-                    "Lowered Requires-Python in %s to %s",
+                    "Lowered Requires-Python floor in %s to %s",
                     metadata_name,
-                    spec,
+                    floor,
                 )
                 has_modifications = True
 
@@ -352,9 +396,6 @@ def _build_requires_drop_retrofy(requires: list[str]) -> list[str]:
     ``retrofy`` removed. Entries that are not parseable as PEP 508
     requirements are passed through unchanged.
     """
-    from packaging.requirements import InvalidRequirement, Requirement
-    from packaging.utils import canonicalize_name
-
     out: list[str] = []
     for spec in requires:
         try:
@@ -371,8 +412,10 @@ def _build_requires_drop_retrofy(requires: list[str]) -> list[str]:
 def _patch_pyproject_for_lowered_sdist(text: str, floor: str) -> str:
     """Patch a sdist's ``pyproject.toml`` for the lowered sdist:
 
-    - rewrite ``[project].requires-python`` to ``>={floor}``; if
-      ``requires-python`` was in ``[project].dynamic``, drop it.
+    - rewrite ``[project].requires-python`` so its lower bound is
+      ``>={floor}``, preserving other clauses (``!=``, ``<``, ...) from
+      the source spec; if ``requires-python`` was in
+      ``[project].dynamic``, drop it.
     - drop ``retrofy`` from ``[build-system].requires`` (PEP 503
       normalised match).
 
@@ -394,7 +437,11 @@ def _patch_pyproject_for_lowered_sdist(text: str, floor: str) -> str:
         dynamic = project.get("dynamic")
         if dynamic is not None and "requires-python" in dynamic:
             project["dynamic"] = [d for d in dynamic if d != "requires-python"]
-        project["requires-python"] = f">={floor}"
+        existing = project.get("requires-python")
+        project["requires-python"] = _rewrite_requires_python_floor(
+            str(existing) if existing else None,
+            floor,
+        )
 
     return tomlkit.dumps(doc)
 
@@ -503,7 +550,6 @@ def lower_sdist(sdist_path: pathlib.Path) -> None:
 
         # Metadata lowering is opt-in via ``[tool.retrofy] target-python``.
         if floor is not None:
-            spec = f">={floor}"
             pyproj = root / "pyproject.toml"
             if pyproj.exists():
                 text = pyproj.read_text(encoding="utf-8")
@@ -514,7 +560,7 @@ def lower_sdist(sdist_path: pathlib.Path) -> None:
             pkg_info = root / "PKG-INFO"
             if pkg_info.exists():
                 text = pkg_info.read_text(encoding="utf-8")
-                new_text = _lower_requires_python(text, spec)
+                new_text = _lower_requires_python(text, floor)
                 if new_text != text:
                     pkg_info.write_text(new_text, encoding="utf-8")
                     has_modifications = True

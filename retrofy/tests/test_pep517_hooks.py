@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.metadata
 import io
 import pathlib
 import re
@@ -7,6 +8,7 @@ import tarfile
 import textwrap
 import zipfile
 
+from packaging.specifiers import SpecifierSet
 import pytest
 
 from retrofy import __version__ as RETROFY_VERSION
@@ -154,7 +156,7 @@ def test_lower_requires_python_replaces_existing_line():
         "\n"
         "Long description.\n"
     )
-    new = _lower_requires_python(text, ">=3.9")
+    new = _lower_requires_python(text, "3.9")
     assert "Requires-Python: >=3.9\n" in new
     assert "Requires-Python: >=3.15" not in new
     assert "Requires-Dist: libcst\n" in new
@@ -170,7 +172,7 @@ def test_lower_requires_python_adds_when_missing():
         "\n"
         "Body.\n"
     )
-    new = _lower_requires_python(text, ">=3.9")
+    new = _lower_requires_python(text, "3.9")
     header, _, _ = new.partition("\n\n")
     assert "Requires-Python: >=3.9" in header
 
@@ -184,7 +186,7 @@ def test_lower_requires_python_only_touches_header_block():
         "\n"
         "See Requires-Python: >=3.15 in the docs.\n"
     )
-    new = _lower_requires_python(text, ">=3.9")
+    new = _lower_requires_python(text, "3.9")
     header, _, body = new.partition("\n\n")
     assert "Requires-Python: >=3.9" in header
     assert "Requires-Python: >=3.15" not in header
@@ -196,7 +198,7 @@ def test_lower_requires_python_matches_case_insensitively():
     # lowercase ``requires-python:`` line must still be recognised
     # and replaced (with the canonical capitalisation).
     text = "Metadata-Version: 2.1\nName: retrofy\nrequires-python: >=3.15\n\nBody.\n"
-    new = _lower_requires_python(text, ">=3.9")
+    new = _lower_requires_python(text, "3.9")
     assert "Requires-Python: >=3.9" in new
     assert "requires-python: >=3.15" not in new
     assert "Requires-Python: >=3.15" not in new
@@ -257,6 +259,92 @@ def test_read_target_python_rejects_non_string(tmp_path):
     )
     with pytest.raises(TypeError, match="must be a string"):
         _read_target_python(root)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [">=3.9", "3.9,!=3.12.*", "3.9.*", "python3.9", "3", "^3.9"],
+)
+def test_read_target_python_rejects_non_single_version(tmp_path, value):
+    # ``target-python`` names the exact floor to lower to. Any specifier-
+    # shaped value (``>=``, exclusions, wildcards, empty component) is
+    # ambiguous: retrofy sets ``>={floor}`` on the built artefact and
+    # preserves the project's own ``requires-python`` exclusions. Users
+    # who want ``!=3.12.*`` should put it in ``[project].requires-python``,
+    # not here.
+    root = _write_pyproject(
+        tmp_path,
+        f"""\
+        [project]
+        name = "x"
+        [tool.retrofy]
+        target-python = "{value}"
+        """,
+    )
+    with pytest.raises(ValueError, match="single version"):
+        _read_target_python(root)
+
+
+@pytest.mark.parametrize("value", ["3.9", "3.9.7", "3.10"])
+def test_read_target_python_accepts_bare_versions(tmp_path, value):
+    root = _write_pyproject(
+        tmp_path,
+        f"""\
+        [project]
+        name = "x"
+        [tool.retrofy]
+        target-python = "{value}"
+        """,
+    )
+    assert _read_target_python(root) == value
+
+
+def test_lower_requires_python_preserves_exclusions():
+    # A project that says "we support 3.15+ but not 3.16" must keep the
+    # ``!=3.16.*`` exclusion after retrofy lowers the floor -- otherwise
+    # a user who consciously refused to run on 3.16 gets a lowered
+    # artefact that silently claims to support it.
+    text = (
+        "Metadata-Version: 2.1\n"
+        "Name: retrofy\n"
+        "Version: 0.4.0\n"
+        "Requires-Python: >=3.15,!=3.16.*\n"
+        "\n"
+        "Body.\n"
+    )
+    new = _lower_requires_python(text, "3.9")
+    header, _, _ = new.partition("\n\n")
+    # The exact clause ordering is packaging's canonical form; assert on
+    # semantic equivalence via SpecifierSet.
+    line = next(
+        line
+        for line in header.split("\n")
+        if line.lower().startswith("requires-python:")
+    )
+    spec = SpecifierSet(line.split(":", 1)[1].strip())
+    assert set(str(s) for s in spec) == {">=3.9", "!=3.16.*"}
+
+
+def test_lower_requires_python_drops_all_lower_bounds():
+    # A source spec like ">3.14" (strict >) is still a lower bound and
+    # must be replaced, not kept alongside ours.
+    text = (
+        "Metadata-Version: 2.1\n"
+        "Name: retrofy\n"
+        "Version: 0.4.0\n"
+        "Requires-Python: >3.14,<4\n"
+        "\n"
+        "Body.\n"
+    )
+    new = _lower_requires_python(text, "3.9")
+    header, _, _ = new.partition("\n\n")
+    line = next(
+        line
+        for line in header.split("\n")
+        if line.lower().startswith("requires-python:")
+    )
+    spec = SpecifierSet(line.split(":", 1)[1].strip())
+    assert set(str(s) for s in spec) == {">=3.9", "<4"}
 
 
 def _make_minimal_wheel(tmp_path: pathlib.Path, metadata_text: str) -> pathlib.Path:
@@ -699,8 +787,6 @@ def test_lower_sdist_strip_name_matches_retrofy_distribution_name():
     distribution name (PEP 503 normalised). If retrofy is ever renamed
     on PyPI, this test catches the silent miss.
     """
-    import importlib.metadata
-
     from retrofy._pep517_hooks import _build_requires_drop_retrofy
 
     dist_name = importlib.metadata.distribution("retrofy").metadata["Name"]
@@ -718,8 +804,6 @@ def test_lower_sdist_entry_point_registered():
     ``multistage_build`` entry-point group, so multistage-build's hook
     discovery picks it up at build time.
     """
-    import importlib.metadata
-
     retrofy_eps = [
         ep
         for ep in importlib.metadata.distribution("retrofy").entry_points
