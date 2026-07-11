@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import importlib.resources
 import logging
 import os
@@ -222,17 +223,75 @@ def _lower_requires_python(text: str, floor: str) -> str:
     return new_header + (sep + body if sep else "")
 
 
+def _apply_wheel_metadata_edits(text: str) -> str:
+    """Single source of truth for the ``METADATA`` transformation on the
+    wheel install path.
+
+    Called from both ``lower_metadata_requires_python`` (the
+    ``post-prepare-metadata-for-build-wheel`` hook) and
+    ``compatibility_via_rewrite`` (the ``post-build-wheel`` hook).
+    PEP 517 requires the metadata returned by
+    ``prepare_metadata_for_build_wheel`` to match what appears in the
+    wheel ``build_wheel`` produces; routing both hooks through this
+    function is how retrofy honours that.
+
+    Any new ``METADATA`` edit for wheel installs goes here, not in the
+    hooks.
+    """
+    floor = _read_target_python(pathlib.Path.cwd())
+    if floor is not None:
+        text = _lower_requires_python(text, floor)
+    return text
+
+
+def _apply_editable_metadata_edits(text: str) -> str:
+    """Single source of truth for the ``METADATA`` transformation on the
+    editable install path.
+
+    Called from both ``inject_runtime_requirement`` (the
+    ``post-prepare-metadata-for-build-editable`` hook) and
+    ``compatibility_via_import_hook`` (the ``post-build-editable``
+    hook). PEP 660 requires the metadata returned by
+    ``prepare_metadata_for_build_editable`` to match what appears in
+    the editable wheel; routing both hooks through this function is
+    how retrofy honours that.
+
+    Any new ``METADATA`` edit for editable installs goes here, not in
+    the hooks.
+    """
+    text = _splice_retrofy_requires_dist(text)
+    floor = _read_target_python(pathlib.Path.cwd())
+    if floor is not None:
+        text = _lower_requires_python(text, floor)
+    return text
+
+
 def inject_runtime_requirement(dist_info_path: pathlib.Path) -> None:
     """``post-prepare-metadata-for-build-editable`` hook.
 
-    Editable installs of a retrofy-using project keep their original
-    source on disk and rely on retrofy's import-time rewriter, so retrofy
-    must be present at runtime. Splice ``Requires-Dist: retrofy`` into
-    the prepared ``METADATA`` so pip resolves it as a runtime dep.
+    Runs the editable-install METADATA policy (see
+    ``_apply_editable_metadata_edits``) on the prepared ``METADATA`` so
+    the frontend sees the final field values before deciding whether
+    to invoke ``build_editable``.
     """
     metadata_path = dist_info_path / "METADATA"
     text = metadata_path.read_text(encoding="utf-8")
-    new_text = _splice_retrofy_requires_dist(text)
+    new_text = _apply_editable_metadata_edits(text)
+    if new_text != text:
+        metadata_path.write_text(new_text, encoding="utf-8")
+
+
+def lower_metadata_requires_python(dist_info_path: pathlib.Path) -> None:
+    """``post-prepare-metadata-for-build-wheel`` hook.
+
+    Runs the wheel-install METADATA policy (see
+    ``_apply_wheel_metadata_edits``) on the prepared ``METADATA`` so
+    the frontend sees the final field values before deciding whether
+    to invoke ``build_wheel``.
+    """
+    metadata_path = dist_info_path / "METADATA"
+    text = metadata_path.read_text(encoding="utf-8")
+    new_text = _apply_wheel_metadata_edits(text)
     if new_text != text:
         metadata_path.write_text(new_text, encoding="utf-8")
 
@@ -267,12 +326,14 @@ def compatibility_via_import_hook(wheel: pathlib.Path):
             )
             whl.write(zipfile.ZipInfo(fn), script)
 
-        # Mirror the prepare_metadata_for_build_editable splice into the
-        # final wheel so the installed dist-info also advertises retrofy
-        # as a runtime dep.
+        # PEP 660: the METADATA in the built editable wheel must match
+        # what ``prepare_metadata_for_build_editable`` returned. Route
+        # the edit through ``_apply_editable_metadata_edits`` so this
+        # hook and the pre-flight ``inject_runtime_requirement`` share
+        # one policy definition.
         metadata_name = whl.dist_info_dirname() + "/METADATA"
         metadata_text = whl.read(metadata_name).decode("utf-8")
-        new_metadata = _splice_retrofy_requires_dist(metadata_text)
+        new_metadata = _apply_editable_metadata_edits(metadata_text)
         if new_metadata != metadata_text:
             whl.write(metadata_name, new_metadata)
 
@@ -359,19 +420,18 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
                 )
                 has_modifications = True
 
-        floor = _read_target_python(pathlib.Path.cwd())
-        if floor is not None:
-            metadata_name = whl.dist_info_dirname() + "/METADATA"
-            metadata_text = whl.read(metadata_name).decode("utf-8")
-            new_metadata = _lower_requires_python(metadata_text, floor)
-            if new_metadata != metadata_text:
-                whl.write(metadata_name, new_metadata)
-                _log.info(
-                    "Lowered Requires-Python floor in %s to %s",
-                    metadata_name,
-                    floor,
-                )
-                has_modifications = True
+        # PEP 517: the METADATA in the built wheel must match what
+        # ``prepare_metadata_for_build_wheel`` returned. Route the edit
+        # through ``_apply_wheel_metadata_edits`` so this hook and the
+        # pre-flight ``lower_metadata_requires_python`` share one policy
+        # definition.
+        metadata_name = whl.dist_info_dirname() + "/METADATA"
+        metadata_text = whl.read(metadata_name).decode("utf-8")
+        new_metadata = _apply_wheel_metadata_edits(metadata_text)
+        if new_metadata != metadata_text:
+            whl.write(metadata_name, new_metadata)
+            _log.info("Applied wheel-install METADATA edits to %s", metadata_name)
+            has_modifications = True
 
         if has_modifications:
             with wheel.open("wb") as whl_fh:
@@ -568,8 +628,41 @@ def lower_sdist(sdist_path: pathlib.Path) -> None:
         if not has_modifications:
             return
 
-        # Repack.
+        # Repack. Both the tar member order and the per-entry
+        # tarinfo metadata (mtime, uid, gid, uname, gname, mode) affect
+        # the sdist byte content, and so does the gzip mtime header.
+        # Walk sorted so member order is stable across filesystems, use
+        # a tarfile filter to normalise per-entry metadata, and open
+        # the gzip stream with a fixed mtime. SOURCE_DATE_EPOCH is
+        # honoured for the mtime when set (PEP 517-compatible frontends
+        # use it to opt into reproducible builds); otherwise fall back
+        # to 0.
+        source_date_epoch = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
+
+        def _normalise(info: tarfile.TarInfo) -> tarfile.TarInfo:
+            info.mtime = source_date_epoch
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            # 0755 for dirs, 0644 for files, mirroring what setuptools
+            # emits and what pip's sdist unpack expects.
+            info.mode = 0o755 if info.isdir() else 0o644
+            return info
+
         tmp_sdist = sdist_path.with_suffix(sdist_path.suffix + ".tmp")
-        with tarfile.open(tmp_sdist, "w:gz") as tar:
-            tar.add(root, arcname=top, recursive=True)
+        with (
+            open(tmp_sdist, "wb") as raw,
+            gzip.GzipFile(
+                filename="",
+                mode="wb",
+                fileobj=raw,
+                mtime=source_date_epoch,
+            ) as gz,
+            tarfile.open(fileobj=gz, mode="w") as tar,
+        ):
+            tar.add(root, arcname=top, recursive=False, filter=_normalise)
+            for path in sorted(root.rglob("*")):
+                arc = f"{top}/{path.relative_to(root).as_posix()}"
+                tar.add(path, arcname=arc, recursive=False, filter=_normalise)
         os.replace(tmp_sdist, sdist_path)

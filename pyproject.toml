@@ -37,12 +37,7 @@ dependencies = [
   "libcst",
   "setuptools-ext",  # TODO: Get rid of this dependency when there is a wheel interface elsewhere.
   "tomli; python_version < '3.11'",
-  # tomlkit drives the sdist-lowering pyproject rewrite (round-trip
-  # TOML preserves multi-line arrays, nested ``]``, and user comments
-  # that the previous regex approach mangled).
   "tomlkit",
-  # packaging.Requirement / canonicalize_name parse PEP 508 specs in
-  # ``[build-system].requires`` when ``lower_sdist`` strips retrofy.
   "packaging",
 ]
 
@@ -65,6 +60,7 @@ post-build-wheel = "retrofy._pep517_hooks:compatibility_via_rewrite"
 post-build-sdist = "retrofy._pep517_hooks:lower_sdist"
 post-build-editable = "retrofy._pep517_hooks:compatibility_via_import_hook"
 post-prepare-metadata-for-build-editable = "retrofy._pep517_hooks:inject_runtime_requirement"
+post-prepare-metadata-for-build-wheel = "retrofy._pep517_hooks:lower_metadata_requires_python"
 
 [project.entry-points.pytest11]
 # Cooperate with pytest's assertion rewriter when test files use

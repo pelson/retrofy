@@ -41,7 +41,22 @@ jobs:
         RETROFY_DISABLE_REWRITE: "1"
       run: |
         python -m pip install --upgrade pip
-        python -m pip install build multistage-build setuptools_scm libcst setuptools-ext tomli tomlkit packaging
+        python -m pip install build
+        # ``pip install . --no-build-isolation --no-deps`` needs both
+        # [build-system].requires and [project].dependencies already
+        # present in the env: --no-build-isolation cascades to
+        # transitively-built sdists, so on interpreters that lack a
+        # binary wheel for a dep (e.g. libcst on 3.15-beta) that dep's
+        # own source build would inherit --no-build-isolation and fail
+        # on its build requirements. Install both lists in one pip
+        # call with build isolation ON so each sdist-built dep still
+        # gets its own clean build env; then install retrofy with
+        # --no-deps. Derive the list from pyproject.toml so it stays
+        # in one place, dropping retrofy's own self-reference.
+        python -c "import tomllib; d=tomllib.load(open('pyproject.toml','rb')); print('\n'.join(r for r in d['build-system']['requires'] + d['project']['dependencies'] if not r.startswith('retrofy')))" \
+          > /tmp/build-and-run-dependencies.txt
+        cat /tmp/build-and-run-dependencies.txt
+        python -m pip install -r /tmp/build-and-run-dependencies.txt
         python -m pip install . --no-build-isolation --no-deps
 
     - name: Build wheel and sdist (lowered)
@@ -312,6 +327,14 @@ jobs:
         /tmp/sdist-example-venv/bin/pip install pytest
         /tmp/sdist-example-venv/bin/pip install example-project/sdist/*.tar.gz
 
+        # Sanity that the freeze/grep check itself works: the sdist we
+        # just installed must show up in the venv. A no-match here
+        # means the retrofy-absence check below is a false negative.
+        if ! /tmp/sdist-example-venv/bin/pip list --format=freeze | grep -qE '^retrofy-test-project=='; then
+          echo "::error::retrofy-test-project not found in /tmp/sdist-example-venv — the sdist install did not take, and the retrofy-absence check below would be a false negative"
+          /tmp/sdist-example-venv/bin/pip list --format=freeze
+          exit 1
+        fi
         if /tmp/sdist-example-venv/bin/pip list --format=freeze | grep -qE '^retrofy=='; then
           echo "::error::retrofy unexpectedly installed in /tmp/sdist-example-venv — lower_sdist did not strip it from build-system.requires"
           /tmp/sdist-example-venv/bin/pip list --format=freeze | grep -E '^retrofy'
@@ -509,15 +532,9 @@ jobs:
         # carries the backend chain (retrofy, multistage-build,
         # setuptools); ``--no-deps`` so pip doesn't try to install
         # example-project's deps into the wheel-build dir.
-        # ``--ignore-requires-python`` because example-project declares
-        # ``requires-python = ">=3.15"`` (the on-disk source syntax),
-        # but the converter Python is 3.13. pip would otherwise refuse
-        # to build; the actual install target -- the host venv below --
-        # uses the *lowered* wheel, whose Requires-Python is set from
-        # ``[tool.retrofy] target-python``.
         mkdir -p /tmp/expr-dist
         "$HOME/.cache/retrofy/converter-venv/bin/pip" wheel ./example-project \
-          --no-build-isolation --no-deps --ignore-requires-python \
+          --no-build-isolation --no-deps \
           --wheel-dir /tmp/expr-dist
 
     - name: Install + test example-project wheel on the host

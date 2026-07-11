@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import io
+import os
 import pathlib
 import re
 import tarfile
@@ -20,6 +21,7 @@ from retrofy._pep517_hooks import (
     _read_target_python,
     compatibility_via_rewrite,
     inject_runtime_requirement,
+    lower_metadata_requires_python,
     lower_sdist,
 )
 
@@ -81,6 +83,66 @@ def test_inject_runtime_requirement_adds_even_if_retrofy_already_present(tmp_pat
     ]
     assert len(lines) == 2
     assert PINNED_REQUIRES in lines
+
+
+def test_lower_metadata_requires_python_rewrites_when_target_set(tmp_path, monkeypatch):
+    # Pip pre-flights Requires-Python from the prepared metadata
+    # before deciding to invoke build_wheel. When the source declares
+    # >=3.15 but target-python is 3.9, the *prepared* METADATA must
+    # already say >=3.9 or pip refuses to build on <3.15 interpreters.
+    (tmp_path / "pyproject.toml").write_text(
+        textwrap.dedent(
+            """\
+            [project]
+            name = "x"
+            requires-python = ">=3.15"
+            [tool.retrofy]
+            target-python = "3.9"
+            """,
+        ),
+        encoding="utf-8",
+    )
+    dist_info = _write_metadata(
+        tmp_path,
+        """\
+        Metadata-Version: 2.1
+        Name: some-project
+        Version: 0.1.0
+        Requires-Python: >=3.15
+        """,
+    )
+    monkeypatch.chdir(tmp_path)
+    lower_metadata_requires_python(dist_info)
+    text = (dist_info / "METADATA").read_text(encoding="utf-8")
+    assert "Requires-Python: >=3.9" in text
+    assert "Requires-Python: >=3.15" not in text
+
+
+def test_lower_metadata_requires_python_no_op_when_target_unset(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text(
+        textwrap.dedent(
+            """\
+            [project]
+            name = "x"
+            requires-python = ">=3.9"
+            """,
+        ),
+        encoding="utf-8",
+    )
+    dist_info = _write_metadata(
+        tmp_path,
+        """\
+        Metadata-Version: 2.1
+        Name: some-project
+        Version: 0.1.0
+        Requires-Python: >=3.9
+        """,
+    )
+    monkeypatch.chdir(tmp_path)
+    before = (dist_info / "METADATA").read_text(encoding="utf-8")
+    lower_metadata_requires_python(dist_info)
+    after = (dist_info / "METADATA").read_text(encoding="utf-8")
+    assert before == after
 
 
 def test_inject_runtime_requirement_no_body(tmp_path):
@@ -530,6 +592,50 @@ def _read_sdist(sdist: pathlib.Path, name: str = "dummypkg-0.0.0") -> dict[str, 
 
 def _opt_in_pyproject(text: str) -> str:
     return textwrap.dedent(text)
+
+
+def test_lower_sdist_is_reproducible(tmp_path, monkeypatch):
+    # Running lower_sdist twice on the same input must produce the
+    # same bytes. Tar member order, per-entry mtime/uid/gid/uname/gname/mode,
+    # and the gzip mtime header all otherwise vary across runs.
+    def _one() -> bytes:
+        d = tmp_path / f"iter_{os.urandom(4).hex()}"
+        d.mkdir()
+        (d / "pyproject.toml").write_text(
+            _opt_in_pyproject(
+                """\
+                [project]
+                name = "dummypkg"
+                [tool.retrofy]
+                target-python = "3.9"
+                """,
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(d)
+        sdist = _make_minimal_sdist(
+            d,
+            {
+                "dummypkg/__init__.py": "",
+                "dummypkg/a.py": "x = 1\n",
+                "dummypkg/b.py": "y = 2\n",
+                "dummypkg/sub/__init__.py": "",
+                "dummypkg/sub/c.py": "lazy from foo import bar\n",
+                "pyproject.toml": _opt_in_pyproject(
+                    """\
+                    [project]
+                    name = "dummypkg"
+                    [tool.retrofy]
+                    target-python = "3.9"
+                    """,
+                ),
+            },
+        )
+        lower_sdist(sdist)
+        return sdist.read_bytes()
+
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    assert _one() == _one()
 
 
 def test_lower_sdist_converts_py_files(tmp_path, monkeypatch):
