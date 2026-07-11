@@ -75,6 +75,52 @@ def test_passing_lazy_import_test(pytester: pytest.Pytester):
     result.assert_outcomes(passed=1)
 
 
+@pytest.mark.parametrize("import_mode", ["prepend", "importlib"])
+def test_lazy_from_in_package_conftest_collects(
+    pytester: pytest.Pytester,
+    import_mode: str,
+):
+    """A project whose ``conftest.py`` (inside a package) uses
+    ``lazy from`` at module scope must still collect.
+
+    Pytest imports conftests via the assertion rewriter, but the
+    initial conftest load runs during ``pytest_load_initial_conftests``
+    — *before* ``pytest_configure`` fires — so the plugin must install
+    its ``_rewrite_test`` monkey-patch and register the ``_retrofy_rt``
+    runtime synthesiser at plugin *import* time, not at
+    ``pytest_configure`` / ``pytest_sessionstart``.
+    """
+    pkg = pytester.mkpydir("synthpkg")
+    (pkg / "jvm.py").write_text("x = 1\n")
+    (pkg / "conftest.py").write_text(
+        textwrap.dedent(
+            """
+            lazy from synthpkg.jvm import x
+
+            def _force():
+                return x
+            """,
+        ).lstrip(),
+    )
+    (pkg / "test_lazy_conftest.py").write_text(
+        textwrap.dedent(
+            """
+            from synthpkg.jvm import x
+
+            def test_x():
+                assert x == 1
+            """,
+        ).lstrip(),
+    )
+    # Pass the package dir explicitly so pytest treats the conftest as
+    # an initial conftest (loaded during ``pytest_load_initial_conftests``).
+    result = pytester.runpytest_subprocess(
+        "synthpkg",
+        f"--import-mode={import_mode}",
+    )
+    result.assert_outcomes(passed=1)
+
+
 def test_plain_test_file_unaffected(pytester: pytest.Pytester):
     """A test file with no retrofy-touched syntax must still get full
     pytest assert introspection — the plugin must not break the normal
