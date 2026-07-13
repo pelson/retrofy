@@ -27,6 +27,8 @@ matching preamble lines (typing alias + retrofy runtime import),
 including only the helpers the body actually references.
 """
 
+from __future__ import annotations
+
 import textwrap
 import warnings
 
