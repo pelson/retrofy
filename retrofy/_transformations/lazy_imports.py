@@ -34,6 +34,7 @@ from dataclasses import dataclass
 import io
 import re
 import tokenize
+import typing
 import warnings
 
 import libcst as cst
@@ -61,14 +62,22 @@ class _HelperNames:
     lazy_import_as: str
     lazy_from: str
     reify: str
+    # Placeholder name emitted in phase 1's ``if <name>.TYPE_CHECKING:``
+    # blocks. The libcst pass in phase 3 rewrites this to ``typing`` if
+    # ``typing`` is safely bound at module scope, or leaves it alone
+    # and injects ``import typing as <name>`` if not. Making it a
+    # mangled dunder makes it collision-safe and unambiguously ours.
+    typing_module: str
 
 
 def _helper_names(source: str) -> _HelperNames:
     """Pick non-colliding dunder helper names for *source*.
 
-    All four helpers share the same numeric suffix so the emitted
-    runtime-import line stays readable. The suffix increments until
-    none of the four names appears in *source*.
+    All four ``_retrofy_rt`` helpers share the same numeric suffix so
+    the emitted runtime-import line stays readable — bumping one bumps
+    all. The ``__lazy_typing__`` placeholder is orthogonal (it may or
+    may not become an alias in phase 3), so its suffix is chosen
+    independently.
 
     "Appears" is checked against a coarse word-boundary regex — we
     deliberately do **not** parse the source for real identifier
@@ -87,13 +96,20 @@ def _helper_names(source: str) -> _HelperNames:
         assert base.endswith("__")
         return base[:-2] + suffix + "__"
 
-    n = 1
-    while True:
-        suffix = "" if n == 1 else f"_{n}"
-        candidates = {role: _name(base, suffix) for role, base in _BASE_HELPERS.items()}
-        if not (set(candidates.values()) & existing):
-            return _HelperNames(**candidates)
-        n += 1
+    def _pick_suffix(bases: list[str]) -> str:
+        n = 1
+        while True:
+            suffix = "" if n == 1 else f"_{n}"
+            if not (set(_name(b, suffix) for b in bases) & existing):
+                return suffix
+            n += 1
+
+    helper_suffix = _pick_suffix(list(_BASE_HELPERS.values()))
+    typing_suffix = _pick_suffix(["__lazy_typing__"])
+    return _HelperNames(
+        **{role: _name(base, helper_suffix) for role, base in _BASE_HELPERS.items()},
+        typing_module=_name("__lazy_typing__", typing_suffix),
+    )
 
 
 class LazyImportSyntaxError(SyntaxError):
@@ -188,13 +204,39 @@ def _split_top_level_commas(s: str) -> list[str]:
     return out
 
 
+def _format_type_checking_block(
+    helpers: _HelperNames,
+    tc_lines: list[str],
+    runtime_lines: list[str],
+) -> str:
+    """Emit the ``if <placeholder>.TYPE_CHECKING: <real imports>\\n
+    else: <runtime bindings>`` block that mypy needs to resolve
+    lazy-bound names to their real types while keeping runtime
+    laziness.
+
+    The runtime branch is emitted in an ``else`` so mypy never sees
+    the lazy-helper assignment poison the name's type — see issue #45.
+
+    The header uses a mangled dunder placeholder (not ``typing``)
+    because the source hasn't been parsed into a CST yet — we can't
+    tell here whether the user already imports ``typing`` or shadows
+    it. Phase 3 (libcst) inspects the module scope and either rewrites
+    the placeholder back to ``typing`` (safe case) or leaves it as-is
+    and injects ``import typing as <placeholder>`` (shadowed case).
+    """
+    tc_body = "\n".join(f"    {line}" for line in tc_lines)
+    else_body = "\n".join(f"    {line}" for line in runtime_lines)
+    return f"if {helpers.typing_module}.TYPE_CHECKING:\n{tc_body}\nelse:\n{else_body}"
+
+
 def _format_lazy_import(stmt_src: str, helpers: _HelperNames) -> _LazyStmt:
     body = stmt_src.strip()
     assert body.startswith("import"), body
     body = body[len("import") :].strip()
 
     bindings: list[str] = []
-    lines: list[str] = []
+    tc_lines: list[str] = []
+    runtime_lines: list[str] = []
     used: set[str] = set()
     for clause in _split_top_level_commas(body):
         clause = clause.strip()
@@ -203,7 +245,8 @@ def _format_lazy_import(stmt_src: str, helpers: _HelperNames) -> _LazyStmt:
             name = name.strip()
             alias = alias.strip()
             bindings.append(alias)
-            lines.append(
+            tc_lines.append(f"import {name} as {alias}")
+            runtime_lines.append(
                 f"{alias} = {helpers.lazy_import_as}({name!r}, {alias!r})",
             )
             used.add("lazy_import_as")
@@ -212,11 +255,14 @@ def _format_lazy_import(stmt_src: str, helpers: _HelperNames) -> _LazyStmt:
             name = clause.strip()
             top = name.partition(".")[0]
             bindings.append(top)
-            lines.append(f"{top} = {helpers.lazy_import}({name!r}, {top!r})")
+            tc_lines.append(f"import {name}")
+            runtime_lines.append(
+                f"{top} = {helpers.lazy_import}({name!r}, {top!r})",
+            )
             used.add("lazy_import")
     return _LazyStmt(
         bindings=bindings,
-        replacement="\n".join(lines),
+        replacement=_format_type_checking_block(helpers, tc_lines, runtime_lines),
         used_helpers=used,
     )
 
@@ -238,7 +284,8 @@ def _format_lazy_from(stmt_src: str, helpers: _HelperNames) -> _LazyStmt:
         raise LazyImportSyntaxError("lazy from-import does not support '*'")
 
     bindings: list[str] = []
-    lines: list[str] = []
+    tc_names: list[str] = []
+    runtime_lines: list[str] = []
     for clause in _split_top_level_commas(names_part):
         clause = clause.strip()
         if not clause:
@@ -247,9 +294,11 @@ def _format_lazy_from(stmt_src: str, helpers: _HelperNames) -> _LazyStmt:
             attr, _, alias = clause.partition(" as ")
             attr = attr.strip()
             alias = alias.strip()
+            tc_names.append(f"{attr} as {alias}")
         else:
             attr = clause
             alias = clause
+            tc_names.append(attr)
         bindings.append(alias)
         if module.startswith("."):
             # Relative ``lazy from ... import`` needs the calling
@@ -258,11 +307,14 @@ def _format_lazy_from(stmt_src: str, helpers: _HelperNames) -> _LazyStmt:
             args = f"{module!r}, {attr!r}, {alias!r}, package=__package__"
         else:
             args = f"{module!r}, {attr!r}, {alias!r}"
-        lines.append(f"{alias} = {helpers.lazy_from}({args})")
+        runtime_lines.append(f"{alias} = {helpers.lazy_from}({args})")
+    if not bindings:
+        return _LazyStmt(bindings=[], replacement="", used_helpers=set())
+    tc_lines = [f"from {module} import {', '.join(tc_names)}"]
     return _LazyStmt(
         bindings=bindings,
-        replacement="\n".join(lines),
-        used_helpers={"lazy_from"} if bindings else set(),
+        replacement=_format_type_checking_block(helpers, tc_lines, runtime_lines),
+        used_helpers={"lazy_from"},
     )
 
 
@@ -334,6 +386,10 @@ def _strip_lazy_syntax(
 
     indent_depth = 0
     edits: list[tuple[tuple[int, int], tuple[int, int], str]] = []
+    # `;` positions already handled by a semicolon-split edit, so we
+    # don't emit two edits for the same `;` when it sits between two
+    # adjacent `lazy` statements.
+    handled_semis: set[tuple[int, int]] = set()
     lazy_names: list[str] = []
     used_helpers: set[str] = set()
 
@@ -389,6 +445,21 @@ def _strip_lazy_syntax(
                 edits.append(
                     (tok.start, stmt_tokens[-1].end, rewritten.replacement),
                 )
+
+                # The new emit is a multi-line ``if TYPE_CHECKING: ...
+                # else: ...`` block. If the ``lazy`` statement abuts a
+                # simple-statement chain via ``;`` on the same physical
+                # line, either side of it would splice the block into
+                # invalid Python (the block's last emitted line would
+                # continue into the else-branch of the compound stmt).
+                # Break those semicolons into newlines instead.
+                _add_semicolon_split_edits(
+                    tokens,
+                    i,
+                    k,
+                    edits,
+                    handled_semis,
+                )
                 i = k
                 continue
         i += 1
@@ -396,6 +467,54 @@ def _strip_lazy_syntax(
     if not edits:
         return source, [], set()
     return _apply_edits(source, edits), lazy_names, used_helpers
+
+
+def _add_semicolon_split_edits(
+    tokens: list[tokenize.TokenInfo],
+    i: int,
+    k: int,
+    edits: list[tuple[tuple[int, int], tuple[int, int], str]],
+    handled: set[tuple[int, int]],
+) -> None:
+    """Emit ``; <ws>`` → ``\\n`` edits for any semicolon adjacent to the
+    ``lazy`` statement at token index *i* (whose last body token index
+    is *k*). *handled* dedupes semicolons touched from both sides when
+    two adjacent ``lazy`` statements share a separator.
+    """
+    lazy_tok = tokens[i]
+
+    # Preceding semicolon: ``X; lazy Y`` — walk back through NL/COMMENT
+    # to find the previous meaningful token.
+    for jj in range(i - 1, -1, -1):
+        prev = tokens[jj]
+        if prev.type in (tokenize.NL, tokenize.COMMENT):
+            continue
+        if (
+            prev.type == tokenize.OP
+            and prev.string == ";"
+            and prev.start[0] == lazy_tok.start[0]
+            and prev.start not in handled
+        ):
+            edits.append((prev.start, lazy_tok.start, "\n"))
+            handled.add(prev.start)
+        break
+
+    # Trailing semicolon: ``lazy X; Y`` — look at the token that
+    # terminated the statement scan.
+    n = len(tokens)
+    if k < n:
+        trailing = tokens[k]
+        if (
+            trailing.type == tokenize.OP
+            and trailing.string == ";"
+            and trailing.start not in handled
+        ):
+            m = k + 1
+            while m < n and tokens[m].type in (tokenize.NL, tokenize.COMMENT):
+                m += 1
+            if m < n and tokens[m].start[0] == trailing.start[0]:
+                edits.append((trailing.start, tokens[m].start, "\n"))
+                handled.add(trailing.start)
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +525,11 @@ def _strip_lazy_syntax(
 class _ReifyWrappingTransformer(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (ScopeProvider,)
 
-    def __init__(self, lazy_names: set[str], reify_name: str) -> None:
+    def __init__(
+        self,
+        lazy_names: set[str],
+        reify_name: str,
+    ) -> None:
         super().__init__()
         self._lazy_names = lazy_names
         self._reify_name = reify_name
@@ -502,6 +625,15 @@ def _wrap_lazy_reads(
     one read was actually wrapped. The flag lets Phase 3 skip the
     ``reify`` import when the lazy bindings are declared but never
     read (uncommon but possible).
+
+    Wraps include reads inside ``cst.Annotation`` slots — those reads
+    force reification at eval time so that ``__annotations__`` /
+    ``typing.get_type_hints`` see the real class rather than the
+    ``LazyProxy``, matching native PEP 810 semantics. Mypy would
+    reject the wrapped call as ``[valid-type]``, so phase 2b (below)
+    duplicates each annotation-carrying construct under a
+    ``if TYPE_CHECKING: <clean stub> / else: <wrapped>`` pair, giving
+    static checkers a clean signature to type-check against.
     """
     if not lazy_names:
         return source, False
@@ -510,6 +642,235 @@ def _wrap_lazy_reads(
     transformer = _ReifyWrappingTransformer(set(lazy_names), helpers.reify)
     rewritten = wrapper.visit(transformer).code
     return rewritten, bool(transformer._targets)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b: TYPE_CHECKING duplication of annotation-carrying constructs
+# ---------------------------------------------------------------------------
+
+
+class _ReifyStripper(cst.CSTTransformer):
+    """Replace ``<reify_name>(X)`` calls with the bare ``X`` argument.
+
+    Used to build the ``if TYPE_CHECKING:`` clean-stub form of a
+    construct — the stub carries the original names (which mypy
+    resolves via the top-level TYPE_CHECKING re-import) instead of
+    the runtime ``__lazy_reify__(...)`` call.
+    """
+
+    def __init__(self, reify_name: str) -> None:
+        super().__init__()
+        self._reify_name = reify_name
+
+    def leave_Call(
+        self,
+        original_node: cst.Call,
+        updated_node: cst.Call,
+    ) -> cst.BaseExpression:
+        if (
+            isinstance(updated_node.func, cst.Name)
+            and updated_node.func.value == self._reify_name
+            and len(updated_node.args) == 1
+        ):
+            return updated_node.args[0].value
+        return updated_node
+
+
+def _node_contains_reify_call(node: cst.CSTNode, reify_name: str) -> bool:
+    """Return True if *node* contains any ``<reify_name>(X)`` call."""
+    if (
+        isinstance(node, cst.Call)
+        and isinstance(node.func, cst.Name)
+        and node.func.value == reify_name
+    ):
+        return True
+    for child in node.children:
+        if _node_contains_reify_call(child, reify_name):
+            return True
+    return False
+
+
+def _def_has_wrapped_annotation(
+    def_node: cst.FunctionDef,
+    reify_name: str,
+) -> bool:
+    """Return True if any of *def_node*'s annotations contains a
+    ``<reify_name>(X)`` call.
+
+    Only annotations are inspected — body-level wraps are not a
+    reason to duplicate the def under ``TYPE_CHECKING`` (mypy accepts
+    ``__lazy_reify__(X)`` at value positions via the generic ``T->T``
+    signature; only annotation slots trip ``[valid-type]``).
+    """
+    params = def_node.params
+    for p in (
+        list(params.params) + list(params.kwonly_params) + list(params.posonly_params)
+    ):
+        if p.annotation is not None and _node_contains_reify_call(
+            p.annotation,
+            reify_name,
+        ):
+            return True
+    for star in (params.star_arg, params.star_kwarg):
+        if (
+            isinstance(star, cst.Param)
+            and star.annotation is not None
+            and _node_contains_reify_call(star.annotation, reify_name)
+        ):
+            return True
+    if def_node.returns is not None and _node_contains_reify_call(
+        def_node.returns,
+        reify_name,
+    ):
+        return True
+    return False
+
+
+def _annassign_has_wrap(
+    annassign: cst.AnnAssign,
+    reify_name: str,
+) -> bool:
+    """Return True if the annotation (or, for TypeAlias-style
+    declarations, the value) of *annassign* contains a
+    ``<reify_name>(X)`` call.
+    """
+    if _node_contains_reify_call(annassign.annotation, reify_name):
+        return True
+    if annassign.value is not None and _node_contains_reify_call(
+        annassign.value,
+        reify_name,
+    ):
+        return True
+    return False
+
+
+def _stub_from_def(
+    def_node: cst.FunctionDef,
+    reify_name: str,
+) -> cst.FunctionDef:
+    """Build the ``if TYPE_CHECKING:`` stub form of *def_node*: strip
+    reify calls out of annotations and replace the body with an inline
+    ``...`` (single-line ``def f(...) -> T: ...`` — matches the
+    convention for stubs in ``.pyi`` files).
+    """
+    stripped = def_node.visit(_ReifyStripper(reify_name))
+    assert isinstance(stripped, cst.FunctionDef)
+    return stripped.with_changes(
+        body=cst.SimpleStatementSuite(
+            body=[cst.Expr(value=cst.Ellipsis())],
+        ),
+    )
+
+
+def _clean_annassign_line(
+    line: cst.SimpleStatementLine,
+    reify_name: str,
+) -> cst.SimpleStatementLine:
+    """Return *line* with any ``<reify_name>(X)`` calls stripped."""
+    stripped = line.visit(_ReifyStripper(reify_name))
+    assert isinstance(stripped, cst.SimpleStatementLine)
+    return stripped
+
+
+def _build_type_checking_pair(
+    tc_expr: cst.BaseExpression,
+    stub: cst.BaseCompoundStatement | cst.SimpleStatementLine,
+    real: cst.BaseCompoundStatement | cst.SimpleStatementLine,
+    leading_lines: typing.Sequence[cst.EmptyLine] = (),
+) -> cst.If:
+    """Build ``if <tc_expr>: <stub>\\nelse: <real>``, carrying any
+    *leading_lines* to sit before the ``if`` (so blank lines that
+    preceded the original construct don't get duplicated into both
+    branches).
+    """
+    return cst.If(
+        test=tc_expr,
+        body=cst.IndentedBlock(body=[stub]),
+        orelse=cst.Else(body=cst.IndentedBlock(body=[real])),
+        leading_lines=leading_lines,
+    )
+
+
+def _apply_type_checking_duplication(
+    source: str,
+    helpers: _HelperNames,
+) -> str:
+    """Reparse *source* and apply :func:`_duplicate_annotated_constructs`.
+
+    Convenience wrapper for :func:`transform_lazy_imports` — phase 2b
+    is a CST-level pass, but the surrounding phases speak source
+    strings, so we materialise the CST here.
+    """
+    module = cst.parse_module(source)
+    module = _duplicate_annotated_constructs(module, helpers)
+    return module.code
+
+
+def _duplicate_annotated_constructs(
+    module: cst.Module,
+    helpers: _HelperNames,
+) -> cst.Module:
+    """Phase 2b: walk module and class bodies, replacing each
+    annotation-carrying construct whose annotation contains a
+    ``<reify>`` wrap with an ``if <tc>.TYPE_CHECKING: <clean stub>``
+    / ``else: <wrapped>`` pair. This gives mypy a clean signature to
+    read from the ``if`` branch while runtime executes the ``else``
+    branch's wrapped form (which reifies proxies at eval time so
+    ``typing.get_type_hints`` / ``inspect.signature`` see the real
+    class rather than a ``LazyProxy``).
+    """
+    reify_name = helpers.reify
+    tc_expr = cst.Attribute(
+        value=cst.Name(helpers.typing_module),
+        attr=cst.Name("TYPE_CHECKING"),
+    )
+
+    def _process_stmt(stmt):
+        if isinstance(stmt, cst.FunctionDef):
+            if _def_has_wrapped_annotation(stmt, reify_name):
+                # Take the def's leading blank lines and put them on
+                # the new ``if`` — otherwise they'd sit inside both
+                # branches as visual noise.
+                leading = stmt.leading_lines
+                stub = _stub_from_def(
+                    stmt.with_changes(leading_lines=()),
+                    reify_name,
+                )
+                real = stmt.with_changes(leading_lines=())
+                return _build_type_checking_pair(
+                    tc_expr,
+                    stub,
+                    real,
+                    leading_lines=leading,
+                )
+            return stmt
+        if isinstance(stmt, cst.SimpleStatementLine):
+            if len(stmt.body) == 1 and isinstance(stmt.body[0], cst.AnnAssign):
+                inner = stmt.body[0]
+                if _annassign_has_wrap(inner, reify_name):
+                    leading = stmt.leading_lines
+                    stmt_no_lead = stmt.with_changes(leading_lines=())
+                    clean = _clean_annassign_line(stmt_no_lead, reify_name)
+                    return _build_type_checking_pair(
+                        tc_expr,
+                        clean,
+                        stmt_no_lead,
+                        leading_lines=leading,
+                    )
+            return stmt
+        if isinstance(stmt, cst.ClassDef):
+            new_body = _process_block(stmt.body)
+            return stmt.with_changes(body=new_body)
+        return stmt
+
+    def _process_block(block):
+        if isinstance(block, cst.IndentedBlock):
+            new_stmts = tuple(_process_stmt(s) for s in block.body)
+            return block.with_changes(body=new_stmts)
+        return block
+
+    new_body = tuple(_process_stmt(s) for s in module.body)
+    return module.with_changes(body=new_body)
 
 
 # ---------------------------------------------------------------------------
@@ -571,24 +932,137 @@ def _build_runtime_import(
     )
 
 
+def _build_typing_import(alias: str | None) -> cst.SimpleStatementLine:
+    """Build ``import typing`` (or ``import typing as <alias>``) as a
+    libcst node.
+
+    Every rewritten ``lazy`` statement expands to an
+    ``if <name>.TYPE_CHECKING: ... else: ...`` block, so the ``typing``
+    module has to be resolvable at module scope under whichever name
+    phase 3 settled on.
+    """
+    asname = cst.AsName(name=cst.Name(alias)) if alias is not None else None
+    return cst.SimpleStatementLine(
+        body=[
+            cst.Import(
+                names=[
+                    cst.ImportAlias(name=cst.Name("typing"), asname=asname),
+                ],
+            ),
+        ],
+    )
+
+
+def _typing_safely_bound(module: cst.Module) -> bool:
+    """Return True iff ``typing`` at module scope is bound exclusively
+    by an unaliased ``import typing``.
+
+    That's the one case where we can rewrite phase-1's mangled
+    placeholder back to the plain ``typing`` name without risk.
+    Anything else — no binding, an aliased import, a ``from`` import,
+    a rebinding assignment, a ``for typing in ...`` at module top,
+    etc. — means the user's ``typing`` isn't reliably the stdlib
+    module and we have to inject a mangled alias instead.
+    """
+    wrapper = cst.metadata.MetadataWrapper(module)
+    scopes = wrapper.resolve(cst.metadata.ScopeProvider)
+    global_scope: cst.metadata.GlobalScope | None = None
+    for scope in scopes.values():
+        if isinstance(scope, cst.metadata.GlobalScope):
+            global_scope = scope
+            break
+    if global_scope is None:
+        return False
+
+    assignments = list(global_scope["typing"])
+    if len(assignments) != 1:
+        return False
+    (only,) = assignments
+    if not isinstance(only, cst.metadata.ImportAssignment):
+        return False
+    # ``ImportAssignment.node`` is the outer ``Import`` / ``ImportFrom``
+    # statement rather than the specific alias — we have to walk its
+    # aliases and confirm one binds the bare name ``typing``.
+    node = only.node
+    if not isinstance(node, cst.Import):
+        return False
+    for alias in node.names:
+        if (
+            isinstance(alias.name, cst.Name)
+            and alias.name.value == "typing"
+            and alias.asname is None
+        ):
+            return True
+    return False
+
+
+class _RewritePlaceholderToTyping(cst.CSTTransformer):
+    """Rewrite ``<placeholder>.TYPE_CHECKING`` back to
+    ``typing.TYPE_CHECKING`` throughout the module.
+
+    Used when phase 3 has decided ``typing`` at module scope is
+    reliably the stdlib module and no injected alias is needed.
+    """
+
+    def __init__(self, placeholder: str) -> None:
+        super().__init__()
+        self._placeholder = placeholder
+
+    def leave_Attribute(
+        self,
+        original_node: cst.Attribute,
+        updated_node: cst.Attribute,
+    ) -> cst.BaseExpression:
+        if (
+            isinstance(updated_node.value, cst.Name)
+            and updated_node.value.value == self._placeholder
+            and isinstance(updated_node.attr, cst.Name)
+            and updated_node.attr.value == "TYPE_CHECKING"
+        ):
+            return updated_node.with_changes(value=cst.Name("typing"))
+        return updated_node
+
+
 def _inject_runtime_import(
     source: str,
     helpers: _HelperNames,
     used: set[str],
 ) -> str:
-    """Insert the runtime-import statement after the module's preamble.
+    """Insert the runtime-import statements after the module's preamble.
 
     The preamble is the optional docstring plus any
     ``from __future__ import ...`` statements (which must remain at
     the top of the module to be effective). Everything else stays put.
     Any blank line that originally separated the preamble from the
-    body is transferred to lead the injected import, so the
+    body is transferred to lead the first injected import, so the
     docstring-blank-import-body shape is preserved.
+
+    Injects up to two imports when any ``lazy`` statement was rewritten:
+
+    * ``from ._retrofy_rt.lazy_imports import ...`` — the runtime
+      helpers referenced from the ``else`` branch of each block.
+    * ``import typing as <placeholder>`` — needed so each block's
+      ``if <placeholder>.TYPE_CHECKING:`` header resolves. Skipped
+      (and the placeholder rewritten to plain ``typing``) when
+      ``typing`` at module scope is exclusively bound to the stdlib
+      module.
     """
     if not used:
         return source
 
     module = cst.parse_module(source)
+    if _typing_safely_bound(module):
+        # ``typing`` is already the stdlib module and never shadowed;
+        # collapse our placeholder back to the plain name and skip the
+        # injection.
+        module = cst.ensure_type(
+            module.visit(_RewritePlaceholderToTyping(helpers.typing_module)),
+            cst.Module,
+        )
+        inject_typing = False
+    else:
+        inject_typing = True
+
     body = list(module.body)
     insert_at = 0
     if body and _is_module_docstring(body[0]):
@@ -596,17 +1070,22 @@ def _inject_runtime_import(
     while insert_at < len(body) and _is_future_import(body[insert_at]):
         insert_at += 1
 
-    new_import = _build_runtime_import(helpers, used)
+    injected: list[cst.SimpleStatementLine] = []
+    if inject_typing:
+        injected.append(_build_typing_import(helpers.typing_module))
+    injected.append(_build_runtime_import(helpers, used))
+
     if insert_at < len(body):
         # Transfer the blank lines that originally separated the
-        # preamble from the first body statement onto our injected
-        # import, so the docstring → blank → import shape is kept.
+        # preamble from the first body statement onto the first
+        # injected import, so the docstring → blank → import shape is
+        # kept.
         following = body[insert_at]
         leading = getattr(following, "leading_lines", ())
         if leading:
-            new_import = new_import.with_changes(leading_lines=leading)
+            injected[0] = injected[0].with_changes(leading_lines=leading)
             body[insert_at] = following.with_changes(leading_lines=())
-    body.insert(insert_at, new_import)
+    body[insert_at:insert_at] = injected
     return module.with_changes(body=tuple(body)).code
 
 
@@ -644,4 +1123,5 @@ def transform_lazy_imports(source: str) -> str:
     wrapped, reify_used = _wrap_lazy_reads(stripped, lazy_names, helpers)
     if reify_used:
         used.add("reify")
+        wrapped = _apply_type_checking_duplication(wrapped, helpers)
     return _inject_runtime_import(wrapped, helpers, used)

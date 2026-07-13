@@ -44,6 +44,9 @@ dependencies = [
 [project.optional-dependencies]
 test = [
   "pytest",
+  # ``retrofy/tests/test_lazy_imports_mypy.py`` (issue #45 regression)
+  # shells out to mypy. Without this dep the test skips silently.
+  "mypy",
 ]
 
 [dependency-groups]

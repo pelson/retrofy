@@ -26,7 +26,10 @@ from __future__ import annotations
 import importlib
 import sys
 import threading
+import typing
 from typing import Any, Callable, Optional
+
+_T = typing.TypeVar("_T")
 
 _MISSING = object()
 
@@ -85,11 +88,17 @@ class LazyProxy:
         return repr(resolved)
 
 
-def reify(obj: Any) -> Any:
-    """The wrap-every-use helper. See module docstring."""
+def reify(obj: _T) -> _T:
+    """The wrap-every-use helper. See module docstring.
+
+    The signature is ``T -> T`` so that static type checkers see reads
+    through ``reify`` as preserving the caller's static type. At runtime
+    a :class:`LazyProxy` is resolved and replaced with the real object;
+    for anything else the argument is returned unchanged.
+    """
     if not isinstance(obj, LazyProxy):
         return obj
-    resolved = obj._reify()
+    resolved: _T = obj._reify()
     bind_name = object.__getattribute__(obj, "_bind_name")
     try:
         frame = sys._getframe(1)

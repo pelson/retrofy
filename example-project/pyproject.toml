@@ -24,9 +24,12 @@ dynamic = ["dependencies"]
 test = [
   "pytest",
 ]
+typecheck = [
+  "mypy",
+]
 dev = [
   # Include the "test" and "doc" dependencies in the dev dependencies.
-  "example-project[doc,test]",
+  "example-project[doc,test,typecheck]",
 ]
 
 [tool.setuptools.packages.find]
@@ -46,3 +49,13 @@ target-python = "3.7"
 # source).
 [tool.ruff]
 target-version = "py315"
+
+# Mypy runs against the *converted* form of example_project (as it
+# lands in the built wheel). The pre-conversion source uses Python
+# 3.15+ ``lazy`` soft-keyword syntax that mypy does not yet parse.
+# Modern mypy only supports 3.9+ as a target, so we cannot literally
+# match the ``requires-python = ">=3.7"`` floor here — 3.9 is the
+# tightest mypy will accept.
+[tool.mypy]
+python_version = "3.9"
+strict = true

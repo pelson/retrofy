@@ -188,9 +188,9 @@ jobs:
       run: |
         # ``PIP_INDEX_URL`` (set in the previous step) points pip at the
         # local merged index, so this resolves ``retrofy`` to the dev
-        # wheel and ``pytest`` to PyPI's release — no ``--find-links``,
-        # no ``--pre``, no path-based install.
-        python -m pip install pytest retrofy
+        # wheel and its ``[test]`` deps (pytest + mypy) to PyPI —
+        # no ``--find-links``, no ``--pre``, no path-based install.
+        python -m pip install 'retrofy[test]'
 
     - name: Assert installed retrofy parses on the matrix Python
       # The build job lowers retrofy's own source via

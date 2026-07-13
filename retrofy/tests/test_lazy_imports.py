@@ -1,22 +1,33 @@
 """Before/after tests for the PEP 810 (lazy imports) rewriter.
 
-The expected output reflects PEP 810's runtime semantics:
+The expected output reflects PEP 810's runtime semantics and the
+static-analyser story we ship for issue #45:
 
-* ``lazy import`` / ``lazy from`` are rewritten as runtime-helper assignments
-  whose ``bind_name`` argument records the local name in module globals.
+* Each ``lazy import`` / ``lazy from`` is rewritten to a per-statement
+  ``if <name>.TYPE_CHECKING: <real import>\\nelse: <runtime binding>``
+  block. Static type checkers see the ``if`` branch (the real import)
+  and infer proper types; the interpreter takes the ``else`` branch
+  and gets the lazy proxy.
 * Every read of a lazy-bound module global is wrapped with
-  ``__lazy_reify__(name)`` — a *function* call. The function returns its
-  argument unchanged if it isn't a ``LazyProxy``, so a name that gets
-  rebound later (e.g. by a plain ``import`` of the same top-level package)
-  continues to work transparently.
+  ``__lazy_reify__(name)`` — a *function* call. The function returns
+  its argument unchanged if it isn't a ``LazyProxy``, so a name that
+  gets rebound later continues to work transparently. Reads inside
+  ``cst.Annotation`` nodes are exempt when the module has
+  ``from __future__ import annotations`` (issue #45).
+* The preamble adds ``from ._retrofy_rt.lazy_imports import ...`` and
+  ``import typing as __lazy_typing__`` (or collapses the alias to
+  plain ``typing`` when the source already imports it safely). The
+  ``if`` header uses whichever name reaches the typing module.
 
-Most tests use the ``{_RUNTIME_IMPORT}`` placeholder at the start of
-the expected output. ``_assert_transform`` replaces it with a
-``from ._retrofy_rt.lazy_imports import ...`` line containing **only**
-the helpers whose mangled names appear in the rest of the expected
-body — the converter now imports the subset it actually uses, not
-all four helpers unconditionally.
+Expected outputs are assembled by ``_expected(*sections)`` so that
+multi-line block content doesn't fight ``textwrap.dedent`` — each
+section is a self-contained string joined at column 0. The
+``_RUNTIME_IMPORT`` marker in an expected string is replaced with the
+matching preamble lines (typing alias + retrofy runtime import),
+including only the helpers the body actually references.
 """
+
+from __future__ import annotations
 
 import textwrap
 import warnings
@@ -37,22 +48,50 @@ def _norm(s: str) -> str:
     return textwrap.dedent(s).lstrip("\n")
 
 
-def _build_runtime_import(body: str) -> str:
+def _build_preamble(body: str) -> str:
+    """Reconstruct the injected preamble for a body containing the
+    given helper aliases. Adds ``import typing as __lazy_typing__``
+    only when the body references the placeholder — the alias is
+    collapsed to plain ``typing`` when the source already has a safe
+    top-level ``import typing``.
+    """
+    lines = []
+    if "__lazy_typing__" in body:
+        lines.append("import typing as __lazy_typing__")
     aliases = [
         f"{role} as {_BASE_HELPERS[role]}"
         for role in _BASE_HELPERS
         if _BASE_HELPERS[role] in body
     ]
-    return "from ._retrofy_rt.lazy_imports import " + ", ".join(aliases)
+    lines.append("from ._retrofy_rt.lazy_imports import " + ", ".join(aliases))
+    return "\n".join(lines)
+
+
+def _block(
+    tc_lines: list[str],
+    rt_lines: list[str],
+    tc_name: str = "__lazy_typing__",
+) -> str:
+    """Format a per-statement ``if <tc_name>.TYPE_CHECKING: ...\\n
+    else: ...`` block matching the transformer's emit shape.
+    """
+    tc_body = "\n".join(f"    {line}" for line in tc_lines)
+    rt_body = "\n".join(f"    {line}" for line in rt_lines)
+    return f"if {tc_name}.TYPE_CHECKING:\n{tc_body}\nelse:\n{rt_body}"
+
+
+def _expected(*sections: str) -> str:
+    """Join expected-output sections at column 0, with a trailing
+    newline. Sections are separated by exactly one ``\\n`` — pass an
+    empty string as a section to insert a blank line.
+    """
+    return "\n".join(sections) + "\n"
 
 
 def _assert_transform(src: str, expected: str) -> None:
-    expected = _norm(expected)
     if _RUNTIME_IMPORT in expected:
-        # Build the import line over the rest of the body so we only
-        # claim to import helpers that the body actually uses.
         rest = expected.replace(_RUNTIME_IMPORT, "")
-        expected = expected.replace(_RUNTIME_IMPORT, _build_runtime_import(rest))
+        expected = expected.replace(_RUNTIME_IMPORT, _build_preamble(rest))
     got = transform_lazy_imports(_norm(src))
     assert got == expected, f"\n--- got ---\n{got}\n--- expected ---\n{expected}"
 
@@ -74,12 +113,12 @@ def test_lazy_import_simple() -> None:
 
         arr = numpy.array([1, 2, 3])
         """,
-        f"""
-        {_RUNTIME_IMPORT}
-        numpy = __lazy_import__('numpy', 'numpy')
-
-        arr = __lazy_reify__(numpy).array([1, 2, 3])
-        """,
+        _expected(
+            _RUNTIME_IMPORT,
+            _block(["import numpy"], ["numpy = __lazy_import__('numpy', 'numpy')"]),
+            "",
+            "arr = __lazy_reify__(numpy).array([1, 2, 3])",
+        ),
     )
 
 
@@ -90,12 +129,12 @@ def test_lazy_import_as_alias() -> None:
 
         arr = np.array([1, 2, 3])
         """,
-        f"""
-        {_RUNTIME_IMPORT}
-        np = __lazy_import_as__('numpy', 'np')
-
-        arr = __lazy_reify__(np).array([1, 2, 3])
-        """,
+        _expected(
+            _RUNTIME_IMPORT,
+            _block(["import numpy as np"], ["np = __lazy_import_as__('numpy', 'np')"]),
+            "",
+            "arr = __lazy_reify__(np).array([1, 2, 3])",
+        ),
     )
 
 
@@ -106,12 +145,15 @@ def test_lazy_import_dotted_binds_top() -> None:
 
         tree = xml.etree.ElementTree.parse('f.xml')
         """,
-        f"""
-        {_RUNTIME_IMPORT}
-        xml = __lazy_import__('xml.etree.ElementTree', 'xml')
-
-        tree = __lazy_reify__(xml).etree.ElementTree.parse('f.xml')
-        """,
+        _expected(
+            _RUNTIME_IMPORT,
+            _block(
+                ["import xml.etree.ElementTree"],
+                ["xml = __lazy_import__('xml.etree.ElementTree', 'xml')"],
+            ),
+            "",
+            "tree = __lazy_reify__(xml).etree.ElementTree.parse('f.xml')",
+        ),
     )
 
 
@@ -124,14 +166,17 @@ def test_mixed_lazy_and_eager_same_top_level() -> None:
         tree = xml.etree.ElementTree.parse('f.xml')
         dom = xml.dom.minidom.parseString('<a/>')
         """,
-        f"""
-        {_RUNTIME_IMPORT}
-        xml = __lazy_import__('xml.etree.ElementTree', 'xml')
-        import xml.dom.minidom
-
-        tree = __lazy_reify__(xml).etree.ElementTree.parse('f.xml')
-        dom = __lazy_reify__(xml).dom.minidom.parseString('<a/>')
-        """,
+        _expected(
+            _RUNTIME_IMPORT,
+            _block(
+                ["import xml.etree.ElementTree"],
+                ["xml = __lazy_import__('xml.etree.ElementTree', 'xml')"],
+            ),
+            "import xml.dom.minidom",
+            "",
+            "tree = __lazy_reify__(xml).etree.ElementTree.parse('f.xml')",
+            "dom = __lazy_reify__(xml).dom.minidom.parseString('<a/>')",
+        ),
     )
 
 
@@ -143,17 +188,24 @@ def test_lazy_from_single_name() -> None:
         def f(x):
             return isinstance(x, Mapping)
         """,
-        f"""
-        {_RUNTIME_IMPORT}
-        Mapping = __lazy_from__('collections.abc', 'Mapping', 'Mapping')
-
-        def f(x):
-            return isinstance(x, __lazy_reify__(Mapping))
-        """,
+        _expected(
+            _RUNTIME_IMPORT,
+            _block(
+                ["from collections.abc import Mapping"],
+                ["Mapping = __lazy_from__('collections.abc', 'Mapping', 'Mapping')"],
+            ),
+            "",
+            "def f(x):",
+            "    return isinstance(x, __lazy_reify__(Mapping))",
+        ),
     )
 
 
 def test_lazy_from_multiple_names_with_alias() -> None:
+    # Module-level annotations touching lazy names are wrapped with
+    # ``__lazy_reify__(...)`` at runtime AND duplicated under a
+    # ``if TYPE_CHECKING:`` clean stub so mypy sees the unwrapped
+    # form (issue #45 phase 2b).
     _assert_transform(
         """
         lazy from typing import List, Dict as D
@@ -161,14 +213,19 @@ def test_lazy_from_multiple_names_with_alias() -> None:
         x: List
         y: D
         """,
-        f"""
-        {_RUNTIME_IMPORT}
-        List = __lazy_from__('typing', 'List', 'List')
-        D = __lazy_from__('typing', 'Dict', 'D')
-
-        x: __lazy_reify__(List)
-        y: __lazy_reify__(D)
-        """,
+        _expected(
+            _RUNTIME_IMPORT,
+            _block(
+                ["from typing import List, Dict as D"],
+                [
+                    "List = __lazy_from__('typing', 'List', 'List')",
+                    "D = __lazy_from__('typing', 'Dict', 'D')",
+                ],
+            ),
+            "",
+            _block(["x: List"], ["x: __lazy_reify__(List)"]),
+            _block(["y: D"], ["y: __lazy_reify__(D)"]),
+        ),
     )
 
 
@@ -182,15 +239,15 @@ def test_local_shadowing_is_not_rewritten() -> None:
 
         outer = np.array([1])
         """,
-        f"""
-        {_RUNTIME_IMPORT}
-        np = __lazy_import_as__('numpy', 'np')
-
-        def f(np):
-            return np + 1
-
-        outer = __lazy_reify__(np).array([1])
-        """,
+        _expected(
+            _RUNTIME_IMPORT,
+            _block(["import numpy as np"], ["np = __lazy_import_as__('numpy', 'np')"]),
+            "",
+            "def f(np):",
+            "    return np + 1",
+            "",
+            "outer = __lazy_reify__(np).array([1])",
+        ),
     )
 
 
@@ -209,13 +266,13 @@ def test_rebind_in_module_still_wraps_reads() -> None:
         np = 42
         print(np)
         """,
-        f"""
-        {_RUNTIME_IMPORT}
-        np = __lazy_import_as__('numpy', 'np')
-
-        np = 42
-        print(__lazy_reify__(np))
-        """,
+        _expected(
+            _RUNTIME_IMPORT,
+            _block(["import numpy as np"], ["np = __lazy_import_as__('numpy', 'np')"]),
+            "",
+            "np = 42",
+            "print(__lazy_reify__(np))",
+        ),
     )
 
 
@@ -250,14 +307,14 @@ def test_future_import_stays_first() -> None:
 
         x = np.array([])
         """,
-        f"""
-        from __future__ import annotations
-
-        {_RUNTIME_IMPORT}
-        np = __lazy_import_as__('numpy', 'np')
-
-        x = __lazy_reify__(np).array([])
-        """,
+        _expected(
+            "from __future__ import annotations",
+            "",
+            _RUNTIME_IMPORT,
+            _block(["import numpy as np"], ["np = __lazy_import_as__('numpy', 'np')"]),
+            "",
+            "x = __lazy_reify__(np).array([])",
+        ),
     )
 
 
@@ -270,35 +327,36 @@ def test_module_docstring_stays_first() -> None:
 
         x = np.array([])
         ''',
-        f'''
-        """Module docstring."""
-
-        {_RUNTIME_IMPORT}
-        np = __lazy_import_as__('numpy', 'np')
-
-        x = __lazy_reify__(np).array([])
-        ''',
+        _expected(
+            '"""Module docstring."""',
+            "",
+            _RUNTIME_IMPORT,
+            _block(["import numpy as np"], ["np = __lazy_import_as__('numpy', 'np')"]),
+            "",
+            "x = __lazy_reify__(np).array([])",
+        ),
     )
 
 
 def test_semicolon_separated_lazy_statements() -> None:
     # Multiple ``lazy`` statements separated by ``;`` on a single
-    # physical line. The rewriter treats ``;`` as a statement boundary
-    # both when looking for ``lazy`` at the start and when collecting
-    # the trailing tokens of the current ``lazy`` clause, so each
-    # ``lazy`` is rewritten independently.
+    # physical line. Each block is multi-line, so the rewriter breaks
+    # the semicolon into a newline — the semicolon-adjacent-to-``lazy``
+    # edit consumes the ``;`` and any trailing whitespace so each
+    # block starts on its own line.
     _assert_transform(
         """
         lazy import json; lazy import os
 
         print(json, os)
         """,
-        f"""
-        {_RUNTIME_IMPORT}
-        json = __lazy_import__('json', 'json'); os = __lazy_import__('os', 'os')
-
-        print(__lazy_reify__(json), __lazy_reify__(os))
-        """,
+        _expected(
+            _RUNTIME_IMPORT,
+            _block(["import json"], ["json = __lazy_import__('json', 'json')"]),
+            _block(["import os"], ["os = __lazy_import__('os', 'os')"]),
+            "",
+            "print(__lazy_reify__(json), __lazy_reify__(os))",
+        ),
     )
 
 
@@ -313,14 +371,22 @@ def test_relative_lazy_from() -> None:
         sibling.f()
         h()
         """,
-        f"""
-        {_RUNTIME_IMPORT}
-        sibling = __lazy_from__('.', 'sibling', 'sibling', package=__package__)
-        h = __lazy_from__('.pkg', 'helper', 'h', package=__package__)
-
-        __lazy_reify__(sibling).f()
-        __lazy_reify__(h)()
-        """,
+        _expected(
+            _RUNTIME_IMPORT,
+            _block(
+                ["from . import sibling"],
+                [
+                    "sibling = __lazy_from__('.', 'sibling', 'sibling', package=__package__)",
+                ],
+            ),
+            _block(
+                ["from .pkg import helper as h"],
+                ["h = __lazy_from__('.pkg', 'helper', 'h', package=__package__)"],
+            ),
+            "",
+            "__lazy_reify__(sibling).f()",
+            "__lazy_reify__(h)()",
+        ),
     )
 
 
@@ -446,6 +512,242 @@ def test_lazy_modules_warning_with_lazy_keyword_still_rewrites() -> None:
     assert '__lazy_modules__ = {"os"}' in out
 
 
+def test_function_def_annotation_wrapped_with_type_checking_stub() -> None:
+    # Regression coverage for issue #45. A function def whose
+    # annotations touch a lazy name is duplicated: the ``if
+    # TYPE_CHECKING:`` branch carries the clean signature that mypy
+    # reads; the ``else:`` branch carries the runtime signature with
+    # ``__lazy_reify__(...)`` wraps, so ``typing.get_type_hints`` gets
+    # the reified real class at introspection time.
+    _assert_transform(
+        """
+        from __future__ import annotations
+        import typing
+
+        lazy from some_pkg import Foo
+
+        def do_it(x: typing.Optional[Foo]) -> Foo: ...
+
+        y: Foo
+        """,
+        _expected(
+            "from __future__ import annotations",
+            _RUNTIME_IMPORT,
+            "import typing",
+            "",
+            _block(
+                ["from some_pkg import Foo"],
+                ["Foo = __lazy_from__('some_pkg', 'Foo', 'Foo')"],
+                tc_name="typing",
+            ),
+            "",
+            _block(
+                ["def do_it(x: typing.Optional[Foo]) -> Foo: ..."],
+                [
+                    "def do_it(x: typing.Optional[__lazy_reify__(Foo)]) -> __lazy_reify__(Foo): ...",
+                ],
+                tc_name="typing",
+            ),
+            "",
+            _block(["y: Foo"], ["y: __lazy_reify__(Foo)"], tc_name="typing"),
+        ),
+    )
+
+
+def test_body_wrap_kept_alongside_type_checking_stub() -> None:
+    # Runtime uses in the function body still get wrapped — the stub
+    # in the ``if TYPE_CHECKING:`` branch is a bare ``...``, so the
+    # body only appears in the ``else:`` branch and doesn't need a
+    # clean form.
+    _assert_transform(
+        """
+        from __future__ import annotations
+
+        lazy from some_pkg import Foo
+
+        def do_it(x: Foo) -> Foo:
+            return Foo()
+        """,
+        _expected(
+            "from __future__ import annotations",
+            "",
+            _RUNTIME_IMPORT,
+            _block(
+                ["from some_pkg import Foo"],
+                ["Foo = __lazy_from__('some_pkg', 'Foo', 'Foo')"],
+            ),
+            "",
+            _block(
+                ["def do_it(x: Foo) -> Foo: ..."],
+                [
+                    "def do_it(x: __lazy_reify__(Foo)) -> __lazy_reify__(Foo):",
+                    "    return __lazy_reify__(Foo)()",
+                ],
+            ),
+        ),
+    )
+
+
+def test_module_level_annassign_is_type_checking_paired() -> None:
+    # Bare module-level ``x: Foo`` also duplicates so the annotation
+    # dict contains the real class at runtime (via the wrapped else
+    # branch) and mypy sees the clean form in the if branch.
+    _assert_transform(
+        """
+        lazy from typing import List
+
+        x: List
+        """,
+        _expected(
+            _RUNTIME_IMPORT,
+            _block(
+                ["from typing import List"],
+                ["List = __lazy_from__('typing', 'List', 'List')"],
+            ),
+            "",
+            _block(["x: List"], ["x: __lazy_reify__(List)"]),
+        ),
+    )
+
+
+def test_typing_alias_collapsed_when_source_imports_typing() -> None:
+    # The phase-1 emit uses a mangled ``__lazy_typing__`` placeholder
+    # for the ``TYPE_CHECKING`` reference. Phase 3's libcst pass sees
+    # that ``typing`` at module scope is exclusively bound to the
+    # stdlib module via ``import typing`` and rewrites the placeholder
+    # back to plain ``typing`` — no injected alias.
+    _assert_transform(
+        """
+        import typing
+
+        lazy from mod import X
+
+        x = X
+        """,
+        _expected(
+            _RUNTIME_IMPORT,
+            "import typing",
+            "",
+            _block(
+                ["from mod import X"],
+                ["X = __lazy_from__('mod', 'X', 'X')"],
+                tc_name="typing",
+            ),
+            "",
+            "x = __lazy_reify__(X)",
+        ),
+    )
+
+
+def test_typing_alias_kept_when_typing_shadowed_by_for_loop() -> None:
+    # Top-level ``import typing`` + a subsequent ``for typing in ...``
+    # at module scope means ``typing`` is no longer reliably the stdlib
+    # module. The libcst pass falls back to the mangled alias so every
+    # emitted TYPE_CHECKING reference is safe regardless of position.
+    _assert_transform(
+        """
+        import typing
+
+        for typing in []:
+            pass
+
+        lazy from mod import X
+
+        x = X
+        """,
+        _expected(
+            _RUNTIME_IMPORT,
+            "import typing",
+            "",
+            "for typing in []:",
+            "    pass",
+            "",
+            _block(
+                ["from mod import X"],
+                ["X = __lazy_from__('mod', 'X', 'X')"],
+            ),
+            "",
+            "x = __lazy_reify__(X)",
+        ),
+    )
+
+
+def test_typing_alias_kept_when_typing_import_is_aliased() -> None:
+    # ``import typing as t`` doesn't bind the bare name ``typing``, so
+    # phase 3 has to inject its own ``import typing as __lazy_typing__``
+    # rather than trusting the user's aliased import.
+    _assert_transform(
+        """
+        import typing as t
+
+        lazy from mod import X
+
+        x = X
+        """,
+        _expected(
+            _RUNTIME_IMPORT,
+            "import typing as t",
+            "",
+            _block(
+                ["from mod import X"],
+                ["X = __lazy_from__('mod', 'X', 'X')"],
+            ),
+            "",
+            "x = __lazy_reify__(X)",
+        ),
+    )
+
+
+def test_typing_alias_kept_when_only_from_typing_import() -> None:
+    # ``from typing import X`` does not bind the name ``typing``; the
+    # libcst pass must inject its own alias.
+    _assert_transform(
+        """
+        from typing import Optional
+
+        lazy from mod import X
+
+        x = X
+        """,
+        _expected(
+            _RUNTIME_IMPORT,
+            "from typing import Optional",
+            "",
+            _block(
+                ["from mod import X"],
+                ["X = __lazy_from__('mod', 'X', 'X')"],
+            ),
+            "",
+            "x = __lazy_reify__(X)",
+        ),
+    )
+
+
+def test_typing_alias_suffix_bumps_on_collision() -> None:
+    # If the user's source already binds ``__lazy_typing__``, the
+    # ``typing`` alias must bump to ``__lazy_typing_2__`` etc. so we
+    # can't clobber the user's binding.
+    src = _norm(
+        """
+        __lazy_typing__ = 'user-bound'
+
+        lazy from mod import X
+
+        x = X
+        """,
+    )
+    out = transform_lazy_imports(src)
+    # Bumped alias appears both in the injected import and in the
+    # emitted block's ``if`` header.
+    assert "import typing as __lazy_typing_2__" in out
+    assert "if __lazy_typing_2__.TYPE_CHECKING:" in out
+    # Un-suffixed placeholder must not appear as an injected alias.
+    assert "import typing as __lazy_typing__" not in out
+    assert "if __lazy_typing__.TYPE_CHECKING:" not in out
+    # User's literal binding is preserved verbatim.
+    assert "__lazy_typing__ = 'user-bound'" in out
+
+
 def test_multiple_lazy_statements() -> None:
     _assert_transform(
         """
@@ -459,17 +761,22 @@ def test_multiple_lazy_statements() -> None:
                 return list(x)
             return None
         """,
-        f"""
-        {_RUNTIME_IMPORT}
-        np = __lazy_import_as__('numpy', 'np')
-        Mapping = __lazy_from__('collections.abc', 'Mapping', 'Mapping')
-        Iter = __lazy_from__('collections.abc', 'Iterable', 'Iter')
-
-        def f(x):
-            if isinstance(x, __lazy_reify__(Mapping)):
-                return __lazy_reify__(np).array(list(x.values()))
-            if isinstance(x, __lazy_reify__(Iter)):
-                return list(x)
-            return None
-        """,
+        _expected(
+            _RUNTIME_IMPORT,
+            _block(["import numpy as np"], ["np = __lazy_import_as__('numpy', 'np')"]),
+            _block(
+                ["from collections.abc import Mapping, Iterable as Iter"],
+                [
+                    "Mapping = __lazy_from__('collections.abc', 'Mapping', 'Mapping')",
+                    "Iter = __lazy_from__('collections.abc', 'Iterable', 'Iter')",
+                ],
+            ),
+            "",
+            "def f(x):",
+            "    if isinstance(x, __lazy_reify__(Mapping)):",
+            "        return __lazy_reify__(np).array(list(x.values()))",
+            "    if isinstance(x, __lazy_reify__(Iter)):",
+            "        return list(x)",
+            "    return None",
+        ),
     )
