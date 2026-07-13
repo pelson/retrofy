@@ -1,0 +1,11 @@
+html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; }
+body { display: flex; flex-direction: column; }
+#status { padding: 4px 8px; background: #222; color: #ddd; font: 12px monospace; }
+#status.ready { background: #063; }
+#status.error { background: #822; }
+main { display: flex; flex: 1; min-height: 0; }
+.editor { flex: 1; min-width: 0; border-right: 1px solid #ccc; overflow: hidden; }
+.editor:last-child { border-right: none; }
+#diff { height: 30vh; overflow: auto; border-top: 1px solid #ccc; font: 12px monospace; padding: 4px 8px; white-space: pre; }
+#diff .add { background: #d4fadd; }
+#diff .del { background: #fbd5d5; }
