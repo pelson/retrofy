@@ -200,10 +200,10 @@ def test_lazy_from_single_name() -> None:
 
 
 def test_lazy_from_multiple_names_with_alias() -> None:
-    # Without ``from __future__ import annotations`` the reads inside
-    # annotations still get wrapped — see
-    # ``test_annotations_not_wrapped_under_future_annotations`` for the
-    # opposite behaviour.
+    # Module-level annotations touching lazy names are wrapped with
+    # ``__lazy_reify__(...)`` at runtime AND duplicated under a
+    # ``if TYPE_CHECKING:`` clean stub so mypy sees the unwrapped
+    # form (issue #45 phase 2b).
     _assert_transform(
         """
         lazy from typing import List, Dict as D
@@ -221,8 +221,8 @@ def test_lazy_from_multiple_names_with_alias() -> None:
                 ],
             ),
             "",
-            "x: __lazy_reify__(List)",
-            "y: __lazy_reify__(D)",
+            _block(["x: List"], ["x: __lazy_reify__(List)"]),
+            _block(["y: D"], ["y: __lazy_reify__(D)"]),
         ),
     )
 
@@ -510,13 +510,13 @@ def test_lazy_modules_warning_with_lazy_keyword_still_rewrites() -> None:
     assert '__lazy_modules__ = {"os"}' in out
 
 
-def test_annotations_not_wrapped_under_future_annotations() -> None:
-    # Regression for issue #45. With ``from __future__ import annotations``
-    # every annotation is a string at runtime — wrapping lazy-bound names
-    # in ``__lazy_reify__(...)`` inside annotations is dead code AND
-    # breaks mypy's [valid-type] check. Also verifies that a safely-
-    # bound top-level ``import typing`` collapses the emit's typing
-    # alias to the plain ``typing`` name.
+def test_function_def_annotation_wrapped_with_type_checking_stub() -> None:
+    # Regression coverage for issue #45. A function def whose
+    # annotations touch a lazy name is duplicated: the ``if
+    # TYPE_CHECKING:`` branch carries the clean signature that mypy
+    # reads; the ``else:`` branch carries the runtime signature with
+    # ``__lazy_reify__(...)`` wraps, so ``typing.get_type_hints`` gets
+    # the reified real class at introspection time.
     _assert_transform(
         """
         from __future__ import annotations
@@ -539,16 +539,24 @@ def test_annotations_not_wrapped_under_future_annotations() -> None:
                 tc_name="typing",
             ),
             "",
-            "def do_it(x: typing.Optional[Foo]) -> Foo: ...",
+            _block(
+                ["def do_it(x: typing.Optional[Foo]) -> Foo: ..."],
+                [
+                    "def do_it(x: typing.Optional[__lazy_reify__(Foo)]) -> __lazy_reify__(Foo): ...",
+                ],
+                tc_name="typing",
+            ),
             "",
-            "y: Foo",
+            _block(["y: Foo"], ["y: __lazy_reify__(Foo)"], tc_name="typing"),
         ),
     )
 
 
-def test_annotation_and_runtime_use_under_future_annotations() -> None:
-    # Non-annotation uses of the same lazy name still get wrapped —
-    # only reads inside the annotation slot are left alone.
+def test_body_wrap_kept_alongside_type_checking_stub() -> None:
+    # Runtime uses in the function body still get wrapped — the stub
+    # in the ``if TYPE_CHECKING:`` branch is a bare ``...``, so the
+    # body only appears in the ``else:`` branch and doesn't need a
+    # clean form.
     _assert_transform(
         """
         from __future__ import annotations
@@ -567,17 +575,21 @@ def test_annotation_and_runtime_use_under_future_annotations() -> None:
                 ["Foo = __lazy_from__('some_pkg', 'Foo', 'Foo')"],
             ),
             "",
-            "def do_it(x: Foo) -> Foo:",
-            "    return __lazy_reify__(Foo)()",
+            _block(
+                ["def do_it(x: Foo) -> Foo: ..."],
+                [
+                    "def do_it(x: __lazy_reify__(Foo)) -> __lazy_reify__(Foo):",
+                    "    return __lazy_reify__(Foo)()",
+                ],
+            ),
         ),
     )
 
 
-def test_annotations_still_wrapped_without_future_annotations() -> None:
-    # Without ``from __future__ import annotations`` the annotation is
-    # evaluated at definition time on pre-3.14 Pythons — wrapping is
-    # required to preserve PEP 810's "referencing the name imports it"
-    # semantics.
+def test_module_level_annassign_is_type_checking_paired() -> None:
+    # Bare module-level ``x: Foo`` also duplicates so the annotation
+    # dict contains the real class at runtime (via the wrapped else
+    # branch) and mypy sees the clean form in the if branch.
     _assert_transform(
         """
         lazy from typing import List
@@ -591,7 +603,7 @@ def test_annotations_still_wrapped_without_future_annotations() -> None:
                 ["List = __lazy_from__('typing', 'List', 'List')"],
             ),
             "",
-            "x: __lazy_reify__(List)",
+            _block(["x: List"], ["x: __lazy_reify__(List)"]),
         ),
     )
 

@@ -34,6 +34,7 @@ from dataclasses import dataclass
 import io
 import re
 import tokenize
+import typing
 import warnings
 
 import libcst as cst
@@ -528,35 +529,20 @@ class _ReifyWrappingTransformer(cst.CSTTransformer):
         self,
         lazy_names: set[str],
         reify_name: str,
-        *,
-        skip_annotations: bool,
     ) -> None:
         super().__init__()
         self._lazy_names = lazy_names
         self._reify_name = reify_name
-        self._skip_annotations = skip_annotations
         self._targets: set[int] = set()
 
     def visit_Module(self, node: cst.Module) -> None:
         write_ids: set[int] = set()
         self._collect_write_names(node, write_ids)
 
-        annotation_ids: set[int] = set()
-        if self._skip_annotations:
-            self._collect_annotation_ids(node, annotation_ids)
-
         for nd in self._iter_name_nodes(node):
             if nd.value not in self._lazy_names:
                 continue
             if id(nd) in write_ids:
-                continue
-            if id(nd) in annotation_ids:
-                # Under ``from __future__ import annotations``, the
-                # annotation body is a string at runtime and mypy
-                # parses it as a *type expression* — wrapping the name
-                # with ``__lazy_reify__(...)`` is dead code AND makes
-                # mypy reject the annotation with ``[valid-type]``.
-                # See issue #45.
                 continue
             try:
                 scope = self.get_metadata(ScopeProvider, nd)
@@ -570,24 +556,6 @@ class _ReifyWrappingTransformer(cst.CSTTransformer):
             if not all(isinstance(a.scope, GlobalScope) for a in assignments):
                 continue
             self._targets.add(id(nd))
-
-    def _collect_annotation_ids(
-        self,
-        node: cst.CSTNode,
-        out: set[int],
-    ) -> None:
-        """Record IDs of every ``Name`` node reachable through any
-        ``cst.Annotation`` — parameter / return / variable annotations
-        alike. We match on ``Annotation`` (not ``AnnAssign``) so this
-        also covers lambdas' args (via ``Param.annotation``) and
-        function returns (via ``FunctionDef.returns``).
-        """
-        if isinstance(node, cst.Annotation):
-            for name in self._iter_name_nodes(node):
-                out.add(id(name))
-            return
-        for child in node.children:
-            self._collect_annotation_ids(child, out)
 
     def _collect_write_names(
         self,
@@ -646,30 +614,6 @@ class _ReifyWrappingTransformer(cst.CSTTransformer):
         )
 
 
-def _has_future_annotations_import(module: cst.Module) -> bool:
-    """Return True if the module has ``from __future__ import annotations``.
-
-    When present, every annotation is stored as a string at runtime
-    (PEP 563), so wrapping lazy-bound names inside annotations is
-    dead code — and worse, mypy parses the wrapped call as a type
-    expression and rejects it. See issue #45.
-    """
-    for stmt in module.body:
-        if not _is_future_import(stmt):
-            continue
-        # ``_is_future_import`` already guarantees this is a
-        # ``SimpleStatementLine`` whose only body element is an
-        # ``ImportFrom`` from ``__future__``.
-        inner = stmt.body[0]
-        assert isinstance(inner, cst.ImportFrom)
-        if isinstance(inner.names, cst.ImportStar):
-            continue
-        for alias in inner.names:
-            if isinstance(alias.name, cst.Name) and alias.name.value == "annotations":
-                return True
-    return False
-
-
 def _wrap_lazy_reads(
     source: str,
     lazy_names: list[str],
@@ -682,23 +626,251 @@ def _wrap_lazy_reads(
     ``reify`` import when the lazy bindings are declared but never
     read (uncommon but possible).
 
-    Under ``from __future__ import annotations`` the wrapping skips
-    reads inside ``cst.Annotation`` nodes: annotations are strings at
-    runtime, so the reify call would be dead code, and it also makes
-    mypy reject the annotation with ``[valid-type]`` (issue #45).
+    Wraps include reads inside ``cst.Annotation`` slots — those reads
+    force reification at eval time so that ``__annotations__`` /
+    ``typing.get_type_hints`` see the real class rather than the
+    ``LazyProxy``, matching native PEP 810 semantics. Mypy would
+    reject the wrapped call as ``[valid-type]``, so phase 2b (below)
+    duplicates each annotation-carrying construct under a
+    ``if TYPE_CHECKING: <clean stub> / else: <wrapped>`` pair, giving
+    static checkers a clean signature to type-check against.
     """
     if not lazy_names:
         return source, False
     module = cst.parse_module(source)
-    skip_annotations = _has_future_annotations_import(module)
     wrapper = cst.metadata.MetadataWrapper(module)
-    transformer = _ReifyWrappingTransformer(
-        set(lazy_names),
-        helpers.reify,
-        skip_annotations=skip_annotations,
-    )
+    transformer = _ReifyWrappingTransformer(set(lazy_names), helpers.reify)
     rewritten = wrapper.visit(transformer).code
     return rewritten, bool(transformer._targets)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b: TYPE_CHECKING duplication of annotation-carrying constructs
+# ---------------------------------------------------------------------------
+
+
+class _ReifyStripper(cst.CSTTransformer):
+    """Replace ``<reify_name>(X)`` calls with the bare ``X`` argument.
+
+    Used to build the ``if TYPE_CHECKING:`` clean-stub form of a
+    construct — the stub carries the original names (which mypy
+    resolves via the top-level TYPE_CHECKING re-import) instead of
+    the runtime ``__lazy_reify__(...)`` call.
+    """
+
+    def __init__(self, reify_name: str) -> None:
+        super().__init__()
+        self._reify_name = reify_name
+
+    def leave_Call(
+        self,
+        original_node: cst.Call,
+        updated_node: cst.Call,
+    ) -> cst.BaseExpression:
+        if (
+            isinstance(updated_node.func, cst.Name)
+            and updated_node.func.value == self._reify_name
+            and len(updated_node.args) == 1
+        ):
+            return updated_node.args[0].value
+        return updated_node
+
+
+def _node_contains_reify_call(node: cst.CSTNode, reify_name: str) -> bool:
+    """Return True if *node* contains any ``<reify_name>(X)`` call."""
+    if (
+        isinstance(node, cst.Call)
+        and isinstance(node.func, cst.Name)
+        and node.func.value == reify_name
+    ):
+        return True
+    for child in node.children:
+        if _node_contains_reify_call(child, reify_name):
+            return True
+    return False
+
+
+def _def_has_wrapped_annotation(
+    def_node: cst.FunctionDef,
+    reify_name: str,
+) -> bool:
+    """Return True if any of *def_node*'s annotations contains a
+    ``<reify_name>(X)`` call.
+
+    Only annotations are inspected — body-level wraps are not a
+    reason to duplicate the def under ``TYPE_CHECKING`` (mypy accepts
+    ``__lazy_reify__(X)`` at value positions via the generic ``T->T``
+    signature; only annotation slots trip ``[valid-type]``).
+    """
+    params = def_node.params
+    for p in (
+        list(params.params) + list(params.kwonly_params) + list(params.posonly_params)
+    ):
+        if p.annotation is not None and _node_contains_reify_call(
+            p.annotation,
+            reify_name,
+        ):
+            return True
+    for star in (params.star_arg, params.star_kwarg):
+        if (
+            isinstance(star, cst.Param)
+            and star.annotation is not None
+            and _node_contains_reify_call(star.annotation, reify_name)
+        ):
+            return True
+    if def_node.returns is not None and _node_contains_reify_call(
+        def_node.returns,
+        reify_name,
+    ):
+        return True
+    return False
+
+
+def _annassign_has_wrap(
+    annassign: cst.AnnAssign,
+    reify_name: str,
+) -> bool:
+    """Return True if the annotation (or, for TypeAlias-style
+    declarations, the value) of *annassign* contains a
+    ``<reify_name>(X)`` call.
+    """
+    if _node_contains_reify_call(annassign.annotation, reify_name):
+        return True
+    if annassign.value is not None and _node_contains_reify_call(
+        annassign.value,
+        reify_name,
+    ):
+        return True
+    return False
+
+
+def _stub_from_def(
+    def_node: cst.FunctionDef,
+    reify_name: str,
+) -> cst.FunctionDef:
+    """Build the ``if TYPE_CHECKING:`` stub form of *def_node*: strip
+    reify calls out of annotations and replace the body with an inline
+    ``...`` (single-line ``def f(...) -> T: ...`` — matches the
+    convention for stubs in ``.pyi`` files).
+    """
+    stripped = def_node.visit(_ReifyStripper(reify_name))
+    assert isinstance(stripped, cst.FunctionDef)
+    return stripped.with_changes(
+        body=cst.SimpleStatementSuite(
+            body=[cst.Expr(value=cst.Ellipsis())],
+        ),
+    )
+
+
+def _clean_annassign_line(
+    line: cst.SimpleStatementLine,
+    reify_name: str,
+) -> cst.SimpleStatementLine:
+    """Return *line* with any ``<reify_name>(X)`` calls stripped."""
+    stripped = line.visit(_ReifyStripper(reify_name))
+    assert isinstance(stripped, cst.SimpleStatementLine)
+    return stripped
+
+
+def _build_type_checking_pair(
+    tc_expr: cst.BaseExpression,
+    stub: cst.BaseCompoundStatement | cst.SimpleStatementLine,
+    real: cst.BaseCompoundStatement | cst.SimpleStatementLine,
+    leading_lines: typing.Sequence[cst.EmptyLine] = (),
+) -> cst.If:
+    """Build ``if <tc_expr>: <stub>\\nelse: <real>``, carrying any
+    *leading_lines* to sit before the ``if`` (so blank lines that
+    preceded the original construct don't get duplicated into both
+    branches).
+    """
+    return cst.If(
+        test=tc_expr,
+        body=cst.IndentedBlock(body=[stub]),
+        orelse=cst.Else(body=cst.IndentedBlock(body=[real])),
+        leading_lines=leading_lines,
+    )
+
+
+def _apply_type_checking_duplication(
+    source: str,
+    helpers: _HelperNames,
+) -> str:
+    """Reparse *source* and apply :func:`_duplicate_annotated_constructs`.
+
+    Convenience wrapper for :func:`transform_lazy_imports` — phase 2b
+    is a CST-level pass, but the surrounding phases speak source
+    strings, so we materialise the CST here.
+    """
+    module = cst.parse_module(source)
+    module = _duplicate_annotated_constructs(module, helpers)
+    return module.code
+
+
+def _duplicate_annotated_constructs(
+    module: cst.Module,
+    helpers: _HelperNames,
+) -> cst.Module:
+    """Phase 2b: walk module and class bodies, replacing each
+    annotation-carrying construct whose annotation contains a
+    ``<reify>`` wrap with an ``if <tc>.TYPE_CHECKING: <clean stub>``
+    / ``else: <wrapped>`` pair. This gives mypy a clean signature to
+    read from the ``if`` branch while runtime executes the ``else``
+    branch's wrapped form (which reifies proxies at eval time so
+    ``typing.get_type_hints`` / ``inspect.signature`` see the real
+    class rather than a ``LazyProxy``).
+    """
+    reify_name = helpers.reify
+    tc_expr = cst.Attribute(
+        value=cst.Name(helpers.typing_module),
+        attr=cst.Name("TYPE_CHECKING"),
+    )
+
+    def _process_stmt(stmt):
+        if isinstance(stmt, cst.FunctionDef):
+            if _def_has_wrapped_annotation(stmt, reify_name):
+                # Take the def's leading blank lines and put them on
+                # the new ``if`` — otherwise they'd sit inside both
+                # branches as visual noise.
+                leading = stmt.leading_lines
+                stub = _stub_from_def(
+                    stmt.with_changes(leading_lines=()),
+                    reify_name,
+                )
+                real = stmt.with_changes(leading_lines=())
+                return _build_type_checking_pair(
+                    tc_expr,
+                    stub,
+                    real,
+                    leading_lines=leading,
+                )
+            return stmt
+        if isinstance(stmt, cst.SimpleStatementLine):
+            if len(stmt.body) == 1 and isinstance(stmt.body[0], cst.AnnAssign):
+                inner = stmt.body[0]
+                if _annassign_has_wrap(inner, reify_name):
+                    leading = stmt.leading_lines
+                    stmt_no_lead = stmt.with_changes(leading_lines=())
+                    clean = _clean_annassign_line(stmt_no_lead, reify_name)
+                    return _build_type_checking_pair(
+                        tc_expr,
+                        clean,
+                        stmt_no_lead,
+                        leading_lines=leading,
+                    )
+            return stmt
+        if isinstance(stmt, cst.ClassDef):
+            new_body = _process_block(stmt.body)
+            return stmt.with_changes(body=new_body)
+        return stmt
+
+    def _process_block(block):
+        if isinstance(block, cst.IndentedBlock):
+            new_stmts = tuple(_process_stmt(s) for s in block.body)
+            return block.with_changes(body=new_stmts)
+        return block
+
+    new_body = tuple(_process_stmt(s) for s in module.body)
+    return module.with_changes(body=new_body)
 
 
 # ---------------------------------------------------------------------------
@@ -951,4 +1123,5 @@ def transform_lazy_imports(source: str) -> str:
     wrapped, reify_used = _wrap_lazy_reads(stripped, lazy_names, helpers)
     if reify_used:
         used.add("reify")
+        wrapped = _apply_type_checking_duplication(wrapped, helpers)
     return _inject_runtime_import(wrapped, helpers, used)

@@ -117,3 +117,64 @@ def test_mypy_accepts_converted_lazy_annotations(
         "mypy rejected the converted form of the lazy-annotations fixture:\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+
+
+def test_runtime_get_type_hints_returns_real_class(tmp_path: pathlib.Path) -> None:
+    """The converted output must round-trip through ``typing.get_type_hints``
+    and return the *real* lazy-bound class — matching native PEP 810's
+    "``foo.__annotations__`` access triggers reification" semantic.
+
+    Previous shapes of the fix regressed this: they either left a
+    ``LazyProxy`` in the annotation slot or made ``get_type_hints``
+    raise ``TypeError: Forward references must evaluate to types``.
+    """
+    pkg = _write_converted_package(tmp_path)
+
+    # Execute the converted module in a fresh subprocess so this test
+    # doesn't leak imports into pytest's own interpreter, and drive
+    # ``typing.get_type_hints`` on each defined function.
+    driver = pkg.parent / "driver.py"
+    driver.write_text(
+        textwrap.dedent(
+            f"""
+            import sys
+            sys.path.insert(0, {str(pkg.parent)!r})
+            import typing
+            import pathlib
+            import collections.abc
+            import example_project.typed_lazy as m
+
+            hints = typing.get_type_hints(m.make_path)
+            assert hints['return'] is pathlib.Path, (
+                f'expected pathlib.Path, got {{hints["return"]!r}}'
+            )
+            assert hints['name'] is str
+
+            hints = typing.get_type_hints(m.annotate_optional)
+            # ``Optional[Path]`` normalises to ``Path | None``; the
+            # return is a bare ``Path``.
+            assert hints['return'] is pathlib.Path
+
+            hints = typing.get_type_hints(m.check_mapping)
+            # ``Mapping[str, int]`` — origin should be the real ABC.
+            m_hint = hints['m']
+            assert typing.get_origin(m_hint) is collections.abc.Mapping, (
+                f'origin was {{typing.get_origin(m_hint)!r}}'
+            )
+            assert typing.get_args(m_hint) == (str, int)
+
+            print('OK')
+            """,
+        ).lstrip(),
+    )
+    result = subprocess.run(
+        [sys.executable, str(driver)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        "runtime introspection of converted typed_lazy failed:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert result.stdout.strip().endswith("OK")
