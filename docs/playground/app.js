@@ -1,6 +1,7 @@
-import { EditorView, basicSetup } from "https://esm.sh/codemirror@6.0.1";
+import { EditorView, basicSetup } from "https://esm.sh/codemirror@6.0.2?deps=@codemirror/state@6.5.2";
 import { EditorState } from "https://esm.sh/@codemirror/state@6.5.2";
-import { python } from "https://esm.sh/@codemirror/lang-python@6.1.7";
+import { python } from "https://esm.sh/@codemirror/lang-python@6.1.7?deps=@codemirror/state@6.5.2";
+import { createTwoFilesPatch } from "https://esm.sh/diff@5.2.0";
 
 const PYODIDE_VERSION = "v0.29.4";
 const RETROFY_INDEX = "https://pelson.github.io/retrofy/simple/";
@@ -27,7 +28,7 @@ async function bootPyodide() {
     "retrofy",
     { index_urls: [RETROFY_INDEX, "https://pypi.org/simple/"] },
   );
-  pyodide.runPython("import retrofy");
+  pyodide.runPython("from retrofy._converters import convert");
   setStatus("Ready.", "ready");
   return pyodide;
 }
@@ -93,35 +94,77 @@ function setOutput(text) {
   });
 }
 
+const CONVERT_SCRIPT = `
+def _retrofy_playground_convert(src):
+    from retrofy._converters import convert
+    try:
+        return ("ok", convert(src), None, None, None)
+    except SyntaxError as exc:
+        return ("err", None, exc.lineno, exc.offset, str(exc))
+    except Exception as exc:
+        return ("err", None, None, None, f"{type(exc).__name__}: {exc}")
+`;
+
 async function convert(source) {
   const pyodide = await pyodideReady;
-  const ns = pyodide.toPy({ src: source });
+  pyodide.runPython(CONVERT_SCRIPT);
+  const fn = pyodide.globals.get("_retrofy_playground_convert");
   try {
-    const result = pyodide.runPython(
-      "import retrofy; retrofy.convert(src)",
-      { globals: ns },
-    );
-    setStatus("Ready.", "ready");
-    return result;
+    const result = fn(source);
+    const arr = result.toJs();
+    result.destroy();
+    return arr;
   } finally {
-    ns.destroy();
+    fn.destroy();
   }
 }
 
 const runConvert = debounce(async (source) => {
   try {
-    const out = await convert(source);
-    setOutput(out);
-    document.dispatchEvent(
-      new CustomEvent("retrofy:converted", {
-        detail: { input: source, output: out },
-      }),
-    );
+    const arr = await convert(source);
+    if (arr[0] === "ok") {
+      setOutput(arr[1]);
+      setStatus("Ready.", "ready");
+      document.dispatchEvent(
+        new CustomEvent("retrofy:converted", {
+          detail: { input: source, output: arr[1] },
+        }),
+      );
+    } else {
+      const [, , line, col, msg] = arr;
+      const where = line ? ` (line ${line}${col ? `, col ${col}` : ""})` : "";
+      setStatus(`SyntaxError${where}: ${msg}`, "error");
+    }
   } catch (err) {
-    const msg = err.message.split("\n").filter(Boolean).pop() || String(err);
-    setStatus(`Error: ${msg}`, "error");
+    setStatus(`Error: ${err.message}`, "error");
   }
 }, 300);
 
 document.addEventListener("retrofy:input-change", (e) => runConvert(e.detail));
 pyodideReady.then(() => runConvert(inputView.state.doc.toString()));
+
+const diffEl = document.getElementById("diff");
+
+function renderDiff(input, output) {
+  const patch = createTwoFilesPatch(
+    "input.py",
+    "output.py",
+    input,
+    output,
+    "",
+    "",
+    { context: 3 },
+  );
+  diffEl.innerHTML = "";
+  for (const raw of patch.split("\n")) {
+    const line = document.createElement("div");
+    line.textContent = raw;
+    if (raw.startsWith("+") && !raw.startsWith("+++")) line.className = "add";
+    else if (raw.startsWith("-") && !raw.startsWith("---")) line.className = "del";
+    diffEl.appendChild(line);
+  }
+}
+
+document.addEventListener("retrofy:converted", (e) => {
+  renderDiff(e.detail.input, e.detail.output);
+});
