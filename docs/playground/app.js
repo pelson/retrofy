@@ -78,3 +78,50 @@ export const outputView = makeEditor(
   "",
   true,
 );
+
+function debounce(fn, ms) {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
+}
+
+function setOutput(text) {
+  outputView.dispatch({
+    changes: { from: 0, to: outputView.state.doc.length, insert: text },
+  });
+}
+
+async function convert(source) {
+  const pyodide = await pyodideReady;
+  const ns = pyodide.toPy({ src: source });
+  try {
+    const result = pyodide.runPython(
+      "import retrofy; retrofy.convert(src)",
+      { globals: ns },
+    );
+    setStatus("Ready.", "ready");
+    return result;
+  } finally {
+    ns.destroy();
+  }
+}
+
+const runConvert = debounce(async (source) => {
+  try {
+    const out = await convert(source);
+    setOutput(out);
+    document.dispatchEvent(
+      new CustomEvent("retrofy:converted", {
+        detail: { input: source, output: out },
+      }),
+    );
+  } catch (err) {
+    const msg = err.message.split("\n").filter(Boolean).pop() || String(err);
+    setStatus(`Error: ${msg}`, "error");
+  }
+}, 300);
+
+document.addEventListener("retrofy:input-change", (e) => runConvert(e.detail));
+pyodideReady.then(() => runConvert(inputView.state.doc.toString()));
