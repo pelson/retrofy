@@ -1,7 +1,38 @@
 import { EditorView, basicSetup } from "https://esm.sh/codemirror@6.0.2?deps=@codemirror/state@6.5.2";
-import { EditorState } from "https://esm.sh/@codemirror/state@6.5.2";
+import { Decoration } from "https://esm.sh/@codemirror/view@6.35.0?deps=@codemirror/state@6.5.2";
+import { EditorState, StateEffect, StateField } from "https://esm.sh/@codemirror/state@6.5.2";
 import { python } from "https://esm.sh/@codemirror/lang-python@6.1.7?deps=@codemirror/state@6.5.2";
 import { createTwoFilesPatch } from "https://esm.sh/diff@5.2.0";
+
+const setErrorMark = StateEffect.define();
+const clearErrorMark = StateEffect.define();
+
+const errorLineDeco = Decoration.line({ attributes: { style: "background: #fee;" } });
+const errorPointDeco = Decoration.mark({ attributes: { style: "text-decoration: underline wavy #c33; text-underline-offset: 3px;" } });
+
+const errorMarkField = StateField.define({
+  create() { return Decoration.none; },
+  update(deco, tr) {
+    deco = deco.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(clearErrorMark)) deco = Decoration.none;
+      if (e.is(setErrorMark)) {
+        const { line, col } = e.value;
+        const doc = tr.state.doc;
+        if (line >= 1 && line <= doc.lines) {
+          const l = doc.line(line);
+          const from = Math.min(l.to, l.from + Math.max(0, (col || 1) - 1));
+          const to = Math.min(l.to, from + 1);
+          const marks = [errorLineDeco.range(l.from)];
+          if (to > from) marks.push(errorPointDeco.range(from, to));
+          deco = Decoration.set(marks);
+        }
+      }
+    }
+    return deco;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
 
 const PYODIDE_VERSION = "v0.29.4";
 const RETROFY_INDEX = "https://pelson.github.io/retrofy/simple/";
@@ -50,6 +81,7 @@ def f(x: int | str) -> list[int]:
 
 function makeEditor(parent, doc, readOnly) {
   const extensions = [basicSetup, python()];
+  if (!readOnly) extensions.push(errorMarkField);
   if (readOnly) extensions.push(EditorState.readOnly.of(true));
   extensions.push(
     EditorView.updateListener.of((v) => {
@@ -119,12 +151,84 @@ async function convert(source) {
   }
 }
 
+const errorsEl = document.getElementById("input-errors");
+const notesEl = document.getElementById("output-notes");
+const overlayEl = document.getElementById("output-overlay");
+const outputWrapEl = overlayEl.parentElement;
+
+const diffElStale = document.getElementById("diff");
+function setOverlay(kind, message) {
+  if (!kind) {
+    overlayEl.hidden = true;
+    overlayEl.className = "";
+    overlayEl.innerHTML = "";
+    outputWrapEl.classList.remove("stale");
+    diffElStale.classList.remove("stale");
+    return;
+  }
+  overlayEl.hidden = false;
+  overlayEl.className = kind;
+  overlayEl.innerHTML = "";
+  const banner = document.createElement("div");
+  banner.className = "banner";
+  banner.textContent = message;
+  overlayEl.appendChild(banner);
+  outputWrapEl.classList.add("stale");
+  diffElStale.classList.add("stale");
+}
+
+function showErrors(text) {
+  if (text) {
+    errorsEl.textContent = text;
+    errorsEl.hidden = false;
+  } else {
+    errorsEl.textContent = "";
+    errorsEl.hidden = true;
+  }
+}
+
+function showNotes(lines) {
+  if (lines.length) {
+    notesEl.innerHTML = "";
+    for (const line of lines) {
+      const div = document.createElement("div");
+      div.textContent = `• ${line}`;
+      notesEl.appendChild(div);
+    }
+    notesEl.hidden = false;
+  } else {
+    notesEl.innerHTML = "";
+    notesEl.hidden = true;
+  }
+}
+
+function derivedNotes(input, output) {
+  const notes = [];
+  const needs = (mod) =>
+    new RegExp(`(?:^|\\n)\\s*(?:from\\s+${mod}\\s+import|import\\s+${mod})`).test(output) &&
+    !new RegExp(`(?:^|\\n)\\s*(?:from\\s+${mod}\\s+import|import\\s+${mod})`).test(input);
+  if (needs("typing_extensions"))
+    notes.push("Adds a runtime dependency: typing_extensions (declare it in pyproject.toml).");
+  if (needs("typing")) notes.push("Uses typing (available on the standard library).");
+  if (/from\s+retrofy\._retrofy_rt|import\s+_retrofy_rt/.test(output))
+    notes.push("Requires the retrofy runtime bundle (retrofy/_retrofy_rt) alongside the package.");
+  if (/from\s+__future__\s+import\s+annotations/.test(output) &&
+      !/from\s+__future__\s+import\s+annotations/.test(input))
+    notes.push("Adds `from __future__ import annotations`.");
+  return notes;
+}
+
 const runConvert = debounce(async (source) => {
+  setOverlay("loading", "Converting…");
   try {
     const arr = await convert(source);
     if (arr[0] === "ok") {
       setOutput(arr[1]);
       setStatus("Ready.", "ready");
+      showErrors("");
+      inputView.dispatch({ effects: clearErrorMark.of(null) });
+      showNotes(derivedNotes(source, arr[1]));
+      setOverlay("", "");
       document.dispatchEvent(
         new CustomEvent("retrofy:converted", {
           detail: { input: source, output: arr[1] },
@@ -132,15 +236,29 @@ const runConvert = debounce(async (source) => {
       );
     } else {
       const [, , line, col, msg] = arr;
-      const where = line ? ` (line ${line}${col ? `, col ${col}` : ""})` : "";
-      setStatus(`SyntaxError${where}: ${msg}`, "error");
+      const where = line ? `line ${line}${col ? `, col ${col}` : ""}: ` : "";
+      showErrors(`SyntaxError: ${where}${msg}`);
+      setStatus("SyntaxError — see error box.", "error");
+      setOverlay("error", `SyntaxError${line ? ` at ${where.trim().replace(/:$/, "")}` : ""} — output is out of date.`);
+      if (line) {
+        inputView.dispatch({ effects: setErrorMark.of({ line, col }) });
+      } else {
+        inputView.dispatch({ effects: clearErrorMark.of(null) });
+      }
     }
   } catch (err) {
-    setStatus(`Error: ${err.message}`, "error");
+    showErrors(`Error: ${err.message}`);
+    setStatus("Conversion failed — see error box.", "error");
+    setOverlay("error", "Conversion failed — output is out of date.");
+    inputView.dispatch({ effects: clearErrorMark.of(null) });
   }
 }, 300);
 
-document.addEventListener("retrofy:input-change", (e) => runConvert(e.detail));
+document.addEventListener("retrofy:input-change", (e) => {
+  setOverlay("loading", "Converting…");
+  runConvert(e.detail);
+});
+setOverlay("loading", "Booting Pyodide + installing retrofy…");
 pyodideReady.then(() => runConvert(inputView.state.doc.toString()));
 
 const diffEl = document.getElementById("diff");
@@ -168,3 +286,175 @@ function renderDiff(input, output) {
 document.addEventListener("retrofy:converted", (e) => {
   renderDiff(e.detail.input, e.detail.output);
 });
+
+function makeHorizontalResizer(handle, leftEl) {
+  handle.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    const startX = e.clientX;
+    const startWidth = leftEl.getBoundingClientRect().width;
+    const move = (ev) => {
+      const total = leftEl.parentElement.getBoundingClientRect().width;
+      const w = Math.min(total - 60, Math.max(60, startWidth + (ev.clientX - startX)));
+      leftEl.style.flex = `0 0 ${w}px`;
+    };
+    const up = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.releasePointerCapture(e.pointerId);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+  });
+}
+
+function makeVerticalResizer(handle, belowEl) {
+  handle.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    const startY = e.clientY;
+    const startHeight = belowEl.getBoundingClientRect().height;
+    const move = (ev) => {
+      const h = Math.max(40, startHeight - (ev.clientY - startY));
+      belowEl.style.height = `${h}px`;
+    };
+    const up = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.releasePointerCapture(e.pointerId);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+  });
+}
+
+makeHorizontalResizer(
+  document.getElementById("resizer-cols"),
+  document.getElementById("input-col"),
+);
+makeVerticalResizer(
+  document.getElementById("resizer-diff"),
+  document.getElementById("diff"),
+);
+
+const EXAMPLES = [
+  {
+    label: "match — basic",
+    code: `def label(x):
+    match x:
+        case 1:
+            return "one"
+        case 2:
+            return "two"
+        case _:
+            return "other"
+`,
+  },
+  {
+    label: "match — class patterns",
+    code: `from dataclasses import dataclass
+
+@dataclass
+class Point:
+    x: int
+    y: int
+
+def where(p):
+    match p:
+        case Point(x=0, y=0):
+            return "origin"
+        case Point(x=0, y=y):
+            return f"y-axis at {y}"
+        case Point(x=x, y=0):
+            return f"x-axis at {x}"
+        case _:
+            return "elsewhere"
+`,
+  },
+  {
+    label: "walrus — basic",
+    code: `def first_long(items):
+    if (n := len(items)) > 5:
+        return f"got {n} items"
+    return None
+`,
+  },
+  {
+    label: "walrus — while loop",
+    code: `def read_all(stream):
+    chunks = []
+    while chunk := stream.read(1024):
+        chunks.append(chunk)
+    return b"".join(chunks)
+`,
+  },
+  {
+    label: "lazy import — module-level",
+    code: `lazy from json import loads
+
+def parse(data):
+    return loads(data)
+`,
+  },
+  {
+    label: "lazy import — function-scoped",
+    code: `def render(fig):
+    lazy import matplotlib.pyplot as plt
+    plt.plot(fig)
+`,
+  },
+  {
+    label: "PEP 604 union types",
+    code: `def clamp(x: int | float, lo: int | float, hi: int | float) -> int | float:
+    return max(lo, min(hi, x))
+`,
+  },
+  {
+    label: "PEP 585 generics",
+    code: `def group_by(items: list[dict[str, int]]) -> dict[str, list[int]]:
+    out: dict[str, list[int]] = {}
+    for item in items:
+        for k, v in item.items():
+            out.setdefault(k, []).append(v)
+    return out
+`,
+  },
+  {
+    label: "type alias (PEP 695)",
+    code: `type Vector = list[float]
+type Matrix = list[Vector]
+
+def zeros(n: int) -> Matrix:
+    return [[0.0] * n for _ in range(n)]
+`,
+  },
+  {
+    label: "typing.final",
+    code: `from typing import final
+
+@final
+class Sealed:
+    def method(self) -> int:
+        return 42
+`,
+  },
+];
+
+const examplesEl = document.getElementById("examples");
+for (const [i, ex] of EXAMPLES.entries()) {
+  const opt = document.createElement("option");
+  opt.value = String(i);
+  opt.textContent = ex.label;
+  examplesEl.appendChild(opt);
+}
+examplesEl.addEventListener("change", () => {
+  const i = examplesEl.value;
+  if (i === "") return;
+  const code = EXAMPLES[Number(i)].code;
+  inputView.dispatch({
+    changes: { from: 0, to: inputView.state.doc.length, insert: code },
+  });
+  examplesEl.value = "";
+});
+
+window.__playground = { inputView, outputView, pyodideReady };
