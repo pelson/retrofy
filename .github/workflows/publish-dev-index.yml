@@ -35,6 +35,11 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
+      - name: Check out the commit that produced the dist
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
       - name: Install uv
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -53,6 +58,15 @@ jobs:
           uvx simple-repository-generator dist-staging/ \
             --output public/ --copy --force
           ls -R public/ | head -50
+
+      - name: Copy playground into the Pages site
+        run: |
+          if [ -d docs/playground ]; then
+            mkdir -p public/playground
+            cp -r docs/playground/. public/playground/
+            # The Playwright test harness has no place on a static site.
+            rm -rf public/playground/tests
+          fi
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
