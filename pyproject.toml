@@ -92,6 +92,7 @@ include = ["retrofy", "retrofy.*"]
 
 [tool.setuptools_scm]
 write_to = "retrofy/_version.py"
+local_scheme = "no-local-version"
 
 [tool.ruff]
 line-length = 88

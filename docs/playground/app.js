@@ -36,12 +36,43 @@ const errorMarkField = StateField.define({
 
 const PYODIDE_VERSION = "v0.29.4";
 const RETROFY_INDEX = "https://pelson.github.io/retrofy/simple/";
+const SOURCES = {
+  dev: {
+    label: "Dev (main)",
+    index_urls: [RETROFY_INDEX, "https://pypi.org/simple/"],
+    pre: true,
+  },
+  released: {
+    label: "Released (PyPI)",
+    index_urls: ["https://pypi.org/simple/"],
+    pre: false,
+  },
+};
 
 const statusEl = document.getElementById("status");
 
 function setStatus(text, cls = "") {
   statusEl.textContent = text;
   statusEl.className = cls;
+}
+
+async function installRetrofy(pyodide, source, { force = false } = {}) {
+  const { label, index_urls, pre } = SOURCES[source];
+  setStatus(`Installing retrofy — ${label}…`);
+  const micropip = pyodide.pyimport("micropip");
+  if (force) {
+    pyodide.runPython(
+      "import sys\n" +
+      "for _m in [m for m in sys.modules if m == 'retrofy' or m.startswith('retrofy.')]:\n" +
+      "    del sys.modules[_m]\n",
+    );
+  }
+  await micropip.install(
+    "retrofy",
+    { index_urls, reinstall: force, pre },
+  );
+  pyodide.runPython("from retrofy._converters import convert");
+  setStatus("Ready.", "ready");
 }
 
 async function bootPyodide() {
@@ -52,17 +83,12 @@ async function bootPyodide() {
   const pyodide = await loadPyodide({
     indexURL: `https://cdn.jsdelivr.net/pyodide/${PYODIDE_VERSION}/full/`,
   });
-  setStatus("Installing retrofy…");
   await pyodide.loadPackage("micropip");
-  const micropip = pyodide.pyimport("micropip");
-  await micropip.install(
-    "retrofy",
-    { index_urls: [RETROFY_INDEX, "https://pypi.org/simple/"] },
-  );
-  pyodide.runPython("from retrofy._converters import convert");
-  setStatus("Ready.", "ready");
+  await installRetrofy(pyodide, currentSource);
   return pyodide;
 }
+
+let currentSource = "released";
 
 export const pyodideReady = bootPyodide().catch((err) => {
   setStatus(`Boot failed: ${err.message}`, "error");
@@ -455,6 +481,28 @@ examplesEl.addEventListener("change", () => {
     changes: { from: 0, to: inputView.state.doc.length, insert: code },
   });
   examplesEl.value = "";
+});
+
+const sourceEl = document.getElementById("source");
+sourceEl.value = currentSource;
+sourceEl.addEventListener("change", async () => {
+  const next = sourceEl.value;
+  if (next === currentSource) return;
+  const prev = currentSource;
+  sourceEl.disabled = true;
+  setOverlay("loading", `Installing retrofy — ${SOURCES[next].label}…`);
+  try {
+    const pyodide = await pyodideReady;
+    await installRetrofy(pyodide, next, { force: true });
+    currentSource = next;
+    runConvert(inputView.state.doc.toString());
+  } catch (err) {
+    setStatus(`Install failed: ${err.message}`, "error");
+    setOverlay("error", `Install failed: ${err.message}`);
+    sourceEl.value = prev;
+  } finally {
+    sourceEl.disabled = false;
+  }
 });
 
 window.__playground = { inputView, outputView, pyodideReady };
