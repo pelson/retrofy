@@ -224,7 +224,7 @@ def test_lazy_from_single_name() -> None:
 def test_lazy_from_multiple_names_with_alias() -> None:
     # Module-level annotations touching lazy names are wrapped with
     # ``__lazy_reify__(...)`` at runtime AND duplicated under a
-    # ``if TYPE_CHECKING:`` clean stub so mypy sees the unwrapped
+    # ``if TYPE_CHECKING:`` clean stub so type checkers see the unwrapped
     # form (issue #45 phase 2b).
     _assert_transform(
         """
@@ -532,13 +532,22 @@ def test_lazy_modules_warning_with_lazy_keyword_still_rewrites() -> None:
     assert '__lazy_modules__ = {"os"}' in out
 
 
+_TC_MIRROR_COMMENT = (
+    "# retrofy: type-checking mirror of the def below; body is",
+    "# duplicated so type checkers see attribute assignments etc.",
+)
+
+
 def test_function_def_annotation_wrapped_with_type_checking_stub() -> None:
     # Regression coverage for issue #45. A function def whose
     # annotations touch a lazy name is duplicated: the ``if
-    # TYPE_CHECKING:`` branch carries the clean signature that mypy
-    # reads; the ``else:`` branch carries the runtime signature with
-    # ``__lazy_reify__(...)`` wraps, so ``typing.get_type_hints`` gets
-    # the reified real class at introspection time.
+    # TYPE_CHECKING:`` branch carries the clean signature that type
+    # checkers read; the ``else:`` branch carries the runtime
+    # signature with ``__lazy_reify__(...)`` wraps, so
+    # ``typing.get_type_hints`` gets the reified real class at
+    # introspection time. Both branches carry the full body — the
+    # stub form isn't ``...`` because that would hide attribute
+    # assignments inside methods (see retrofy#54).
     _assert_transform(
         """
         from __future__ import annotations
@@ -562,7 +571,10 @@ def test_function_def_annotation_wrapped_with_type_checking_stub() -> None:
             ),
             "",
             _block(
-                ["def do_it(x: typing.Optional[Foo]) -> Foo: ..."],
+                [
+                    *_TC_MIRROR_COMMENT,
+                    "def do_it(x: typing.Optional[Foo]) -> Foo: ...",
+                ],
                 [
                     "def do_it(x: typing.Optional[__lazy_reify__(Foo)]) -> __lazy_reify__(Foo): ...",
                 ],
@@ -575,10 +587,9 @@ def test_function_def_annotation_wrapped_with_type_checking_stub() -> None:
 
 
 def test_body_wrap_kept_alongside_type_checking_stub() -> None:
-    # Runtime uses in the function body still get wrapped — the stub
-    # in the ``if TYPE_CHECKING:`` branch is a bare ``...``, so the
-    # body only appears in the ``else:`` branch and doesn't need a
-    # clean form.
+    # Runtime uses in the function body get ``__lazy_reify__(...)``
+    # wraps; the ``if TYPE_CHECKING:`` mirror strips those wraps back
+    # out so type checkers see the plain body.
     _assert_transform(
         """
         from __future__ import annotations
@@ -598,7 +609,11 @@ def test_body_wrap_kept_alongside_type_checking_stub() -> None:
             ),
             "",
             _block(
-                ["def do_it(x: Foo) -> Foo: ..."],
+                [
+                    *_TC_MIRROR_COMMENT,
+                    "def do_it(x: Foo) -> Foo:",
+                    "    return Foo()",
+                ],
                 [
                     "def do_it(x: __lazy_reify__(Foo)) -> __lazy_reify__(Foo):",
                     "    return __lazy_reify__(Foo)()",
@@ -611,7 +626,7 @@ def test_body_wrap_kept_alongside_type_checking_stub() -> None:
 def test_module_level_annassign_is_type_checking_paired() -> None:
     # Bare module-level ``x: Foo`` also duplicates so the annotation
     # dict contains the real class at runtime (via the wrapped else
-    # branch) and mypy sees the clean form in the if branch.
+    # branch) and type checkers see the clean form in the if branch.
     _assert_transform(
         """
         lazy from typing import List
@@ -784,7 +799,7 @@ def test_in_function_bare_annassign_is_type_checking_paired() -> None:
     # declare a variable's type before a conditional assign) also
     # needs the TYPE_CHECKING/else pair. Otherwise phase 2's
     # ``__lazy_reify__(Foo)`` wrap ends up in the annotation slot
-    # and mypy rejects it with ``[valid-type]``.
+    # and type checkers reject it with ``[valid-type]``.
     _assert_transform(
         """
         lazy from some_pkg import Foo
@@ -837,6 +852,49 @@ def test_in_method_bare_annassign_is_type_checking_paired() -> None:
                 else:
                     z: __lazy_reify__(Foo)
                 del z
+        """,
+    )
+
+
+def test_type_checking_stub_keeps_def_body_for_attribute_inference() -> None:
+    # Retrofy#54: when the ``TYPE_CHECKING`` stub replaces a def's
+    # body with ``...``, type checkers lose sight of every attribute
+    # assigned in the body (e.g. ``self._x = x`` inside ``__init__``)
+    # — even attributes unrelated to any lazy-bound name, like
+    # ``self._y = 42``, become ``[attr-defined]`` at every read.
+    #
+    # Fix: the stub form is a full body duplicate with reify calls
+    # stripped throughout. Type checkers see the assignments and can
+    # infer attribute types normally. A leading comment inside the
+    # ``TYPE_CHECKING`` block flags the duplication so a reader
+    # doesn't wonder why the def appears twice.
+    _assert_transform(
+        """
+        lazy from somepkg import Foo
+
+        class Cls:
+            def __init__(self, x: Foo) -> None:
+                self._x = x
+                self._y = 42
+        """,
+        f"""
+        {_RUNTIME_IMPORT}
+        if typing.TYPE_CHECKING:
+            from somepkg import Foo
+        else:
+            Foo = __lazy_from__('somepkg', 'Foo', 'Foo')
+
+        class Cls:
+            if typing.TYPE_CHECKING:
+                # retrofy: type-checking mirror of the def below; body is
+                # duplicated so type checkers see attribute assignments etc.
+                def __init__(self, x: Foo) -> None:
+                    self._x = x
+                    self._y = 42
+            else:
+                def __init__(self, x: __lazy_reify__(Foo)) -> None:
+                    self._x = x
+                    self._y = 42
         """,
     )
 
