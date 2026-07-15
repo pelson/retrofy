@@ -1,0 +1,64 @@
+html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; }
+body { display: flex; flex-direction: column; }
+#topbar { display: flex; align-items: stretch; background: #222; color: #ddd; font: 12px monospace; }
+#status { padding: 4px 8px; flex: 1; }
+#status.ready { background: #063; }
+#status.error { background: #822; }
+#examples-label { display: flex; align-items: center; padding: 0 8px; gap: 6px; background: #333; }
+#examples { background: #111; color: #ddd; border: 1px solid #555; padding: 2px 4px; font: 12px monospace; }
+
+main { display: flex; flex: 1; min-height: 0; }
+.col { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; overflow: hidden; }
+.editor { flex: 1; min-height: 0; overflow: hidden; }
+.output-wrap { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
+.output-wrap .editor { opacity: 1; transition: opacity 100ms; }
+.output-wrap.stale .editor { opacity: 0.25; }
+
+#output-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  font: 14px system-ui, sans-serif;
+  padding: 12px;
+  text-align: center;
+}
+#output-overlay .banner {
+  background: rgba(255,255,255,0.9);
+  border: 1px solid #aaa;
+  border-radius: 6px;
+  padding: 10px 16px;
+  max-width: 80%;
+}
+#output-overlay.loading .banner { background: #eef; border-color: #559; color: #113; }
+#output-overlay.error .banner { background: #fee; border-color: #a44; color: #611; }
+
+.notes-box {
+  max-height: 40%;
+  overflow: auto;
+  border-top: 1px solid #ccc;
+  padding: 4px 8px;
+  font: 12px monospace;
+  white-space: pre-wrap;
+}
+#input-errors { background: #fff4f4; color: #822; }
+#output-notes { background: #f4f8ff; color: #036; }
+
+.resizer { background: #ddd; }
+.resizer:hover, .resizer:active { background: #888; }
+.resizer-v { width: 5px; cursor: col-resize; flex: 0 0 5px; }
+.resizer-h { height: 5px; cursor: row-resize; }
+
+#diff {
+  height: 30vh;
+  min-height: 40px;
+  overflow: auto;
+  font: 12px monospace;
+  padding: 4px 8px;
+  white-space: pre;
+}
+#diff .add { background: #d4fadd; }
+#diff .del { background: #fbd5d5; }
+#diff.stale { opacity: 0.3; transition: opacity 100ms; }

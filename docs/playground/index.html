@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>retrofy playground</title>
+    <link rel="stylesheet" href="style.css">
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <div id="topbar">
+      <div id="status">Loading…</div>
+      <label id="examples-label">
+        Load example:
+        <select id="examples">
+          <option value="">—</option>
+        </select>
+      </label>
+    </div>
+    <main>
+      <div class="col" id="input-col">
+        <section class="editor" id="input" aria-label="Input (Python 3.15)"></section>
+        <div class="notes-box" id="input-errors" aria-label="Syntax errors" hidden></div>
+      </div>
+      <div class="resizer resizer-v" id="resizer-cols" aria-label="Resize columns"></div>
+      <div class="col" id="output-col">
+        <div class="output-wrap">
+          <section class="editor" id="output" aria-label="Converted output"></section>
+          <div id="output-overlay" hidden></div>
+        </div>
+        <div class="notes-box" id="output-notes" aria-label="Conversion notes" hidden></div>
+      </div>
+    </main>
+    <div class="resizer resizer-h" id="resizer-diff" aria-label="Resize diff"></div>
+    <section id="diff" aria-label="Unified diff"></section>
+  </body>
+</html>

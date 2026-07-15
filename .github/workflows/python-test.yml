@@ -601,6 +601,35 @@ jobs:
         RETROFY_CONVERTER_PYTHON="$HOME/.cache/retrofy/converter-venv/bin/python" \
           /tmp/editable-venv/bin/pytest --assert=plain --pyargs example_project -ssvv
 
+  playground:
+    # Smoke-test docs/playground/: boot Pyodide in a headless browser,
+    # micropip-install retrofy from the main-branch dev index, exercise
+    # the debounced conversion path. Uses whatever dev retrofy the GH
+    # Pages site is serving, so no ``needs: build``.
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        # Playwright ships a greenlet wheel that isn't ABI-compatible
+        # with 3.15 yet; 3.11 is the newest interpreter that installs
+        # cleanly and can drive Chromium in this job.
+        python-version: "3.11"
+
+    - name: Install playwright + chromium
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install pytest playwright
+        python -m playwright install --with-deps chromium
+
+    - name: Run the playground smoke test
+      run: |
+        cd docs/playground
+        python -m pytest tests/ -ssvv
+
   pre-commit:
     runs-on: ubuntu-latest
 
