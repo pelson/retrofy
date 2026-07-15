@@ -827,6 +827,12 @@ def _duplicate_annotated_constructs(
 
     def _process_stmt(stmt):
         if isinstance(stmt, cst.FunctionDef):
+            # Recurse into the body first: in-function ``AnnAssign``
+            # statements (``x: Foo`` without a value) also need the
+            # TYPE_CHECKING/else pair even when the enclosing def's
+            # signature has no wrapped annotations.
+            new_body = _process_block(stmt.body)
+            stmt = stmt.with_changes(body=new_body)
             if _def_has_wrapped_annotation(stmt, reify_name):
                 # Take the def's leading blank lines and put them on
                 # the new ``if`` — otherwise they'd sit inside both
@@ -861,6 +867,10 @@ def _duplicate_annotated_constructs(
         if isinstance(stmt, cst.ClassDef):
             new_body = _process_block(stmt.body)
             return stmt.with_changes(body=new_body)
+        if isinstance(stmt, (cst.If, cst.For, cst.While, cst.With, cst.Try)):
+            # Compound statements that carry an ``IndentedBlock`` body
+            # can also nest annotation-carrying constructs. Recurse.
+            return _recurse_compound(stmt)
         return stmt
 
     def _process_block(block):
@@ -868,6 +878,38 @@ def _duplicate_annotated_constructs(
             new_stmts = tuple(_process_stmt(s) for s in block.body)
             return block.with_changes(body=new_stmts)
         return block
+
+    def _recurse_compound(stmt):
+        # Walk every body-carrying attribute on the compound stmt so
+        # nested constructs (AnnAssigns inside try/except/finally,
+        # etc.) go through phase 2b too.
+        changes = {}
+        for attr in ("body", "orelse", "finalbody"):
+            if not hasattr(stmt, attr):
+                continue
+            child = getattr(stmt, attr)
+            if isinstance(child, cst.IndentedBlock):
+                changes[attr] = _process_block(child)
+            elif isinstance(child, (cst.Else, cst.Finally)) and isinstance(
+                child.body,
+                cst.IndentedBlock,
+            ):
+                changes[attr] = child.with_changes(
+                    body=_process_block(child.body),
+                )
+        # ``Try`` also carries per-handler bodies in ``handlers``.
+        if isinstance(stmt, cst.Try) and stmt.handlers:
+            new_handlers = tuple(
+                h.with_changes(body=_process_block(h.body))
+                if isinstance(h.body, cst.IndentedBlock)
+                else h
+                for h in stmt.handlers
+            )
+            if any(nh is not oh for nh, oh in zip(new_handlers, stmt.handlers)):
+                changes["handlers"] = new_handlers
+        if not changes:
+            return stmt
+        return stmt.with_changes(**changes)
 
     new_body = tuple(_process_stmt(s) for s in module.body)
     return module.with_changes(body=new_body)
@@ -953,16 +995,18 @@ def _build_typing_import(alias: str | None) -> cst.SimpleStatementLine:
     )
 
 
-def _typing_safely_bound(module: cst.Module) -> bool:
-    """Return True iff ``typing`` at module scope is bound exclusively
-    by an unaliased ``import typing``.
+def _typing_is_shadowed(module: cst.Module) -> bool:
+    """Return True iff ``typing`` at module scope is bound to
+    something *other* than the stdlib module.
 
-    That's the one case where we can rewrite phase-1's mangled
-    placeholder back to the plain ``typing`` name without risk.
-    Anything else — no binding, an aliased import, a ``from`` import,
-    a rebinding assignment, a ``for typing in ...`` at module top,
-    etc. — means the user's ``typing`` isn't reliably the stdlib
-    module and we have to inject a mangled alias instead.
+    A ``typing`` binding is fine when every assignment to it comes
+    from an unaliased ``import typing`` (any number of those is OK —
+    they all bind to the same stdlib module). Anything else — an
+    aliased import (``import typing as t``), a ``from`` import
+    (``from x import typing``), a plain assignment (``typing = 5``),
+    a ``for typing in ...`` at module scope, etc. — means the name
+    ``typing`` is not reliably the stdlib module at the emit site,
+    and we have to fall back to a mangled alias.
     """
     wrapper = cst.metadata.MetadataWrapper(module)
     scopes = wrapper.resolve(cst.metadata.ScopeProvider)
@@ -974,25 +1018,42 @@ def _typing_safely_bound(module: cst.Module) -> bool:
     if global_scope is None:
         return False
 
-    assignments = list(global_scope["typing"])
-    if len(assignments) != 1:
-        return False
-    (only,) = assignments
-    if not isinstance(only, cst.metadata.ImportAssignment):
-        return False
-    # ``ImportAssignment.node`` is the outer ``Import`` / ``ImportFrom``
-    # statement rather than the specific alias — we have to walk its
-    # aliases and confirm one binds the bare name ``typing``.
-    node = only.node
-    if not isinstance(node, cst.Import):
-        return False
-    for alias in node.names:
-        if (
-            isinstance(alias.name, cst.Name)
-            and alias.name.value == "typing"
-            and alias.asname is None
+    for assignment in global_scope["typing"]:
+        if not isinstance(assignment, cst.metadata.ImportAssignment):
+            return True
+        # ``ImportAssignment.node`` is the outer ``Import`` /
+        # ``ImportFrom`` statement — walk its aliases to check if one
+        # binds the bare name ``typing`` unaliased.
+        node = assignment.node
+        if not isinstance(node, cst.Import):
+            return True
+        if not any(
+            isinstance(a.name, cst.Name)
+            and a.name.value == "typing"
+            and a.asname is None
+            for a in node.names
         ):
             return True
+    return False
+
+
+def _module_has_import_typing(module: cst.Module) -> bool:
+    """Return True if the module has a top-level, unaliased
+    ``import typing`` — so we don't need to inject a duplicate.
+    """
+    for stmt in module.body:
+        if not isinstance(stmt, cst.SimpleStatementLine):
+            continue
+        for inner in stmt.body:
+            if not isinstance(inner, cst.Import):
+                continue
+            for alias in inner.names:
+                if (
+                    isinstance(alias.name, cst.Name)
+                    and alias.name.value == "typing"
+                    and alias.asname is None
+                ):
+                    return True
     return False
 
 
@@ -1051,17 +1112,30 @@ def _inject_runtime_import(
         return source
 
     module = cst.parse_module(source)
-    if _typing_safely_bound(module):
-        # ``typing`` is already the stdlib module and never shadowed;
-        # collapse our placeholder back to the plain name and skip the
-        # injection.
+
+    # Decide whether emitted blocks reference plain ``typing`` or the
+    # mangled ``__lazy_typing__`` alias. Plain works whenever
+    # ``typing`` at module scope isn't bound to something other than
+    # the stdlib module; the mangled alias is only needed when the
+    # user's source actively shadows the name.
+    #
+    # ``ImportManager`` in ``import_utils`` is the closest existing
+    # helper but doesn't dedupe or handle aliases — the deeper
+    # refactor is tracked at #51. For now, ``typing`` gets injected
+    # in the plain case only if not already present, and the aliased
+    # case emits its own ``import typing as <mangled>``.
+    if _typing_is_shadowed(module):
+        typing_import: cst.SimpleStatementLine | None = _build_typing_import(
+            helpers.typing_module,
+        )
+    else:
         module = cst.ensure_type(
             module.visit(_RewritePlaceholderToTyping(helpers.typing_module)),
             cst.Module,
         )
-        inject_typing = False
-    else:
-        inject_typing = True
+        typing_import = (
+            None if _module_has_import_typing(module) else _build_typing_import(None)
+        )
 
     body = list(module.body)
     insert_at = 0
@@ -1071,8 +1145,8 @@ def _inject_runtime_import(
         insert_at += 1
 
     injected: list[cst.SimpleStatementLine] = []
-    if inject_typing:
-        injected.append(_build_typing_import(helpers.typing_module))
+    if typing_import is not None:
+        injected.append(typing_import)
     injected.append(_build_runtime_import(helpers, used))
 
     if insert_at < len(body):

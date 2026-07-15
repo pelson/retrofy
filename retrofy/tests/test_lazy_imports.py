@@ -50,14 +50,28 @@ def _norm(s: str) -> str:
 
 def _build_preamble(body: str) -> str:
     """Reconstruct the injected preamble for a body containing the
-    given helper aliases. Adds ``import typing as __lazy_typing__``
-    only when the body references the placeholder — the alias is
-    collapsed to plain ``typing`` when the source already has a safe
-    top-level ``import typing``.
+    given helper aliases.
+
+    * If the body has any ``__lazy_typing__`` reference, the source
+      was in the ``typing``-is-shadowed case and phase 3 injects
+      ``import typing as __lazy_typing__``.
+    * Else, if the body uses ``typing.TYPE_CHECKING``, phase 3 injects
+      a plain ``import typing`` (unless the fixture already provides
+      it — the test author handles that by inlining the ``import
+      typing`` line rather than the placeholder).
+    * Only the ``_retrofy_rt`` helpers whose mangled names appear in
+      the body are declared in the ``from ._retrofy_rt.lazy_imports
+      import ...`` line.
     """
     lines = []
+    body_lines = [line.strip() for line in body.splitlines()]
     if "__lazy_typing__" in body:
         lines.append("import typing as __lazy_typing__")
+    elif "typing.TYPE_CHECKING" in body and "import typing" not in body_lines:
+        # Only inject when the fixture doesn't already provide it;
+        # otherwise the retrofy runtime import is the only preamble
+        # line to inject and phase 3 skips the ``import typing`` dup.
+        lines.append("import typing")
     aliases = [
         f"{role} as {_BASE_HELPERS[role]}"
         for role in _BASE_HELPERS
@@ -70,7 +84,7 @@ def _build_preamble(body: str) -> str:
 def _block(
     tc_lines: list[str],
     rt_lines: list[str],
-    tc_name: str = "__lazy_typing__",
+    tc_name: str = "typing",
 ) -> str:
     """Format a per-statement ``if <tc_name>.TYPE_CHECKING: ...\\n
     else: ...`` block matching the transformer's emit shape.
@@ -89,6 +103,12 @@ def _expected(*sections: str) -> str:
 
 
 def _assert_transform(src: str, expected: str) -> None:
+    # Dedent the expected template first so plain-string f-string
+    # tests (which write the expected shape as literal indented code)
+    # work alongside ``_expected(*sections)`` tests. After dedent, the
+    # ``_RUNTIME_IMPORT`` marker sits at column 0 and gets replaced
+    # by the multi-line preamble string at column 0 too.
+    expected = _norm(expected)
     if _RUNTIME_IMPORT in expected:
         rest = expected.replace(_RUNTIME_IMPORT, "")
         expected = expected.replace(_RUNTIME_IMPORT, _build_preamble(rest))
@@ -665,6 +685,7 @@ def test_typing_alias_kept_when_typing_shadowed_by_for_loop() -> None:
             _block(
                 ["from mod import X"],
                 ["X = __lazy_from__('mod', 'X', 'X')"],
+                tc_name="__lazy_typing__",
             ),
             "",
             "x = __lazy_reify__(X)",
@@ -672,10 +693,12 @@ def test_typing_alias_kept_when_typing_shadowed_by_for_loop() -> None:
     )
 
 
-def test_typing_alias_kept_when_typing_import_is_aliased() -> None:
-    # ``import typing as t`` doesn't bind the bare name ``typing``, so
-    # phase 3 has to inject its own ``import typing as __lazy_typing__``
-    # rather than trusting the user's aliased import.
+def test_plain_typing_injected_when_aliased_import_present() -> None:
+    # ``import typing as t`` doesn't bind the bare name ``typing``,
+    # but it also doesn't shadow it — the name is simply unbound. So
+    # phase 3 injects a fresh ``import typing`` and emits plain
+    # ``typing.TYPE_CHECKING`` blocks. The user's ``import typing as
+    # t`` is left alone (they still use ``t`` for their own purposes).
     _assert_transform(
         """
         import typing as t
@@ -698,9 +721,10 @@ def test_typing_alias_kept_when_typing_import_is_aliased() -> None:
     )
 
 
-def test_typing_alias_kept_when_only_from_typing_import() -> None:
-    # ``from typing import X`` does not bind the name ``typing``; the
-    # libcst pass must inject its own alias.
+def test_plain_typing_injected_when_only_from_typing_import() -> None:
+    # ``from typing import Optional`` binds ``Optional``, not
+    # ``typing``. Phase 3 still injects a plain ``import typing``
+    # and emits ``typing.TYPE_CHECKING`` — no shadowing risk.
     _assert_transform(
         """
         from typing import Optional
@@ -724,12 +748,18 @@ def test_typing_alias_kept_when_only_from_typing_import() -> None:
 
 
 def test_typing_alias_suffix_bumps_on_collision() -> None:
-    # If the user's source already binds ``__lazy_typing__``, the
-    # ``typing`` alias must bump to ``__lazy_typing_2__`` etc. so we
-    # can't clobber the user's binding.
+    # The mangled ``__lazy_typing__`` alias only appears in the emit
+    # when ``typing`` is shadowed. If the user's source *also* binds
+    # the un-suffixed placeholder name, the alias must bump to
+    # ``__lazy_typing_2__`` so we can't clobber the user's binding.
     src = _norm(
         """
-        __lazy_typing__ = 'user-bound'
+        import typing
+
+        for typing in []:  # actively shadow ``typing``
+            pass
+
+        __lazy_typing__ = 'user-bound'  # collide with the placeholder
 
         lazy from mod import X
 
@@ -746,6 +776,118 @@ def test_typing_alias_suffix_bumps_on_collision() -> None:
     assert "if __lazy_typing__.TYPE_CHECKING:" not in out
     # User's literal binding is preserved verbatim.
     assert "__lazy_typing__ = 'user-bound'" in out
+
+
+def test_in_function_bare_annassign_is_type_checking_paired() -> None:
+    # Follow-up to phase 2b: a bare ``AnnAssign`` inside a function
+    # body (``x: Foo`` with no value — commonly used to forward-
+    # declare a variable's type before a conditional assign) also
+    # needs the TYPE_CHECKING/else pair. Otherwise phase 2's
+    # ``__lazy_reify__(Foo)`` wrap ends up in the annotation slot
+    # and mypy rejects it with ``[valid-type]``.
+    _assert_transform(
+        """
+        lazy from some_pkg import Foo
+
+        def f():
+            x: Foo
+            del x
+        """,
+        f"""
+        {_RUNTIME_IMPORT}
+        if typing.TYPE_CHECKING:
+            from some_pkg import Foo
+        else:
+            Foo = __lazy_from__('some_pkg', 'Foo', 'Foo')
+
+        def f():
+            if typing.TYPE_CHECKING:
+                x: Foo
+            else:
+                x: __lazy_reify__(Foo)
+            del x
+        """,
+    )
+
+
+def test_in_method_bare_annassign_is_type_checking_paired() -> None:
+    # Same shape but nested one level deeper — inside a class body's
+    # method body. Guards phase-2b recursion through both ClassDef
+    # and FunctionDef.
+    _assert_transform(
+        """
+        lazy from some_pkg import Foo
+
+        class C:
+            def m(self):
+                z: Foo
+                del z
+        """,
+        f"""
+        {_RUNTIME_IMPORT}
+        if typing.TYPE_CHECKING:
+            from some_pkg import Foo
+        else:
+            Foo = __lazy_from__('some_pkg', 'Foo', 'Foo')
+
+        class C:
+            def m(self):
+                if typing.TYPE_CHECKING:
+                    z: Foo
+                else:
+                    z: __lazy_reify__(Foo)
+                del z
+        """,
+    )
+
+
+def test_annassign_inside_try_except_finally_is_paired() -> None:
+    # Compound statements that carry ``IndentedBlock`` bodies (``if``,
+    # ``for``, ``while``, ``with``, ``try``) also nest annotation-
+    # carrying constructs. Phase 2b's ``_recurse_compound`` walks the
+    # body / orelse / finalbody / ExceptHandler bodies.
+    _assert_transform(
+        """
+        lazy from some_pkg import Foo
+
+        try:
+            a: Foo
+        except Exception:
+            b: Foo
+        else:
+            c: Foo
+        finally:
+            d: Foo
+        """,
+        f"""
+        {_RUNTIME_IMPORT}
+        if typing.TYPE_CHECKING:
+            from some_pkg import Foo
+        else:
+            Foo = __lazy_from__('some_pkg', 'Foo', 'Foo')
+
+        try:
+            if typing.TYPE_CHECKING:
+                a: Foo
+            else:
+                a: __lazy_reify__(Foo)
+        except Exception:
+            if typing.TYPE_CHECKING:
+                b: Foo
+            else:
+                b: __lazy_reify__(Foo)
+        else:
+            if typing.TYPE_CHECKING:
+                c: Foo
+            else:
+                c: __lazy_reify__(Foo)
+        finally:
+            if typing.TYPE_CHECKING:
+                d: Foo
+            else:
+                d: __lazy_reify__(Foo)
+        """,
+    )
 
 
 def test_multiple_lazy_statements() -> None:
