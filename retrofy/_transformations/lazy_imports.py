@@ -210,12 +210,13 @@ def _format_type_checking_block(
     runtime_lines: list[str],
 ) -> str:
     """Emit the ``if <placeholder>.TYPE_CHECKING: <real imports>\\n
-    else: <runtime bindings>`` block that mypy needs to resolve
-    lazy-bound names to their real types while keeping runtime
-    laziness.
+    else: <runtime bindings>`` block that type checkers need to
+    resolve lazy-bound names to their real types while keeping
+    runtime laziness.
 
-    The runtime branch is emitted in an ``else`` so mypy never sees
-    the lazy-helper assignment poison the name's type — see issue #45.
+    The runtime branch is emitted in an ``else`` so type checkers
+    never see the lazy-helper assignment poison the name's type — see
+    issue #45.
 
     The header uses a mangled dunder placeholder (not ``typing``)
     because the source hasn't been parsed into a CST yet — we can't
@@ -653,9 +654,9 @@ class _ReifyStripper(cst.CSTTransformer):
     """Replace ``<reify_name>(X)`` calls with the bare ``X`` argument.
 
     Used to build the ``if TYPE_CHECKING:`` clean-stub form of a
-    construct — the stub carries the original names (which mypy
-    resolves via the top-level TYPE_CHECKING re-import) instead of
-    the runtime ``__lazy_reify__(...)`` call.
+    construct — the stub carries the original names (which type
+    checkers resolve via the top-level TYPE_CHECKING re-import)
+    instead of the runtime ``__lazy_reify__(...)`` call.
     """
 
     def __init__(self, reify_name: str) -> None:
@@ -698,9 +699,10 @@ def _def_has_wrapped_annotation(
     ``<reify_name>(X)`` call.
 
     Only annotations are inspected — body-level wraps are not a
-    reason to duplicate the def under ``TYPE_CHECKING`` (mypy accepts
-    ``__lazy_reify__(X)`` at value positions via the generic ``T->T``
-    signature; only annotation slots trip ``[valid-type]``).
+    reason to duplicate the def under ``TYPE_CHECKING`` (type
+    checkers accept ``__lazy_reify__(X)`` at value positions via the
+    generic ``T->T`` signature; only annotation slots trip
+    ``[valid-type]``).
     """
     params = def_node.params
     for p in (
@@ -744,21 +746,34 @@ def _annassign_has_wrap(
     return False
 
 
+_TYPE_CHECKING_MIRROR_COMMENT_LINES = (
+    "# retrofy: type-checking mirror of the def below; body is",
+    "# duplicated so type checkers see attribute assignments etc.",
+)
+
+
 def _stub_from_def(
     def_node: cst.FunctionDef,
     reify_name: str,
 ) -> cst.FunctionDef:
-    """Build the ``if TYPE_CHECKING:`` stub form of *def_node*: strip
-    reify calls out of annotations and replace the body with an inline
-    ``...`` (single-line ``def f(...) -> T: ...`` — matches the
-    convention for stubs in ``.pyi`` files).
+    """Build the ``if TYPE_CHECKING:`` mirror of *def_node*.
+
+    Strip reify calls throughout (so annotations are clean for type
+    checkers), and keep the original body intact — a bare ``...``
+    stub would hide attribute assignments (``self._x = x`` inside
+    ``__init__``, etc.) and downstream ``[attr-defined]`` errors
+    would follow. See retrofy#54. A leading comment inside the
+    ``TYPE_CHECKING`` branch flags the duplication so a reader
+    doesn't wonder why the def appears twice.
     """
     stripped = def_node.visit(_ReifyStripper(reify_name))
     assert isinstance(stripped, cst.FunctionDef)
+    comment_lines = tuple(
+        cst.EmptyLine(comment=cst.Comment(text))
+        for text in _TYPE_CHECKING_MIRROR_COMMENT_LINES
+    )
     return stripped.with_changes(
-        body=cst.SimpleStatementSuite(
-            body=[cst.Expr(value=cst.Ellipsis())],
-        ),
+        leading_lines=comment_lines + tuple(stripped.leading_lines),
     )
 
 
@@ -813,8 +828,9 @@ def _duplicate_annotated_constructs(
     """Phase 2b: walk module and class bodies, replacing each
     annotation-carrying construct whose annotation contains a
     ``<reify>`` wrap with an ``if <tc>.TYPE_CHECKING: <clean stub>``
-    / ``else: <wrapped>`` pair. This gives mypy a clean signature to
-    read from the ``if`` branch while runtime executes the ``else``
+    / ``else: <wrapped>`` pair. This gives type checkers a clean
+    signature to read from the ``if`` branch while runtime executes
+    the ``else``
     branch's wrapped form (which reifies proxies at eval time so
     ``typing.get_type_hints`` / ``inspect.signature`` see the real
     class rather than a ``LazyProxy``).
