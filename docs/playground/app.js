@@ -59,20 +59,37 @@ function setStatus(text, cls = "") {
 async function installRetrofy(pyodide, source, { force = false } = {}) {
   const { label, index_urls, pre } = SOURCES[source];
   setStatus(`Installing retrofy — ${label}…`);
-  const micropip = pyodide.pyimport("micropip");
-  if (force) {
-    pyodide.runPython(
-      "import sys\n" +
-      "for _m in [m for m in sys.modules if m == 'retrofy' or m.startswith('retrofy.')]:\n" +
-      "    del sys.modules[_m]\n",
-    );
-  }
-  await micropip.install(
-    "retrofy",
-    { index_urls, reinstall: force, pre },
-  );
-  pyodide.runPython("from retrofy._converters import convert");
-  setStatus("Ready.", "ready");
+  // Drive the install from Python so kwargs semantics are unambiguous
+  // (JS -> PyProxy call semantics for kwargs are subtle and were
+  // previously swallowing index_urls/pre/reinstall). Uninstall first
+  // when switching sources so ``reinstall`` doesn't just re-fetch the
+  // already-resolved version instead of re-resolving from a new index.
+  const script = `
+import micropip
+_index_urls = ${JSON.stringify(index_urls)}
+_pre = ${pre ? "True" : "False"}
+_force = ${force ? "True" : "False"}
+if _force:
+    import sys
+    for _m in [m for m in sys.modules if m == 'retrofy' or m.startswith('retrofy.')]:
+        del sys.modules[_m]
+    try:
+        micropip.uninstall('retrofy')
+    except Exception:
+        pass
+await micropip.install(
+    'retrofy',
+    index_urls=_index_urls,
+    pre=_pre,
+    reinstall=_force,
+)
+from retrofy._converters import convert  # noqa: F401
+from retrofy._version import version as _rv
+from importlib.metadata import version as _mv
+f'retrofy {_rv} / libcst {_mv("libcst")}'
+`;
+  const versions = await pyodide.runPythonAsync(script);
+  console.log(`[retrofy playground] ${label}: ${versions}`);
 }
 
 async function bootPyodide() {
@@ -83,7 +100,14 @@ async function bootPyodide() {
   const pyodide = await loadPyodide({
     indexURL: `https://cdn.jsdelivr.net/pyodide/${PYODIDE_VERSION}/full/`,
   });
-  await pyodide.loadPackage("micropip");
+  // Load libcst from Pyodide's own emscripten wheel bundle (1.6.0 in
+  // Pyodide 0.29.4). If we don't, micropip resolves retrofy's ``libcst``
+  // dep from PyPI and lands on 0.3.23 — the last pure-Python release,
+  // which predates ``cst.TypeAlias`` and every other PEP 695 node.
+  await pyodide.loadPackage(["micropip", "libcst"], {
+    messageCallback: (msg) => setStatus(`Loading packages: ${msg}`),
+    errorCallback: (msg) => setStatus(`Loading packages: ${msg}`, "error"),
+  });
   await installRetrofy(pyodide, currentSource);
   return pyodide;
 }
