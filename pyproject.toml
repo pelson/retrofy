@@ -34,7 +34,7 @@ license = "Apache-2.0"
 
 # The core dependencies of the project.
 dependencies = [
-  "libcst",
+  "libcst>=1.1",  # cst.TypeAlias / TypeParam / TypeVar (PEP 695) landed in 1.1.0
   "setuptools-ext",  # TODO: Get rid of this dependency when there is a wheel interface elsewhere.
   "tomli; python_version < '3.11'",
   "tomlkit",
