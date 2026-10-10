@@ -82,6 +82,10 @@ and appropriate.
 
 * `A | B` -> `typing.Union[A, B]`
 
+* PEP-585 - built-in generics: `list[X]`, `dict[K, V]`, `tuple[...]`, `set[X]`,
+  `frozenset[X]` and `type[X]` -> `typing.List[X]`, `typing.Dict[K, V]`, etc.
+  (names which do not resolve to the built-in are left untouched)
+
 * PEP-572 - walrus operator
 
 * PEP-636 - match statements (structural pattern matching):

@@ -116,6 +116,7 @@ def test_convert():
     """)
 
     expected = textwrap.dedent("""
+    import typing
     def bar(a: typing.List[str]) -> typing.List[str]:
         return a
     """)
