@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import importlib
 import importlib.metadata
 import io
+import logging
 import os
 import pathlib
 import re
+import sys
 import tarfile
 import textwrap
 import zipfile
@@ -14,11 +17,11 @@ import pytest
 
 from retrofy import __version__ as RETROFY_VERSION
 from retrofy._pep517_hooks import (
-    EditableRuntimeRequirementError,
-    _assert_editable_dependencies_dynamic,
+    _dependencies_are_dynamic,
     _EmbeddedRuntimeCollisionError,
     _lower_requires_python,
     _read_target_python,
+    compatibility_via_import_hook,
     compatibility_via_rewrite,
     inject_runtime_requirement,
     lower_metadata_requires_python,
@@ -35,7 +38,9 @@ def _write_metadata(tmp_path: pathlib.Path, body: str) -> pathlib.Path:
     return dist_info
 
 
-def test_inject_runtime_requirement_adds_dep(tmp_path):
+def test_inject_runtime_requirement_adds_dep(tmp_path, monkeypatch):
+    # No pyproject.toml: the dependencies are the backend's (dynamic).
+    monkeypatch.chdir(tmp_path)
     dist_info = _write_metadata(
         tmp_path,
         """\
@@ -58,7 +63,12 @@ def test_inject_runtime_requirement_adds_dep(tmp_path):
     assert PINNED_REQUIRES in header
 
 
-def test_inject_runtime_requirement_adds_even_if_retrofy_already_present(tmp_path):
+def test_inject_runtime_requirement_adds_even_if_retrofy_already_present(
+    tmp_path,
+    monkeypatch,
+):
+    # No pyproject.toml: the dependencies are the backend's (dynamic).
+    monkeypatch.chdir(tmp_path)
     # A pre-existing retrofy line may carry environment markers that
     # leave the running interpreter without retrofy installed, so we
     # add an unconditional line regardless. Pip dedupes the rest.
@@ -145,7 +155,9 @@ def test_lower_metadata_requires_python_no_op_when_target_unset(tmp_path, monkey
     assert before == after
 
 
-def test_inject_runtime_requirement_no_body(tmp_path):
+def test_inject_runtime_requirement_no_body(tmp_path, monkeypatch):
+    # No pyproject.toml: the dependencies are the backend's (dynamic).
+    monkeypatch.chdir(tmp_path)
     dist_info = _write_metadata(
         tmp_path,
         """\
@@ -164,7 +176,7 @@ def _write_pyproject(tmp_path: pathlib.Path, body: str) -> pathlib.Path:
     return tmp_path
 
 
-def test_assert_editable_dependencies_dynamic_passes_when_dynamic(tmp_path):
+def test_dependencies_are_dynamic_when_listed(tmp_path):
     root = _write_pyproject(
         tmp_path,
         """\
@@ -174,24 +186,24 @@ def test_assert_editable_dependencies_dynamic_passes_when_dynamic(tmp_path):
         dynamic = ["dependencies"]
         """,
     )
-    _assert_editable_dependencies_dynamic(root)
+    assert _dependencies_are_dynamic(root)
 
 
-def test_assert_editable_dependencies_dynamic_raises_when_static(tmp_path):
+def test_dependencies_are_not_dynamic_when_static(tmp_path):
     root = _write_pyproject(
         tmp_path,
         """\
         [project]
         name = "some-project"
         version = "0.1"
-        dependencies = ["retrofy"]
+        dependencies = ["httpx"]
         """,
     )
-    with pytest.raises(EditableRuntimeRequirementError, match="dynamic"):
-        _assert_editable_dependencies_dynamic(root)
+    assert not _dependencies_are_dynamic(root)
 
 
-def test_assert_editable_dependencies_dynamic_raises_when_absent(tmp_path):
+def test_dependencies_are_not_dynamic_when_absent(tmp_path):
+    # PEP 621: a field neither given nor listed in dynamic is static (empty).
     root = _write_pyproject(
         tmp_path,
         """\
@@ -200,12 +212,17 @@ def test_assert_editable_dependencies_dynamic_raises_when_absent(tmp_path):
         version = "0.1"
         """,
     )
-    with pytest.raises(EditableRuntimeRequirementError):
-        _assert_editable_dependencies_dynamic(root)
+    assert not _dependencies_are_dynamic(root)
 
 
-def test_assert_editable_dependencies_dynamic_skips_when_no_pyproject(tmp_path):
-    _assert_editable_dependencies_dynamic(tmp_path)
+def test_dependencies_are_dynamic_without_a_project_table(tmp_path):
+    # Without [project], all the metadata is the backend's (e.g. setup.py).
+    root = _write_pyproject(tmp_path, "[tool.other]\n")
+    assert _dependencies_are_dynamic(root)
+
+
+def test_dependencies_are_dynamic_without_pyproject(tmp_path):
+    assert _dependencies_are_dynamic(tmp_path)
 
 
 def test_lower_requires_python_replaces_existing_line():
@@ -919,3 +936,166 @@ def test_lower_sdist_entry_point_registered():
     ]
     assert len(retrofy_eps) == 1
     assert retrofy_eps[0].value == "retrofy._pep517_hooks:lower_sdist"
+
+
+_EDITABLE_METADATA = (
+    "Metadata-Version: 2.1\n"
+    "Name: dummypkg\n"
+    "Version: 0.0.0\n"
+    "Requires-Dist: httpx\n"
+    "\n"
+    "Body.\n"
+)
+
+_STATIC_DEPENDENCIES_PYPROJECT = """\
+[project]
+name = "dummypkg"
+version = "0.0.0"
+dependencies = ["httpx"]
+"""
+
+
+def _make_editable_wheel(tmp_path: pathlib.Path) -> pathlib.Path:
+    whl = _make_minimal_wheel(tmp_path, _EDITABLE_METADATA)
+    with zipfile.ZipFile(whl, "a") as z:
+        z.writestr("dummypkg-0.0.0.dist-info/top_level.txt", "dummypkg\n")
+    return whl
+
+
+def _editable_pth(whl: pathlib.Path) -> str:
+    with zipfile.ZipFile(whl) as z:
+        return z.read("_retrofy.__editable_compat__.dummypkg.pth").decode("utf-8")
+
+
+def _editable_metadata(whl: pathlib.Path) -> str:
+    with zipfile.ZipFile(whl) as z:
+        return z.read("dummypkg-0.0.0.dist-info/METADATA").decode("utf-8")
+
+
+def test_compatibility_via_import_hook_injects_retrofy_when_dynamic(
+    tmp_path,
+    monkeypatch,
+):
+    _write_pyproject(
+        tmp_path,
+        """\
+        [project]
+        name = "dummypkg"
+        dynamic = ["dependencies"]
+        """,
+    )
+    monkeypatch.chdir(tmp_path)
+    whl = _make_editable_wheel(tmp_path)
+    compatibility_via_import_hook(whl)
+    assert PINNED_REQUIRES in _editable_metadata(whl)
+
+
+def test_compatibility_via_import_hook_leaves_static_dependencies_alone(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    _write_pyproject(tmp_path, _STATIC_DEPENDENCIES_PYPROJECT)
+    monkeypatch.chdir(tmp_path)
+    whl = _make_editable_wheel(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="retrofy.build"):
+        compatibility_via_import_hook(whl)
+    # The (static) dependencies are left as they are, the hook installed, and
+    # the project told that it must install retrofy itself.
+    assert _editable_metadata(whl) == _EDITABLE_METADATA
+    assert "dummypkg" in _editable_pth(whl)
+    assert "install retrofy" in caplog.text
+
+
+def test_inject_runtime_requirement_leaves_static_dependencies_alone(
+    tmp_path,
+    monkeypatch,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    _write_pyproject(project, _STATIC_DEPENDENCIES_PYPROJECT)
+    monkeypatch.chdir(project)
+    dist_info = _write_metadata(tmp_path, _EDITABLE_METADATA)
+    inject_runtime_requirement(dist_info)
+    assert (dist_info / "METADATA").read_text(encoding="utf-8") == _EDITABLE_METADATA
+
+
+def _run_pth(line: str) -> None:
+    # As site.addpackage runs a .pth line which starts with "import": a single
+    # line, exec'd in a function (so with separate globals and locals).
+    assert "\n" not in line.rstrip("\n")
+    exec(line, {}, {})
+
+
+@pytest.fixture
+def static_editable_wheel(tmp_path, monkeypatch) -> pathlib.Path:
+    _write_pyproject(tmp_path, _STATIC_DEPENDENCIES_PYPROJECT)
+    monkeypatch.chdir(tmp_path)
+    whl = _make_editable_wheel(tmp_path)
+    compatibility_via_import_hook(whl)
+    return whl
+
+
+def test_editable_pth_registers_the_hook(static_editable_wheel, monkeypatch):
+    import retrofy._meta_hook_converter as converter
+
+    registered = []
+    monkeypatch.setattr(converter, "register_hook", registered.append)
+    _run_pth(_editable_pth(static_editable_wheel))
+    assert registered == [["dummypkg"]]
+
+
+@pytest.fixture
+def retrofy_missing(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "retrofy._meta_hook_converter", None)
+    monkeypatch.setattr(sys, "meta_path", list(sys.meta_path))
+
+
+@pytest.mark.parametrize("module", ["dummypkg", "dummypkg.sub"])
+def test_editable_package_fails_to_import_when_retrofy_is_missing(
+    static_editable_wheel,
+    retrofy_missing,
+    module,
+):
+    _run_pth(_editable_pth(static_editable_wheel))
+    with pytest.raises(
+        ImportError,
+        match=r"dummypkg is installed in editable mode.*pip install retrofy",
+    ):
+        importlib.import_module(module)
+
+
+def test_other_imports_work_when_retrofy_is_missing(
+    static_editable_wheel,
+    retrofy_missing,
+    tmp_path,
+    monkeypatch,
+):
+    # Interpreter startup, and anything else (e.g. pip, to install retrofy),
+    # is unaffected.
+    _run_pth(_editable_pth(static_editable_wheel))
+    (tmp_path / "othermod_for_retrofy_test.py").write_text("VALUE = 1\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "othermod_for_retrofy_test", raising=False)
+    assert importlib.import_module("othermod_for_retrofy_test").VALUE == 1
+
+
+def test_only_the_editable_package_is_refused_when_retrofy_is_missing(
+    static_editable_wheel,
+    retrofy_missing,
+):
+    _run_pth(_editable_pth(static_editable_wheel))
+    with pytest.raises(ModuleNotFoundError) as exc_info:
+        importlib.import_module("dummypkgextra")
+    assert "retrofy" not in str(exc_info.value)
+
+
+def test_editable_pth_installs_one_finder_when_run_repeatedly(
+    static_editable_wheel,
+    retrofy_missing,
+):
+    # site may run a .pth line more than once (e.g. in some virtualenvs).
+    before = len(sys.meta_path)
+    for _ in range(2):
+        _run_pth(_editable_pth(static_editable_wheel))
+    assert len(sys.meta_path) == before + 1

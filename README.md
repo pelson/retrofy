@@ -99,6 +99,22 @@ Note that the source still declares `requires-python = ">=3.13"`, so installing
 from an sdist on Python 3.9 will fail loudly at parse time — that's expected, since
 the source contains syntax that 3.9 cannot parse. Only the *wheel* has been lowered.
 
+### Editable installs
+
+An editable install converts the code at import time (via a `.pth` import hook),
+so it needs retrofy at runtime. Whether retrofy adds itself to the editable
+install's dependencies follows `pyproject.toml`, as PEP 621 requires:
+
+* `dependencies` listed in `[project] dynamic` (fully dynamic, or
+  [PEP 808](https://peps.python.org/pep-0808/) partially dynamic, where your
+  build backend supports it): retrofy adds `Requires-Dist: retrofy`.
+* Static `dependencies`: retrofy leaves them alone (and says so in the build
+  output), so install retrofy yourself in the environment of the editable
+  install.
+
+If retrofy is missing, importing the package fails with an `ImportError` which
+says how to fix it. Interpreter startup, and other imports, are unaffected.
+
 ### Editable installs on Python 3.7/3.8
 
 `libcst` does not install on 3.7/3.8, so retrofy delegates per-file conversion to
