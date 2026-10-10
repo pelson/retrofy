@@ -138,11 +138,16 @@ interpreter running them while keeping full `assert` introspection.
 For all transformations, necessary imports (`typing`, `collections.abc`, etc.) will be injected where necessary
 and appropriate.
 
-* PEP-604 - union types in annotations, `type` statement values and type parameter
-  bounds (at any nesting depth):
-  * `A | B | C` -> `typing.Union[A, B, C]`
-  * `A | None` -> `typing.Optional[A]`
-  * `list[int | None]` -> `typing.List[typing.Optional[int]]`
+* PEP-604 - union types:
+  * In annotations, `type` statement values and type parameter bounds (at any
+    nesting depth):
+    * `A | B | C` -> `typing.Union[A, B, C]`
+    * `A | None` -> `typing.Optional[A]`
+    * `list[int | None]` -> `typing.List[typing.Optional[int]]`
+  * In `isinstance` / `issubclass`:
+    `isinstance(x, A | B | None)` -> `isinstance(x, (A, B, type(None)))`
+  * Elsewhere, when every operand is certainly a type (a built-in class, `None`
+    or a `typing` construct): `MaybeInt = int | None` -> `MaybeInt = typing.Optional[int]`
 
 * PEP-585 - built-in generics: `list[X]`, `dict[K, V]`, `tuple[...]`, `set[X]`,
   `frozenset[X]` and `type[X]` -> `typing.List[X]`, `typing.Dict[K, V]`, etc.
@@ -199,9 +204,12 @@ and appropriate.
 
 ## Known limitations
 
-* PEP-604 unions are only lowered where the expression is known to be a type
-  (annotations, `type` statement values, type parameter bounds). Elsewhere, such
-  as `isinstance(x, int | str)` or `Alias = int | None`, `|` may equally be a
-  bitwise-or or set union, so it is left as-is and requires Python 3.10+ when
-  used on types.
+* Outside annotations and `isinstance` / `issubclass`, a PEP-604 union such as
+  `Alias = A | B` is left as-is unless every operand is certainly a type. Without
+  knowing what `A` and `B` are, `|` may equally be a bitwise-or (e.g. enum flags)
+  or a set union.
+* A runtime union which is lowered becomes a `typing.Union`, which `isinstance`
+  rejects before Python 3.10. So `MaybeInt = int | None` followed by
+  `isinstance(x, MaybeInt)` still fails there; spell the union out in the
+  `isinstance` call instead.
 * String (forward-reference) annotations are not rewritten.
