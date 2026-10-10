@@ -1,7 +1,14 @@
+import builtins
 import dataclasses
 
 import libcst as cst
 import libcst.matchers as m
+from libcst.metadata import (
+    BuiltinAssignment,
+    QualifiedNameProvider,
+    QualifiedNameSource,
+    ScopeProvider,
+)
 
 from ._transformations import (
     collections_abc,
@@ -48,6 +55,44 @@ def _parens_are_simple(node: cst.BaseExpression) -> bool:
     return all(_is_simple(lp.whitespace_after) for lp in node.lpar) and all(
         _is_simple(rp.whitespace_before) for rp in node.rpar
     )
+
+
+def _is_bitor(node: cst.BaseExpression) -> bool:
+    return isinstance(node, cst.BinaryOperation) and isinstance(
+        node.operator,
+        cst.BitOr,
+    )
+
+
+def _flatten_bitor(
+    node: cst.BaseExpression,
+) -> tuple[list[cst.BaseExpression], list[cst.Comma]]:
+    """The operands of a ``|`` chain and the commas which will replace each ``|``."""
+    if not _is_bitor(node):
+        return [node], []
+    assert isinstance(node, cst.BinaryOperation)
+    left_members, left_commas = (
+        _flatten_bitor(node.left)
+        if _parens_are_simple(node.left)
+        else ([node.left], [])
+    )
+    right_members, right_commas = (
+        _flatten_bitor(node.right)
+        if _parens_are_simple(node.right)
+        else ([node.right], [])
+    )
+    return (
+        left_members + right_members,
+        left_commas + [_comma_for(node.operator)] + right_commas,  # type: ignore[arg-type]
+    )
+
+
+# Names which, when they resolve to the built-in, are certainly classes.
+_BUILTIN_CLASSES = frozenset(
+    name
+    for name, value in vars(builtins).items()
+    if isinstance(value, type) and not name.startswith("_")
+)
 
 
 class _UnionLowerer(cst.CSTTransformer):
@@ -136,10 +181,84 @@ class _UnionLowerer(cst.CSTTransformer):
 
 
 class TypingTransformer(cst.CSTTransformer):
-    def __init__(self, scope):
-        self._scope = scope
+    METADATA_DEPENDENCIES = (QualifiedNameProvider, ScopeProvider)
+
+    def __init__(self) -> None:
+        super().__init__()
         self._require_typing = False
         self.import_manager = EnhancedImportManager()
+        # Depth within annotations / PEP 695 type expressions, whose unions
+        # are lowered as a whole on leaving.
+        self._type_context = 0
+        # The ``|``-bearing second arguments of isinstance / issubclass.
+        self._isinstance_args: set[int] = set()
+        # Runtime ``|`` chains whose operands are all certainly types.
+        self._runtime_unions: set[int] = set()
+
+    def _qualified_names(self, node: cst.CSTNode) -> set[str]:
+        return {
+            name.name
+            for name in self.get_metadata(QualifiedNameProvider, node, set())
+            if name.source != QualifiedNameSource.LOCAL
+        }
+
+    def _is_builtin(self, node: cst.BaseExpression, names: frozenset[str]) -> bool:
+        return isinstance(node, cst.Name) and any(
+            qn == f"builtins.{node.value}" and node.value in names
+            for qn in self._qualified_names(node)
+        )
+
+    def _is_certainly_type(self, node: cst.BaseExpression) -> bool:
+        """Whether ``node`` can only evaluate to a type (so ``|`` is a union)."""
+        if _is_bitor(node):
+            members, _ = _flatten_bitor(node)
+            return all(self._is_certainly_type(m) for m in members)
+        if isinstance(node, cst.Name) and node.value == "None":
+            return True
+        if isinstance(node, cst.Subscript):
+            node = node.value
+        if self._is_builtin(node, _BUILTIN_CLASSES):
+            return True
+        # ``typing.Any``, ``typing.List[int]`` (including from the PEP 585 pass).
+        return isinstance(node, (cst.Name, cst.Attribute)) and any(
+            qn.startswith("typing.") for qn in self._qualified_names(node)
+        )
+
+    def _none_type(self, node: cst.CSTNode) -> cst.BaseExpression:
+        """``type(None)``, unless ``type`` is shadowed where ``node`` is."""
+        scope = self.get_metadata(ScopeProvider, node, None)
+        if scope is not None and all(
+            isinstance(a, BuiltinAssignment) for a in scope["type"]
+        ):
+            return cst.Call(cst.Name("type"), [cst.Arg(cst.Name("None"))])
+        return cst.Attribute(cst.Name("None"), cst.Name("__class__"))
+
+    def _isinstance_form(
+        self,
+        expr: cst.BaseExpression,
+        call: cst.Call,
+    ) -> cst.BaseExpression:
+        """``int | None`` -> ``(int, type(None))``, recursing into tuples."""
+        if isinstance(expr, cst.Tuple):
+            return expr.with_changes(
+                elements=[
+                    el.with_changes(value=self._isinstance_form(el.value, call))
+                    for el in expr.elements
+                ],
+            )
+        if not _is_bitor(expr):
+            return expr
+        members, commas = _flatten_bitor(expr)
+        elements = []
+        for member, comma in zip(members, commas + [cst.MaybeSentinel.DEFAULT]):
+            if isinstance(member, cst.Name) and member.value == "None":
+                member = self._none_type(call)
+            else:
+                member = self._isinstance_form(member, call)
+            elements.append(cst.Element(member, comma=comma))
+        if expr.lpar:
+            return cst.Tuple(elements, lpar=expr.lpar, rpar=expr.rpar)
+        return cst.Tuple(elements)
 
     def _lower(self, expr: cst.BaseExpression) -> cst.BaseExpression:
         lowerer = _UnionLowerer()
@@ -149,11 +268,21 @@ class TypingTransformer(cst.CSTTransformer):
             return new_expr
         return expr
 
+    def visit_Annotation(self, node: cst.Annotation) -> None:
+        self._type_context += 1
+
+    def visit_TypeAlias(self, node: cst.TypeAlias) -> None:
+        self._type_context += 1
+
+    def visit_TypeVar(self, node: cst.TypeVar) -> None:
+        self._type_context += 1
+
     def leave_Annotation(
         self,
         node: cst.Annotation,
         updated_node: cst.Annotation,
     ) -> cst.Annotation:
+        self._type_context -= 1
         return updated_node.with_changes(
             annotation=self._lower(updated_node.annotation),
         )
@@ -165,6 +294,7 @@ class TypingTransformer(cst.CSTTransformer):
         node: cst.TypeAlias,
         updated_node: cst.TypeAlias,
     ) -> cst.TypeAlias:
+        self._type_context -= 1
         return updated_node.with_changes(value=self._lower(updated_node.value))
 
     def leave_TypeVar(
@@ -172,9 +302,58 @@ class TypingTransformer(cst.CSTTransformer):
         node: cst.TypeVar,
         updated_node: cst.TypeVar,
     ) -> cst.TypeVar:
+        self._type_context -= 1
         if updated_node.bound is None:
             return updated_node
         return updated_node.with_changes(bound=self._lower(updated_node.bound))
+
+    # Runtime positions. In the second argument of isinstance / issubclass
+    # a ``|`` can only be a union of types, and before 3.10 the equivalent
+    # is a tuple (``typing.Union`` is rejected there too).
+    def visit_Call(self, node: cst.Call) -> None:
+        if (
+            len(node.args) == 2
+            and self._is_builtin(node.func, frozenset({"isinstance", "issubclass"}))
+            and not node.args[1].keyword
+            and node.args[1].star == ""
+        ):
+            self._isinstance_args.add(id(node.args[1]))
+
+    def visit_Arg(self, node: cst.Arg) -> bool:
+        # Handled as a whole by leave_Call.
+        return id(node) not in self._isinstance_args
+
+    def leave_Call(self, original_node: cst.Call, updated_node: cst.Call) -> cst.Call:
+        if len(original_node.args) != 2:
+            return updated_node
+        if id(original_node.args[1]) not in self._isinstance_args:
+            return updated_node
+        arg = updated_node.args[1]
+        new_value = self._isinstance_form(arg.value, original_node)
+        if new_value is arg.value:
+            return updated_node
+        return updated_node.with_changes(
+            args=[updated_node.args[0], arg.with_changes(value=new_value)],
+        )
+
+    # Elsewhere ``a | b`` may be a bitwise-or or set union, so it is only
+    # lowered (to ``typing.Union``) when every operand is certainly a type.
+    def visit_BinaryOperation(self, node: cst.BinaryOperation) -> bool:
+        if self._type_context or not _is_bitor(node):
+            return True
+        if self._is_certainly_type(node):
+            self._runtime_unions.add(id(node))
+            return False
+        return True
+
+    def leave_BinaryOperation(
+        self,
+        original_node: cst.BinaryOperation,
+        updated_node: cst.BinaryOperation,
+    ) -> cst.BaseExpression:
+        if id(original_node) in self._runtime_unions:
+            return self._lower(updated_node)
+        return updated_node
 
     def leave_Module(self, node: cst.Module, updated_node: cst.Module) -> cst.Module:
         if self._require_typing:
@@ -198,11 +377,11 @@ def convert_union(module: cst.Module) -> cst.Module:
 
     """
 
-    wrapper = cst.metadata.MetadataWrapper(module)
-    metadata = wrapper.resolve(cst.metadata.ScopeProvider)
-
-    transformer = TypingTransformer(metadata)
-    return module.visit(transformer)
+    # Scope analysis is comparatively expensive; skip it when there is no
+    # ``|`` to lower.
+    if not m.findall(module, m.BitOr()):
+        return module
+    return cst.MetadataWrapper(module).visit(TypingTransformer())
 
 
 def convert_sequence_subscript(module: cst.Module) -> cst.Module:

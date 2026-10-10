@@ -1,3 +1,4 @@
+import sys
 import textwrap
 
 import libcst as cst
@@ -204,3 +205,80 @@ def test_convert():
     """)
     result = _converters.convert(test_case_source)
     assert result == expected
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        # isinstance / issubclass: a tuple, as typing.Union is rejected < 3.10.
+        ("isinstance(x, int | str)", "isinstance(x, (int, str))"),
+        ("isinstance(x, int | None)", "isinstance(x, (int, type(None)))"),
+        ("issubclass(C, A | B | None)", "issubclass(C, (A, B, type(None)))"),
+        ("isinstance(x, (int | str))", "isinstance(x, (int, str))"),
+        ("isinstance(x, (int | str, bytes))", "isinstance(x, ((int, str), bytes))"),
+        ("isinstance(x, Alias)", "isinstance(x, Alias)"),
+        # Elsewhere, only when every operand is certainly a type.
+        ("MaybeInt = int | None", "MaybeInt = typing.Optional[int]"),
+        ("Num = int | float | None", "Num = typing.Union[int, float, None]"),
+        ("Opt = typing.Any | None", "Opt = typing.Optional[typing.Any]"),
+        ("Lst = list[int] | None", "Lst = typing.Optional[typing.List[int]]"),
+        ("flags = READ | WRITE", "flags = READ | WRITE"),
+        ("mixed = int | thing", "mixed = int | thing"),
+        ("both = {1} | {2}", "both = {1} | {2}"),
+        ("n = 1 | 2", "n = 1 | 2"),
+    ],
+)
+def test_runtime_union_lowering(source, expected):
+    result = _converters.convert(f"import typing\n{source}\n")
+    assert result.splitlines()[-1] == expected
+
+
+def test_runtime_union_lowering_respects_shadowing():
+    test_case_source = textwrap.dedent("""
+    def no_builtin_type(type, x):
+        return isinstance(x, int | None)
+
+    def no_builtin_int(int):
+        return int | None
+    """)
+    expected = textwrap.dedent("""
+    def no_builtin_type(type, x):
+        return isinstance(x, (int, None.__class__))
+
+    def no_builtin_int(int):
+        return int | None
+    """)
+    assert _converters.convert(test_case_source) == expected
+
+
+_ISINSTANCE_UNION_SOURCE = textwrap.dedent("""
+def check(x):
+    return (
+        isinstance(x, int | None),
+        isinstance(x, str | bytes | None),
+        isinstance(x, (float | None, bytes)),
+        issubclass(type(x), int | str),
+    )
+""")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (1, (True, False, False, True)),
+        ("a", (False, True, False, True)),
+        (None, (True, True, True, False)),
+        (1.5, (False, False, True, False)),
+        (b"b", (False, True, True, False)),
+        (True, (True, False, False, True)),
+    ],
+)
+def test_runtime_union_isinstance_equivalence(value, expected):
+    converted: dict = {}
+    exec(_converters.convert(_ISINSTANCE_UNION_SOURCE), converted)
+    assert converted["check"](value) == expected
+    if sys.version_info >= (3, 10):
+        # The unconverted source only runs on 3.10+.
+        native: dict = {}
+        exec(_ISINSTANCE_UNION_SOURCE, native)
+        assert native["check"](value) == expected
