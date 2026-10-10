@@ -42,6 +42,9 @@ class _BuiltinGenericsTransformer(cst.CSTTransformer):
         original_node: cst.Subscript,
         updated_node: cst.Subscript,
     ) -> cst.Subscript:
+        # Only a subscripted built-in (``list[...]``) is rewritten: other uses
+        # (``list()``, ``isinstance(x, list)``, ``mapping[list]``) are not
+        # visited here, or are not the value being subscripted.
         value = original_node.value
         if not isinstance(value, cst.Name) or value.value not in _FALLBACKS:
             return updated_node

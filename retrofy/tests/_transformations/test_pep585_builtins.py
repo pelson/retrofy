@@ -75,6 +75,8 @@ def test_unsubscripted_builtins_are_untouched() -> None:
     x = list()
     y = dict
     z = type(x)
+    isinstance(x, list)
+    w = mapping[list]
     """)
     assert _t(src) == src
 
