@@ -1,10 +1,30 @@
 from __future__ import annotations
 
+import typing
 from typing import List, Optional, Tuple, Union
 
 import libcst as cst
+from libcst.metadata import QualifiedNameProvider, QualifiedNameSource
 
 from .import_utils import ImportManager
+
+# Built-ins whose class pattern takes a single positional sub-pattern that
+# is matched against the subject itself (PEP 634): ``case int(n):``.
+_SELF_MATCHING_BUILTINS = frozenset(
+    {
+        "bool",
+        "bytearray",
+        "bytes",
+        "dict",
+        "float",
+        "frozenset",
+        "int",
+        "list",
+        "set",
+        "str",
+        "tuple",
+    },
+)
 
 
 class VariableSubstituter(cst.CSTTransformer):
@@ -54,9 +74,22 @@ class MatchStatementTransformer(cst.CSTTransformer):
     - Class patterns require explicit isinstance checks
     """
 
+    METADATA_DEPENDENCIES = (QualifiedNameProvider,)
+
     def __init__(self):
         super().__init__()
         self.import_manager = ImportManager()
+
+    def _is_self_matching(self, pattern: cst.MatchClass) -> bool:
+        cls = pattern.cls
+        if not isinstance(cls, cst.Name) or cls.value not in _SELF_MATCHING_BUILTINS:
+            return False
+        names = self.get_metadata(QualifiedNameProvider, cls, set())
+        return any(
+            name.source == QualifiedNameSource.BUILTIN
+            and name.name == f"builtins.{cls.value}"
+            for name in names
+        )
 
     def _create_optimized_isinstance_check(
         self,
@@ -100,7 +133,13 @@ class MatchStatementTransformer(cst.CSTTransformer):
     ) -> Union[cst.If, cst.SimpleStatementLine, cst.IndentedBlock]:
         """Transform a match statement into if/elif/else chains."""
         subject = updated_node.subject
-        cases = updated_node.cases
+        # Patterns are never rewritten by this transformer, so take them from
+        # the original tree where scope metadata (``_is_self_matching``) is
+        # available.
+        cases = [
+            case.with_changes(pattern=original.pattern)
+            for case, original in zip(updated_node.cases, original_node.cases)
+        ]
 
         if not cases:
             # Empty match - just return the subject as a statement
@@ -143,7 +182,10 @@ class MatchStatementTransformer(cst.CSTTransformer):
 
         for case in reversed(expanded_cases):
             # Check if this case needs a __match_args__ error check
-            if isinstance(case.pattern, cst.MatchClass) and case.pattern.patterns:
+            if isinstance(case.pattern, cst.MatchClass) and (
+                len(case.pattern.patterns) > 1
+                or (case.pattern.patterns and not self._is_self_matching(case.pattern))
+            ):
                 # Build the normal case statement first
                 case_stmt = self._build_case_condition(subject, case)
 
@@ -961,11 +1003,26 @@ class MatchStatementTransformer(cst.CSTTransformer):
         )
         conditions.append(isinstance_check)
 
+        if self._is_self_matching(pattern) and len(pattern.patterns) == 1:
+            # ``case int(n):`` matches the sub-pattern against the subject.
+            # (More than one positional sub-pattern is a TypeError, raised by
+            # the separate error case.)
+            nested_condition, nested_assignments = self._pattern_to_condition(
+                subject,
+                pattern.patterns[0].value,
+            )
+            if nested_condition:
+                conditions.append(nested_condition)
+            assignments.extend(nested_assignments)
+            positional: typing.Sequence[cst.MatchSequenceElement] = ()
+        else:
+            positional = pattern.patterns
+
         # For positional patterns, validation is now handled in a separate error case
         # So we can process patterns normally here
 
         # Handle positional patterns first
-        for i, element in enumerate(pattern.patterns):
+        for i, element in enumerate(positional):
             if isinstance(element, cst.MatchSequenceElement):
                 # Positional pattern: Point(x, 0)
                 # Use __match_args__ to get the correct attribute name
@@ -1159,6 +1216,30 @@ class MatchStatementTransformer(cst.CSTTransformer):
         """Build an if statement that checks for __match_args__ errors."""
         num_positional = len(pattern.patterns)
         cls_name = getattr(pattern.cls, "value", "UnknownClass")
+
+        if self._is_self_matching(pattern):
+            # Self-matching built-ins accept exactly one positional sub-pattern.
+            error_msg = f"{cls_name}() accepts 1 positional sub-pattern ({num_positional} given)"
+            return cst.If(
+                test=cst.Call(
+                    cst.Name("isinstance"),
+                    [cst.Arg(subject), cst.Arg(pattern.cls)],
+                ),
+                body=cst.IndentedBlock(
+                    [
+                        cst.SimpleStatementLine(
+                            [
+                                cst.Raise(
+                                    cst.Call(
+                                        cst.Name("TypeError"),
+                                        [cst.Arg(cst.SimpleString(f'"{error_msg}"'))],
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+            )
 
         # Create condition: isinstance(subject, cls) and not (hasattr(cls, '__match_args__') and len(cls.__match_args__) >= n)
         isinstance_check = cst.Call(

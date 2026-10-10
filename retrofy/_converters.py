@@ -1,6 +1,7 @@
 import dataclasses
 
 import libcst as cst
+import libcst.matchers as m
 
 from ._transformations import (
     collections_abc,
@@ -221,7 +222,13 @@ def convert_type_alias(module: cst.Module) -> cst.Module:
 
 
 def convert_match_statement(module: cst.Module) -> cst.Module:
-    return module.visit(match_statement.MatchStatementTransformer())
+    # Scope analysis is comparatively expensive; skip it when there is no
+    # ``match`` statement to lower.
+    if not m.findall(module, m.Match()):
+        return module
+    return cst.MetadataWrapper(module).visit(
+        match_statement.MatchStatementTransformer(),
+    )
 
 
 def convert_dataclass(module: cst.Module) -> cst.Module:

@@ -1607,7 +1607,8 @@ match_statement_cases = [
         if isinstance(value, int):
             raise TypeError("int() accepts 1 positional sub-pattern (2 given)")
         elif isinstance(value, int):
-            a = value
+            a = getattr(value, int.__match_args__[0])
+            b = getattr(value, int.__match_args__[1])
             return "unreachable"
         else:
             return "other"
@@ -1634,11 +1635,46 @@ match_statement_cases = [
                 ),
             ),
         ],
-        conversion_markers=[
-            pytest.mark.xfail(
-                strict=True,
-                reason="#59: self-matching built-in class patterns",
-            ),
+    ),
+    MatchTestCase(
+        name="test_shadowed_builtin_class_pattern",
+        description=(
+            "A class pattern on a name which shadows a self-matching built-in "
+            "is an ordinary class pattern (uses __match_args__)."
+        ),
+        source=textwrap.dedent("""
+    class int:
+        __match_args__ = ("real",)
+
+        def __init__(self, real):
+            self.real = real
+
+    def unwrap(value):
+        match value:
+            case int(n):
+                return n
+            case _:
+                return None
+    """),
+        expected=textwrap.dedent("""
+    class int:
+        __match_args__ = ("real",)
+
+        def __init__(self, real):
+            self.real = real
+
+    def unwrap(value):
+        if isinstance(value, int) and not (hasattr(int, "__match_args__") and len(int.__match_args__) >= 1):
+            raise TypeError("int() accepts 0 positional sub-patterns (1 given)")
+        elif isinstance(value, int):
+            n = getattr(value, int.__match_args__[0])
+            return n
+        else:
+            return None
+    """),
+        test_calls=[
+            ("unwrap(int(4))", 4),
+            ("unwrap(4)", None),
         ],
     ),
     MatchTestCase(

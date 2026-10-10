@@ -175,6 +175,7 @@ and appropriate.
   * Sequence patterns: `case [x, y]:` -> `if isinstance(value, collections.abc.Sequence) and not isinstance(value, str) and len(value) == 2: x, y = value`
   * Mapping patterns: `case {"key": value}:` -> `if isinstance(value, dict) and "key" in value: value = value["key"]`
   * Class patterns: `case Point(x=0, y=y):` -> `if isinstance(value, Point) and value.x == 0: y = value.y`
+  * Built-in type patterns: `case int(n):` -> `if isinstance(value, int): n = value`
   * Guard clauses: `case x if x > 0:` -> `if x > 0: x = value`
   * OR patterns: `case 1 | 2:` -> `if value in (1, 2):`
   * Wildcard patterns: `case _:` -> `else:`
