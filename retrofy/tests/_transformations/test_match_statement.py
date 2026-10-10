@@ -1550,6 +1550,98 @@ match_statement_cases = [
         ],
     ),
     MatchTestCase(
+        name="test_self_matching_builtin_patterns",
+        description=(
+            "Class patterns on the eleven self-matching built-ins (int(n), "
+            "str(s), ...) match their single positional sub-pattern against "
+            "the subject itself (issue #59)."
+        ),
+        source=textwrap.dedent("""
+    def describe(value):
+        match value:
+            case bool(b):
+                return f"bool {b}"
+            case int(0):
+                return "zero"
+            case int(n) if n < 0:
+                return f"negative {n}"
+            case str(s) | bytes(s):
+                return f"text {s!r}"
+            case [float(x), float(y)]:
+                return f"point {x}, {y}"
+            case _:
+                return "other"
+
+    def too_many(value):
+        match value:
+            case int(a, b):
+                return "unreachable"
+            case _:
+                return "other"
+    """),
+        expected=textwrap.dedent("""
+    import collections.abc
+    def describe(value):
+        if isinstance(value, bool):
+            b = value
+            return f"bool {b}"
+        elif isinstance(value, int) and value == 0:
+            return "zero"
+        elif isinstance(value, int) and value < 0:
+            n = value
+            return f"negative {n}"
+        elif isinstance(value, str):
+            s = value
+            return f"text {s!r}"
+        elif isinstance(value, bytes):
+            s = value
+            return f"text {s!r}"
+        elif isinstance(value, collections.abc.Sequence) and not isinstance(value, (str, collections.abc.Mapping)) and len(value) == 2 and isinstance(value[0], float) and isinstance(value[1], float):
+            x = value[0]
+            y = value[1]
+            return f"point {x}, {y}"
+        else:
+            return "other"
+
+    def too_many(value):
+        if isinstance(value, int):
+            raise TypeError("int() accepts 1 positional sub-pattern (2 given)")
+        elif isinstance(value, int):
+            a = value
+            return "unreachable"
+        else:
+            return "other"
+    """),
+        test_calls=[
+            ("describe(True)", "bool True"),
+            ("describe(0)", "zero"),
+            ("describe(-3)", "negative -3"),
+            ("describe(7)", "other"),
+            ("describe('hi')", "text 'hi'"),
+            ("describe(b'hi')", "text b'hi'"),
+            ("describe((1.0, 2.5))", "point 1.0, 2.5"),
+            ("describe((1, 2.5))", "other"),
+            ("too_many('x')", "other"),
+        ],
+        failing_calls=[
+            (
+                "too_many(5)",
+                pytest.raises(
+                    TypeError,
+                    match=re.escape(
+                        "int() accepts 1 positional sub-pattern (2 given)",
+                    ),
+                ),
+            ),
+        ],
+        conversion_markers=[
+            pytest.mark.xfail(
+                strict=True,
+                reason="#59: self-matching built-in class patterns",
+            ),
+        ],
+    ),
+    MatchTestCase(
         name="test_deeply_nested_as_patterns",
         description="Test as patterns nested within other as patterns.",
         source=textwrap.dedent("""
