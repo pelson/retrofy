@@ -7,6 +7,7 @@ from ._transformations import (
     dataclass,
     lazy_imports,
     match_statement,
+    pep585_builtins,
     pep585_imports,
     type_alias,
     typing_extensions,
@@ -80,17 +81,10 @@ def convert_union(module: cst.Module) -> cst.Module:
 
 def convert_sequence_subscript(module: cst.Module) -> cst.Module:
     """
-    Convert the built-in sequence types such as `list[int]` to the
-    `typing.List[int]` form.
-
-    Currently only `list[int]` is supported.
+    Convert the PEP 585 built-in generics such as `list[int]` to the
+    `typing.List[int]` form, with the appropriate `typing` import included.
     """
-    # TODO: Do this correctly. Including adding the necessry typing import.
-    orig = module.code
-    new = orig.replace("list[str]", "typing.List[str]")
-    if new != orig:
-        return cst.parse_module(new)
-    return module
+    return pep585_builtins.convert(module)
 
 
 def convert_walrus_operator(module: cst.Module) -> cst.Module:

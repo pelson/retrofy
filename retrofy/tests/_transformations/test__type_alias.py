@@ -198,7 +198,8 @@ def test_integration_with_converters():
     """)
 
     expected = textwrap.dedent("""
-    Point = tuple[float, float]
+    import typing
+    Point = typing.Tuple[float, float]
     """)
 
     result = _converters.convert(test_case_source)
@@ -214,7 +215,7 @@ def test_integration_generic_with_converters():
     expected = textwrap.dedent("""
     import typing
     T = typing.TypeVar("T")
-    GenericPoint: typing.TypeAlias = tuple[T, T]
+    GenericPoint: typing.TypeAlias = typing.Tuple[T, T]
     """)
 
     result = _converters.convert(test_case_source)
