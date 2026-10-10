@@ -93,8 +93,8 @@ def test_server_converts_a_file(server: subprocess.Popen, tmp_path: Path):
     # Read while the server is still alive — its tmp dir is removed on exit.
     converted = out_path.read_text(encoding="utf-8")
 
-    # PEP 604 ``X | None`` is lowered via ``typing.Union[..., None]``.
-    assert "Union" in converted or "Optional" in converted
+    # PEP 604 ``X | None`` is lowered via ``typing.Optional[X]``.
+    assert "typing.Optional[int]" in converted
 
 
 def test_server_reports_syntax_error_as_err(server: subprocess.Popen, tmp_path: Path):
@@ -142,8 +142,8 @@ def test_worker_converts_a_file(worker_against_self, tmp_path: Path):
     src.write_text("y: list[int] | None = None\n", encoding="utf-8")
 
     converted = worker_against_self.convert(str(src))
-    # PEP 604 lowering routes through ``typing.Union[..., None]``.
-    assert "Union" in converted
+    # PEP 604 ``X | None`` is lowered via ``typing.Optional[X]``.
+    assert "typing.Optional[typing.List[int]]" in converted
 
 
 def test_worker_raises_syntax_error_with_filename(worker_against_self, tmp_path: Path):
