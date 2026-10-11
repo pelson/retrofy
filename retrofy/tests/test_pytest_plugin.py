@@ -14,6 +14,7 @@ syntax (PEP 810 ``lazy import``). The plugin must:
   there's no on-disk ``_retrofy_rt/`` next to a pytester test file.
 """
 
+import os
 import textwrap
 
 import pytest
@@ -118,6 +119,64 @@ def test_lazy_from_in_package_conftest_collects(
         "synthpkg",
         f"--import-mode={import_mode}",
     )
+    result.assert_outcomes(passed=1)
+
+
+@pytest.mark.parametrize("location", ["outside-rootdir", "rootdir-site-packages"])
+def test_third_party_plugin_not_converted(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    location: str,
+):
+    """Pytest marks every plugin module for assertion rewriting, but a
+    third-party plugin (e.g. anyio's ``pytest11`` entry point) already
+    runs on the current interpreter and is not the project under test.
+    The plugin must leave it alone, so that a converter bug can't break
+    an unrelated project's test run (issue #66).
+
+    Covers both a plugin outside the rootdir and one in a
+    ``site-packages`` directory of a venv that lives *inside* the
+    rootdir.
+    """
+    if location == "outside-rootdir":
+        plugin_dir = pytester.path.parent / "otherdist"
+    else:
+        plugin_dir = pytester.path / "venv" / "lib" / "site-packages"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "thirdparty_plugin.py").write_text(
+        textwrap.dedent(
+            """
+            def pytest_report_header():
+                if (header := "thirdparty plugin loaded"):
+                    return header
+            """,
+        ).lstrip(),
+    )
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [str(plugin_dir), os.environ.get("PYTHONPATH")])),
+    )
+    # The plugin stashes converted source in ``linecache``, so
+    # ``inspect.getsource`` differing from the on-disk file is the
+    # user-visible sign that a module went through ``convert()``.
+    # Loaded via ``pytest_plugins`` (rather than ``-p``, which imports
+    # before entry-point plugins) so it arrives after retrofy's patches
+    # are in place, as a third-party ``pytest11`` plugin would.
+    pytester.makeconftest('pytest_plugins = ["thirdparty_plugin"]')
+    pytester.makepyfile(
+        test_thirdparty="""
+        import inspect
+        import pathlib
+
+        import thirdparty_plugin
+
+        def test_plugin_source_untouched():
+            on_disk = pathlib.Path(thirdparty_plugin.__file__).read_text()
+            assert inspect.getsource(thirdparty_plugin) == on_disk
+        """,
+    )
+    result = pytester.runpytest_subprocess()
+    result.stdout.fnmatch_lines(["thirdparty plugin loaded"])
     result.assert_outcomes(passed=1)
 
 
