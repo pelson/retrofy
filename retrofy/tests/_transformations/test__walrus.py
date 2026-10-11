@@ -1,6 +1,8 @@
+import itertools
 import textwrap
 
 import libcst as cst
+import pytest
 
 from retrofy import _converters
 
@@ -45,9 +47,14 @@ def test_if__multiple():
         assert a is 3
     """)
 
+    # bar() must only be called when the left-hand side is false.
     expected = textwrap.dedent("""
-    a = foo(); b = bar()
-    if a > 5 or b < 6:
+    a = foo()
+    _retrofy_cond_0 = a > 5
+    if not _retrofy_cond_0:
+        b = bar()
+        _retrofy_cond_0 = b < 6
+    if _retrofy_cond_0:
         assert a is 3
     """)
     module = cst.parse_module(test_case_source)
@@ -100,24 +107,15 @@ def test_while__multiple():
         process(chunk)
     """)
 
+    # random.random() must only be called when chunk is truthy.
     expected = textwrap.dedent("""
-    while True:
-        chunk = file.read(8192); alive = random.random()
-        if not (chunk and alive > 2): break
-        process(chunk)
-    """)
-
-    # In actual fact, the short-circuiting nature of logical
-    # operators means that perhaps this should really be (but perhaps not
-    # for or):
-    expected_idealistc = textwrap.dedent("""
     while True:
         chunk = file.read(8192)
         if not chunk: break
         alive = random.random()
         if not (alive > 2): break
         process(chunk)
-    """)  # noqa: F841
+    """)
 
     module = cst.parse_module(test_case_source)
     result = _converters.convert_walrus_operator(module)
@@ -270,3 +268,193 @@ def test_nested_set_comprehension():
     module = cst.parse_module(case_source)
     result = _converters.convert_walrus_operator(module)
     assert result.code == expected
+
+
+def test_if__multiline_condition_second_walrus():
+    # Splitting the condition must not leave a multi-line sub-expression
+    # without its enclosing parentheses (issue #65).
+    case_source = textwrap.dedent("""
+    if (
+        (x := g())
+        and k(x)
+        and (y := h(x))
+    ):
+        assert y
+    """)
+    expected = textwrap.dedent("""
+    x = g()
+    if x and k(x):
+        y = h(x)
+        if y:
+            assert y
+    """)
+    module = cst.parse_module(case_source)
+    result = _converters.convert_walrus_operator(module)
+    assert result.code == expected
+
+
+def _trace(func, values):
+    """Call *func* with a recording callable per entry of *values*.
+
+    Returns the order of calls together with the result (or exception
+    type), so that two implementations can be compared on behaviour,
+    including short-circuiting.
+    """
+    calls = []
+
+    def recorder(name, value):
+        def call(*args):
+            calls.append((name, args))
+            return value
+
+        return call
+
+    args = [recorder(name, value) for name, value in zip("ghk", values)]
+    try:
+        outcome = func(*args)
+    except Exception as err:
+        outcome = type(err)
+    return calls, outcome
+
+
+# Each snippet defines ``f(g, h, k)``. It is run natively and after
+# conversion, for every combination of falsy/truthy return values.
+SEMANTIC_CASES = {
+    "issue-65-multiline": """
+        def f(g, h, k):
+            if (
+                (x := g())
+                and k(x)
+                and (y := h(x))
+            ):
+                return y
+            return "no"
+        """,
+    "and-second-walrus-in-left": """
+        def f(g, h, k):
+            if (x := g()) and (y := h(x)) and k(y):
+                return y
+            return "no"
+        """,
+    "and-three-walruses": """
+        def f(g, h, k):
+            if (x := g()) and (y := h(x)) and (z := k(y)):
+                return z
+            return "no"
+        """,
+    "and-with-else": """
+        def f(g, h, k):
+            if (x := g()) and (y := h(x)):
+                return ("yes", y)
+            else:
+                return ("no", k())
+        """,
+    "leading-plain-operand": """
+        def f(g, h, k):
+            if g() and (y := h()):
+                return y
+            return "no"
+        """,
+    "or": """
+        def f(g, h, k):
+            if (x := g()) or (y := h()):
+                return x
+            return "no"
+        """,
+    "or-and-mixed": """
+        def f(g, h, k):
+            if (x := g()) or ((y := h()) and (z := k(y))):
+                return "yes"
+            return "no"
+        """,
+    "not": """
+        def f(g, h, k):
+            if not ((x := g()) and (y := h())):
+                return "yes"
+            return "no"
+        """,
+    "ifexp": """
+        def f(g, h, k):
+            if (x := h()) if g() else (y := k()):
+                return "yes"
+            return "no"
+        """,
+    "elif": """
+        def f(g, h, k):
+            if g():
+                return "first"
+            elif (x := h()) and (y := k(x)):
+                return y
+            elif (z := k()):
+                return ("third", z)
+            return "no"
+        """,
+    "return-walrus-in-if-body": """
+        def f(g, h, k):
+            if g():
+                return (x := h())
+            return "no"
+        """,
+    "while-and": """
+        def f(g, h, k):
+            n = 0
+            while (x := g()) and (y := h(x)) and n < 2:
+                n += 1
+            return n
+        """,
+    "while-or": """
+        def f(g, h, k):
+            n = 0
+            while ((x := g()) or (y := h())) and n < 2:
+                n += 1
+            return n
+        """,
+    "while-else": """
+        def f(g, h, k):
+            n = 0
+            while (x := g()) and n < 2:
+                n += 1
+                if k():
+                    break
+            else:
+                return ("else", n)
+            return ("broke", n)
+        """,
+    "one-line-suites": """
+        def f(g, h, k):
+            if (x := g()) and (y := h()): return (x, y)
+            n = 0
+            while (z := k()) and n < 2: n += 1
+            else: return ("else", n)
+            return "no"
+        """,
+    "comprehension-walrus-in-condition": """
+        def f(g, h, k):
+            # leading comment
+            if [y for x in [g(), h()] if (y := x)] and k():
+                return "yes"
+            return "no"
+        """,
+    "for-header-walrus-in-if-body": """
+        def f(g, h, k):
+            if g():
+                for _ in (x := [h()]):
+                    return x
+            return "no"
+        """,
+}
+
+
+@pytest.mark.parametrize("name", SEMANTIC_CASES)
+def test_condition_semantics_preserved(name):
+    source = textwrap.dedent(SEMANTIC_CASES[name])
+    converted = _converters.convert(source)
+
+    native_ns: dict = {}
+    exec(source, native_ns)
+    converted_ns: dict = {}
+    exec(converted, converted_ns)
+
+    for values in itertools.product([0, 1], repeat=3):
+        native = _trace(native_ns["f"], values)
+        assert _trace(converted_ns["f"], values) == native, (values, converted)

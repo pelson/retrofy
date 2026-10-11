@@ -1,6 +1,101 @@
 from __future__ import annotations
 
 import libcst as cst
+import libcst.matchers as m
+
+_SCOPED_STATEMENTS = (cst.BaseSmallStatement, cst.BaseCompoundStatement)
+
+
+def _contains_walrus(node: cst.CSTNode) -> bool:
+    return bool(m.findall(node, m.NamedExpr()))
+
+
+def _parenthesize(expr: cst.BaseExpression) -> cst.BaseExpression:
+    return expr.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
+
+
+def _standalone(expr: cst.BaseExpression) -> cst.BaseExpression:
+    """Make *expr* valid on its own, outside the brackets it came from.
+
+    A sub-expression that spans several lines relied on enclosing
+    brackets for its line breaks. Once lifted into its own statement or
+    condition, it needs parentheses of its own.
+    """
+    if not expr.lpar and "\n" in cst.Module(body=[]).code_for_node(expr):
+        return _parenthesize(expr)
+    return expr
+
+
+def _negate(expr: cst.BaseExpression) -> cst.UnaryOperation:
+    if (
+        isinstance(
+            expr,
+            (cst.BinaryOperation, cst.BooleanOperation, cst.Comparison, cst.IfExp),
+        )
+        and not expr.lpar
+    ):
+        expr = _parenthesize(expr)
+    return cst.UnaryOperation(operator=cst.Not(), expression=_standalone(expr))
+
+
+def _assign(
+    target: cst.BaseAssignTargetExpression,
+    value: cst.BaseExpression,
+) -> cst.SimpleStatementLine:
+    return cst.SimpleStatementLine(
+        body=[
+            cst.Assign(
+                targets=[cst.AssignTarget(target=target)],
+                value=_standalone(value),
+            ),
+        ],
+    )
+
+
+def _and_operands(expr: cst.BaseExpression) -> list[cst.BaseExpression]:
+    """Flatten a chain of ``and`` operations into its operands."""
+    if isinstance(expr, cst.BooleanOperation) and isinstance(expr.operator, cst.And):
+        return [*_and_operands(expr.left), *_and_operands(expr.right)]
+    return [expr]
+
+
+def _join_and(operands: list[cst.BaseExpression]) -> cst.BaseExpression:
+    result = operands[0]
+    for operand in operands[1:]:
+        result = cst.BooleanOperation(left=result, operator=cst.And(), right=operand)
+    return result
+
+
+def _group_operands(
+    operands: list[cst.BaseExpression],
+) -> list[list[cst.BaseExpression]]:
+    """Split ``and`` operands into groups that each start with a walrus.
+
+    Only the first operand of a group (and of the leading group, possibly
+    none) contains a walrus, so the rest of a group can stay in the same
+    condition as that operand.
+    """
+    groups: list[list[cst.BaseExpression]] = [[]]
+    for operand in operands:
+        if groups[-1] and _contains_walrus(operand):
+            groups.append([])
+        groups[-1].append(operand)
+    return groups
+
+
+def _block_statements(block: cst.BaseSuite) -> list[cst.BaseStatement]:
+    if isinstance(block, cst.SimpleStatementSuite):
+        return [cst.SimpleStatementLine(body=block.body)]
+    return list(block.body)
+
+
+def _with_leading_lines(
+    node: cst.BaseCompoundStatement,
+    statements: list[cst.BaseStatement],
+) -> list[cst.BaseStatement]:
+    """Keep the comments and blank lines above *node* above its replacement."""
+    first = statements[0].with_changes(leading_lines=node.leading_lines)
+    return [first, *statements[1:]]
 
 
 class WalrusOperatorTransformer(cst.CSTTransformer):
@@ -15,8 +110,9 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
     2. While loops:
        while (x := input()): ... -> while True: x = input(); if not x: break; ...
 
-    3. Expressions:
+    3. Statements:
        result = (x := calc()) -> x = calc(); result = x
+       return (x := calc())   -> x = calc(); return x
 
     4. List comprehensions:
        [y for x in data if (y := f(x))] -> [y for x, y in ([x, f(x)] for x in data)]
@@ -32,7 +128,7 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
        [z for x, y, z in ([x, y, f(x, y)] for x in data for y in items)]
 
 
-    8. Short-circuiting boolean expressions:
+    8. Short-circuiting boolean expressions in if / while conditions:
        while (x := func()) and (y := g(x)) > 0: ... ->
        while True:
            x = func()
@@ -41,11 +137,27 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
            if not (y > 0): break
            ...
 
+       ``or``, ``not`` and conditional expressions, an ``else`` / ``elif``
+       clause, or ``while ... else`` are lowered via a temporary
+       ``_retrofy_cond_<n>`` variable instead:
+
+       if (x := f()) or (y := g()): ... ->
+       x = f()
+       _retrofy_cond_0 = x
+       if not _retrofy_cond_0:
+           y = g()
+           _retrofy_cond_0 = y
+       if _retrofy_cond_0: ...
+
     Remaining Limitations:
     - Complex assignment targets (libcst doesn't support obj.attr := value syntax)
     - Complex short-circuiting: Only simple two-assignment AND operations in
       comprehensions are fully supported for short-circuiting. More complex
       boolean expressions may fall back to non-short-circuiting behavior
+    - Short-circuiting is only preserved through ``and``/``or``/``not`` and
+      conditional expressions. Assignments inside any other expression
+      (e.g. ``f((x := a()) and (y := b()))``) are hoisted in front of the
+      statement, ahead of the rest of the expression.
     - Walrus in lambda expressions may have edge cases
 
     See PEP-572 for details.
@@ -53,21 +165,188 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
 
     def __init__(self) -> None:
         self.assignments_stack: list[list[cst.Assign]] = []
+        self._temp_count = 0
         super().__init__()
 
-    def _creates_walrus_scope(self, node: cst.CSTNode) -> bool:
-        """Check if this node type creates a scope for walrus assignments."""
-        return isinstance(
+    def _temp_name(self) -> cst.Name:
+        name = cst.Name(f"_retrofy_cond_{self._temp_count}")
+        self._temp_count += 1
+        return name
+
+    def _hoist(
+        self,
+        expr: cst.BaseExpression,
+    ) -> tuple[list[cst.BaseStatement], cst.BaseExpression]:
+        """Lower *expr* with the walrus assignments hoisted in front of it."""
+        self.assignments_stack.append([])
+        lowered = expr.visit(self)
+        assignments = self.assignments_stack.pop()
+        assert isinstance(lowered, cst.BaseExpression)
+        if not assignments:
+            # e.g. the walrus was inside a comprehension, which lowers it
+            # in place.
+            return [], lowered
+        return [cst.SimpleStatementLine(body=assignments)], lowered
+
+    def _lower_expr(
+        self,
+        expr: cst.BaseExpression,
+    ) -> tuple[list[cst.BaseStatement], cst.BaseExpression]:
+        """Lower the walruses in *expr*, preserving short-circuiting.
+
+        Returns the statements to run first, and an equivalent walrus-free
+        expression to evaluate after them.
+        """
+        if not _contains_walrus(expr):
+            return [], expr
+
+        if isinstance(expr, cst.NamedExpr):
+            statements, value = self._lower_expr(expr.value)
+            return [*statements, _assign(expr.target, value)], expr.target
+
+        if isinstance(expr, cst.BooleanOperation):
+            left_statements, left = self._lower_expr(expr.left)
+            if not _contains_walrus(expr.right):
+                return left_statements, expr.with_changes(left=left)
+            # Only evaluate the right-hand side when the left doesn't
+            # already decide the result.
+            right_statements, right = self._lower_expr(expr.right)
+            result = self._temp_name()
+            if isinstance(expr.operator, cst.And):
+                test: cst.BaseExpression = result
+            else:
+                test = _negate(result)
+            evaluate_right = cst.If(
+                test=test,
+                body=cst.IndentedBlock(
+                    body=[*right_statements, _assign(result, right)],
+                ),
+            )
+            return [*left_statements, _assign(result, left), evaluate_right], result
+
+        if isinstance(expr, cst.UnaryOperation):
+            statements, operand = self._lower_expr(expr.expression)
+            operator = expr.operator
+            if isinstance(operator, cst.Not):
+                # ``not(x := y)`` has no space after ``not``.
+                operator = cst.Not()
+            return statements, expr.with_changes(
+                operator=operator,
+                expression=operand,
+            )
+
+        if isinstance(expr, cst.IfExp):
+            test_statements, test = self._lower_expr(expr.test)
+            if not (_contains_walrus(expr.body) or _contains_walrus(expr.orelse)):
+                return test_statements, expr.with_changes(test=test)
+            body_statements, body = self._lower_expr(expr.body)
+            orelse_statements, orelse = self._lower_expr(expr.orelse)
+            result = self._temp_name()
+            choose = cst.If(
+                test=_standalone(test),
+                body=cst.IndentedBlock(body=[*body_statements, _assign(result, body)]),
+                orelse=cst.Else(
+                    body=cst.IndentedBlock(
+                        body=[*orelse_statements, _assign(result, orelse)],
+                    ),
+                ),
+            )
+            return [*test_statements, choose], result
+
+        return self._hoist(expr)
+
+    def _lower_and_groups(
+        self,
+        test: cst.BaseExpression,
+    ) -> list[tuple[list[cst.BaseStatement], cst.BaseExpression]]:
+        """Split an ``and`` chain into (statements, condition) steps.
+
+        Each step's condition is only evaluated once the previous ones are
+        true, which lets an ``if`` nest and a ``while`` break per step,
+        without a temporary variable.
+        """
+        steps = []
+        for group in _group_operands(_and_operands(test)):
+            statements, first = self._lower_expr(group[0])
+            steps.append((statements, _standalone(_join_and([first, *group[1:]]))))
+        return steps
+
+    def _lower_if(self, node: cst.If) -> list[cst.BaseStatement]:
+        body = node.body.visit(self)
+        orelse = self._lower_orelse(node.orelse)
+        if not _contains_walrus(node.test):
+            return [node.with_changes(body=body, orelse=orelse)]
+
+        if orelse is None:
+            statements: list[cst.BaseStatement] = []
+            for step_statements, condition in reversed(
+                self._lower_and_groups(node.test),
+            ):
+                if statements:
+                    body = cst.IndentedBlock(body=statements)
+                statements = [*step_statements, cst.If(test=condition, body=body)]
+        else:
+            test_statements, test = self._lower_expr(node.test)
+            statements = [
+                *test_statements,
+                cst.If(test=_standalone(test), body=body, orelse=orelse),
+            ]
+        return _with_leading_lines(node, statements)
+
+    def _lower_orelse(
+        self,
+        orelse: cst.If | cst.Else | None,
+    ) -> cst.If | cst.Else | None:
+        if isinstance(orelse, cst.If):
+            statements = self._lower_if(orelse)
+            if len(statements) == 1 and isinstance(statements[0], cst.If):
+                return statements[0]
+            # The elif condition needs statements of its own first.
+            return cst.Else(body=cst.IndentedBlock(body=statements))
+        if isinstance(orelse, cst.Else):
+            return orelse.with_changes(body=orelse.body.visit(self))
+        return orelse
+
+    def _lower_while(self, node: cst.While) -> list[cst.BaseStatement]:
+        body = node.body.visit(self)
+        orelse = node.orelse
+        if orelse is not None:
+            orelse = orelse.with_changes(body=orelse.body.visit(self))
+        if not _contains_walrus(node.test):
+            return [node.with_changes(body=body, orelse=orelse)]
+
+        # ``while True`` with a ``break`` per step of the condition. The
+        # ``else`` clause would never run after that ``break``, so it is
+        # moved after the loop and guarded by a flag set when the
+        # condition (rather than the loop body) ends the loop.
+        exhausted = self._temp_name() if orelse is not None else None
+        stop: list[cst.BaseSmallStatement] = [cst.Break()]
+        if exhausted is not None:
+            stop.insert(0, _assign(exhausted, cst.Name("True")).body[0])
+        checks: list[cst.BaseStatement] = []
+        for step_statements, condition in self._lower_and_groups(node.test):
+            checks += [
+                *step_statements,
+                cst.If(
+                    test=_negate(condition),
+                    body=cst.SimpleStatementSuite(body=stop),
+                ),
+            ]
+
+        loop = node.with_changes(
+            test=cst.Name("True"),
+            body=cst.IndentedBlock(body=[*checks, *_block_statements(body)]),
+            orelse=None,
+        )
+        if exhausted is None:
+            return [loop]
+        return _with_leading_lines(
             node,
-            (
-                cst.If,
-                cst.While,
-                cst.Assign,
-                cst.Expr,
-                cst.ListComp,
-                cst.SetComp,
-                cst.DictComp,
-            ),
+            [
+                _assign(exhausted, cst.Name("False")),
+                loop.with_changes(leading_lines=[]),
+                cst.If(test=exhausted, body=orelse.body),
+            ],
         )
 
     def _extract_assignment_target(
@@ -76,45 +355,6 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
     ) -> cst.BaseAssignTargetExpression:
         """Extract the target from an assignment."""
         return assignment.targets[0].target
-
-    def _transform_while_with_walrus(
-        self,
-        node: cst.While,
-        assignments: list[cst.Assign],
-    ) -> cst.While:
-        """Transform while loop containing walrus assignments."""
-        # Create assignment statements (combine into single line with semicolons)
-        assignment_line = cst.SimpleStatementLine(body=assignments)
-
-        # Create break condition: if not (original_test): break
-        break_condition = cst.If(
-            test=cst.UnaryOperation(
-                operator=cst.Not(),
-                expression=self._ensure_parentheses(node.test),
-            ),
-            body=cst.SimpleStatementSuite([cst.Break()]),
-        )
-
-        # Reconstruct while loop body
-        new_body = [assignment_line, break_condition] + list(node.body.body)
-
-        return node.with_changes(
-            test=cst.parse_expression("True"),
-            body=node.body.with_changes(body=new_body),
-        )
-
-    def _ensure_parentheses(self, expr: cst.BaseExpression) -> cst.BaseExpression:
-        """Ensure expression is properly parenthesized when needed."""
-        # Add parentheses for any complex expression in break conditions
-        if isinstance(
-            expr,
-            (cst.BinaryOperation, cst.BooleanOperation, cst.Comparison),
-        ):
-            return expr.with_changes(
-                lpar=[cst.LeftParen()],
-                rpar=[cst.RightParen()],
-            )
-        return expr
 
     def _transform_comprehension_with_walrus(
         self,
@@ -382,127 +622,6 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
             rpar=[cst.RightSquareBracket()],
         )
 
-    def _needs_short_circuiting(
-        self,
-        test_expr: cst.BaseExpression,
-        assignments: list[cst.Assign],
-    ) -> bool:
-        """Check if the test expression contains boolean operators that need short-circuiting."""
-        if len(assignments) <= 1:
-            return False
-
-        # Only enable short-circuiting for AND operations for now
-        # OR operations are more complex and the existing behavior is often acceptable
-        return self._contains_and_operations(test_expr)
-
-    def _contains_and_operations(self, node: cst.CSTNode) -> bool:
-        """Recursively check if a node contains AND operations."""
-        if isinstance(node, cst.BooleanOperation) and isinstance(
-            node.operator,
-            cst.And,
-        ):
-            return True
-
-        # Check children
-        for child in node.children:
-            if hasattr(child, "children") and self._contains_and_operations(child):
-                return True
-
-        return False
-
-    def _transform_short_circuit_if(
-        self,
-        original_node: cst.If,
-        updated_node: cst.If,
-        assignments: list[cst.Assign],
-    ) -> cst.FlattenSentinel:
-        """Transform if statement with proper short-circuiting."""
-        # For now, implement simple short-circuiting for AND operations
-        # More complex logic can be added later
-
-        # Extract the boolean structure and create nested if statements
-        nested_ifs = self._build_short_circuit_structure(
-            updated_node.test,
-            assignments,
-            updated_node.body,
-            updated_node.orelse,
-        )
-
-        return cst.FlattenSentinel(nested_ifs)
-
-    def _build_short_circuit_structure(
-        self,
-        test_expr: cst.BaseExpression,
-        assignments: list[cst.Assign],
-        body: cst.BaseSuite,
-        orelse: cst.Else | None,
-    ) -> list[cst.SimpleStatementLine | cst.If]:
-        """Build the nested if structure for short-circuiting."""
-        # This is a simplified implementation
-        # For a full implementation, we'd need to parse the boolean expression tree
-
-        if len(assignments) == 2:
-            # Simple case: two assignments with AND
-            first_assign, second_assign = assignments
-
-            # Create first assignment
-            first_line = cst.SimpleStatementLine(body=[first_assign])
-
-            # Extract the first condition (before AND)
-            # This is simplified - a full implementation would parse the tree
-            first_condition = self._extract_assignment_target(first_assign)
-
-            # Create the inner if with second assignment + original body
-            second_line = cst.SimpleStatementLine(body=[second_assign])
-            inner_if = cst.If(
-                test=self._build_second_condition(test_expr, first_condition),
-                body=body,
-                orelse=orelse,
-            )
-
-            # Create outer if
-            outer_if = cst.If(
-                test=self._build_first_condition(test_expr, first_condition),
-                body=cst.IndentedBlock(body=[second_line, inner_if]),
-                orelse=orelse,
-            )
-
-            return [first_line, outer_if]
-
-        # Fallback: simple assignment before if
-        assignment_line = cst.SimpleStatementLine(body=assignments)
-        simple_if = cst.If(test=test_expr, body=body, orelse=orelse)
-        return [assignment_line, simple_if]
-
-    def _build_first_condition(
-        self,
-        test_expr: cst.BaseExpression,
-        first_var: cst.BaseAssignTargetExpression,
-    ) -> cst.BaseExpression:
-        """Extract the first condition from a boolean AND expression."""
-        # Simplified: assume the first condition involves the first variable
-        # A full implementation would parse the expression tree
-        if isinstance(test_expr, cst.BooleanOperation) and isinstance(
-            test_expr.operator,
-            cst.And,
-        ):
-            return test_expr.left
-        return first_var
-
-    def _build_second_condition(
-        self,
-        test_expr: cst.BaseExpression,
-        first_var: cst.BaseAssignTargetExpression,
-    ) -> cst.BaseExpression:
-        """Extract the second condition from a boolean AND expression."""
-        # Simplified: assume the second condition is the right side of AND
-        if isinstance(test_expr, cst.BooleanOperation) and isinstance(
-            test_expr.operator,
-            cst.And,
-        ):
-            return test_expr.right
-        return test_expr
-
     def _comprehension_needs_short_circuiting(
         self,
         condition: cst.CompIf,
@@ -687,22 +806,64 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
         else:
             raise ValueError(f"Unsupported comprehension type: {type(node).__name__}")
 
-    # Core visitor methods - push scope for each statement type
-    def visit_If(self, node: cst.If) -> None:
-        """Push scope for if statements."""
-        self.assignments_stack.append([])
+    # Every statement collects the walrus assignments in its expressions,
+    # and runs them just before itself.
+    def on_visit(self, node: cst.CSTNode) -> bool:
+        if isinstance(node, _SCOPED_STATEMENTS):
+            self.assignments_stack.append([])
+        return super().on_visit(node)
 
-    def visit_While(self, node: cst.While) -> None:
-        """Push scope for while loops."""
-        self.assignments_stack.append([])
+    def on_leave(self, original_node, updated_node):  # type: ignore[no-untyped-def]
+        updated = super().on_leave(original_node, updated_node)
+        if not isinstance(original_node, _SCOPED_STATEMENTS):
+            return updated
+        assignments = self.assignments_stack.pop()
+        if not assignments:
+            return updated
+        nodes = (
+            list(updated.nodes)
+            if isinstance(updated, cst.FlattenSentinel)
+            else [updated]
+        )
+        if isinstance(original_node, cst.BaseSmallStatement):
+            return cst.FlattenSentinel([*assignments, *nodes])
+        return cst.FlattenSentinel(
+            _with_leading_lines(
+                original_node,
+                [
+                    cst.SimpleStatementLine(body=assignments),
+                    nodes[0].with_changes(leading_lines=[]),
+                    *nodes[1:],
+                ],
+            ),
+        )
 
-    def visit_Assign(self, node: cst.Assign) -> None:
-        """Push scope for assignments."""
-        self.assignments_stack.append([])
+    # ``if`` and ``while`` lower their own condition and children.
+    def visit_If(self, node: cst.If) -> bool:
+        return False
 
-    def visit_Expr(self, node: cst.Expr) -> None:
-        """Push scope for expressions."""
-        self.assignments_stack.append([])
+    def leave_If(
+        self,
+        original_node: cst.If,
+        updated_node: cst.If,
+    ) -> cst.BaseStatement | cst.FlattenSentinel:
+        statements = self._lower_if(original_node)
+        if len(statements) == 1:
+            return statements[0]
+        return cst.FlattenSentinel(statements)
+
+    def visit_While(self, node: cst.While) -> bool:
+        return False
+
+    def leave_While(
+        self,
+        original_node: cst.While,
+        updated_node: cst.While,
+    ) -> cst.BaseStatement | cst.FlattenSentinel:
+        statements = self._lower_while(original_node)
+        if len(statements) == 1:
+            return statements[0]
+        return cst.FlattenSentinel(statements)
 
     def visit_ListComp(self, node: cst.ListComp) -> None:
         """Push scope for list comprehensions."""
@@ -725,80 +886,14 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
         if not self.assignments_stack:
             raise RuntimeError("Walrus operator found outside valid context")
 
-        target = node.target
-        value = node.value
-
-        # Create assignment statement
-        assign_stmt = cst.Assign(
-            targets=[cst.AssignTarget(target=target)],
-            value=value,
+        self.assignments_stack[-1].append(
+            cst.Assign(
+                targets=[cst.AssignTarget(target=updated_node.target)],
+                value=_standalone(updated_node.value),
+            ),
         )
-
-        # Add to current scope
-        self.assignments_stack[-1].append(assign_stmt)
-
-        # Return the target expression (for referencing the assigned value)
-        return target
-
-    def leave_If(
-        self,
-        original_node: cst.If,
-        updated_node: cst.If,
-    ) -> cst.If | cst.FlattenSentinel:
-        """Transform if statement with walrus assignments."""
-        assignments = self.assignments_stack.pop()
-        if not assignments:
-            return updated_node
-
-        # Check if we need short-circuiting behavior
-        if self._needs_short_circuiting(updated_node.test, assignments):
-            return self._transform_short_circuit_if(
-                original_node,
-                updated_node,
-                assignments,
-            )
-
-        # Simple case: just put assignments before the if
-        assignment_line = cst.SimpleStatementLine(body=assignments)
-        return cst.FlattenSentinel([assignment_line, updated_node])
-
-    def leave_While(
-        self,
-        original_node: cst.While,
-        updated_node: cst.While,
-    ) -> cst.While:
-        """Transform while loop with walrus assignments."""
-        assignments = self.assignments_stack.pop()
-        if not assignments:
-            return updated_node
-
-        return self._transform_while_with_walrus(updated_node, assignments)
-
-    def leave_Assign(
-        self,
-        original_node: cst.Assign,
-        updated_node: cst.Assign,
-    ) -> cst.Assign | cst.FlattenSentinel:
-        """Transform assignment with walrus expressions."""
-        assignments = self.assignments_stack.pop()
-        if not assignments:
-            return updated_node
-
-        # Put walrus assignments before the main assignment
-        return cst.FlattenSentinel(assignments + [updated_node])
-
-    def leave_Expr(
-        self,
-        original_node: cst.Expr,
-        updated_node: cst.Expr,
-    ) -> cst.Expr | cst.FlattenSentinel:
-        """Transform expression statement with walrus."""
-        assignments = self.assignments_stack.pop()
-        if not assignments:
-            return updated_node
-
-        # Put walrus assignments before the expression
-        return cst.FlattenSentinel(assignments + [updated_node])
+        # Reference the assigned value in place of the walrus.
+        return updated_node.target
 
     def leave_ListComp(
         self,
