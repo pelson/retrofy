@@ -2105,3 +2105,91 @@ def test_invalid_runtime_code():
     result = transform_typing_extensions(source)
     assert result == expected
     assert expected == transform_typing_extensions(expected)
+
+
+# Plain runtime objects added to ``typing`` in 3.11 / 3.12 (#17). Names that
+# only work together with a backported ``TypedDict`` (``Required``,
+# ``NotRequired``) or need new syntax (``Unpack``, ``TypeVarTuple``) are not
+# in this list.
+TYPING_311_312_FEATURES = [
+    ("Self", (3, 11)),
+    ("LiteralString", (3, 11)),
+    ("Never", (3, 11)),
+    ("assert_never", (3, 11)),
+    ("assert_type", (3, 11)),
+    ("reveal_type", (3, 11)),
+    ("dataclass_transform", (3, 11)),
+    ("override", (3, 12)),
+]
+
+
+@pytest.mark.parametrize(("name", "version"), TYPING_311_312_FEATURES)
+def test_newer_feature_from_typing(name, version):
+    source = textwrap.dedent(f"""
+    from typing import {name}
+
+    x = {name}
+    """)
+
+    expected = textwrap.dedent(f"""
+    import sys
+
+    if sys.version_info >= {version}:
+        from typing import {name}
+    else:
+        from typing_extensions import {name}
+
+    x = {name}
+    """)
+
+    result = transform_typing_extensions(source)
+    assert result == expected
+    assert expected == transform_typing_extensions(expected)
+
+
+@pytest.mark.parametrize(("name", "version"), TYPING_311_312_FEATURES)
+def test_newer_feature_typing_dot(name, version):
+    source = textwrap.dedent(f"""
+    import typing
+
+    x = typing.{name}
+    """)
+
+    expected = textwrap.dedent(f"""
+    import sys
+    import typing
+
+    if sys.version_info < {version}:
+        import typing_extensions
+        typing.{name} = typing_extensions.{name}
+
+    x = typing.{name}
+    """)
+
+    result = transform_typing_extensions(source)
+    assert result == expected
+    assert expected == transform_typing_extensions(expected)
+
+
+def test_self_and_override_run():
+    """The converted code runs, on Pythons with and without the names in
+    ``typing`` (the latter needs ``typing_extensions`` installed)."""
+    source = textwrap.dedent("""
+    from typing import Self, override
+
+    class Base:
+        def clone(self) -> Self:
+            return type(self)()
+
+    class Child(Base):
+        @override
+        def clone(self) -> Self:
+            return Child()
+
+    clone = Child().clone()
+    is_override = Child.clone.__override__
+    """)
+
+    results = execute_code_with_results(transform_typing_extensions(source))
+    assert type(results["clone"]).__name__ == "Child"
+    assert results["is_override"] is True
