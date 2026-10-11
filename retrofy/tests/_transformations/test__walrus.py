@@ -458,3 +458,149 @@ def test_condition_semantics_preserved(name):
     for values in itertools.product([0, 1], repeat=3):
         native = _trace(native_ns["f"], values)
         assert _trace(converted_ns["f"], values) == native, (values, converted)
+
+
+# A walrus in a comprehension or generator expression binds in the
+# enclosing function (or module) scope, and is evaluated per item (#70).
+# Each snippet defines ``f()``; its result must match the native one.
+COMPREHENSION_CASES = {
+    "element-accumulates": """
+        def f():
+            b = 0
+            res = [b := i + b for i in range(5)]
+            return res, b
+        """,
+    "filter-binding-visible-after": """
+        def f():
+            res = [y for x in range(4) if (y := x * 2) > 2]
+            return res, y
+        """,
+    "set-comprehension": """
+        def f():
+            res = {(last := x % 3) for x in range(5)}
+            return res, last
+        """,
+    "dict-key-and-value": """
+        def f():
+            a, b = 1, 2
+            fib = {(c := a): (a := b) + (b := a + c) - b for __ in range(6)}
+            return fib, a, b, c
+        """,
+    "genexp-short-circuit": """
+        def f():
+            calls = []
+            def num(n):
+                calls.append(n)
+                return n
+            found = any((last := num(n)) == 1 for n in [1, 2, 3])
+            return found, last, calls
+        """,
+    "genexp-lazy": """
+        def f():
+            seen = None
+            gen = ((seen := x) for x in range(3))
+            before = seen
+            first = next(gen)
+            return before, first, seen
+        """,
+    "genexp-first-iterable-eager": """
+        def f():
+            calls = []
+            def source():
+                calls.append("source")
+                return [1, 2]
+            gen = ((y := x) for x in source())
+            calls.append("created")
+            return list(gen), y, calls
+        """,
+    "nested-comprehensions": """
+        def f():
+            total = 0
+            res = [[(total := total + j) for j in range(i)] for i in range(4)]
+            return res, total
+        """,
+    "inner-iterable-and-filter": """
+        def f():
+            res = [(p := (x, y)) for x in range(3) if x for y in range(x) if y >= 0]
+            return res, p
+        """,
+    "global-keyword": """
+        G = None
+        def f():
+            global G
+            res = [(G := x) for x in range(3)]
+            return res, G
+        """,
+    "nonlocal-keyword": """
+        def f():
+            n = None
+            def inner():
+                nonlocal n
+                return [(n := x) for x in range(3)]
+            return inner(), n
+        """,
+    "in-if-condition": """
+        def f():
+            if any((hit := x) > 1 for x in range(5)):
+                return "found", hit
+            return "none"
+        """,
+    "in-method-with-mangled-name": """
+        class C:
+            def m(self):
+                res = [(__v := x) for x in range(3)]
+                return res, __v
+        def f():
+            return C().m()
+        """,
+    "async": """
+        import asyncio
+        async def agen():
+            for x in range(3):
+                yield x
+        async def double(x):
+            return x * 2
+        async def g():
+            res = [(y := await double(x)) async for x in agen()]
+            return res, y
+        def f():
+            return asyncio.run(g())
+        """,
+}
+
+
+def _run_f(source: str):
+    namespace: dict = {"__name__": "walrus_case"}
+    exec(source, namespace)
+    return namespace["f"]()
+
+
+@pytest.mark.parametrize("name", COMPREHENSION_CASES)
+def test_comprehension_semantics_preserved(name):
+    source = textwrap.dedent(COMPREHENSION_CASES[name])
+    converted = _converters.convert(source)
+    assert _run_f(converted) == _run_f(source), converted
+
+
+def test_comprehension_module_level_binding():
+    source = "res = [(m := x * 2) for x in range(3)]\n"
+    native: dict = {}
+    exec(source, native)
+    converted: dict = {}
+    exec(_converters.convert(source), converted)
+    assert (converted["res"], converted["m"]) == (native["res"], native["m"])
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="A walrus in a comprehension inside a lambda binds in the lambda's "
+    "scope, which a helper hoisted before the statement cannot reach.",
+)
+def test_comprehension_in_lambda():
+    source = textwrap.dedent("""
+        def f():
+            g = lambda: ([(y := x) for x in range(3)], y)
+            return g()
+        """)
+    converted = _converters.convert(source)
+    assert _run_f(converted) == _run_f(source)
