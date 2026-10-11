@@ -10,6 +10,7 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import textwrap
 import zipfile
 
 from packaging.requirements import InvalidRequirement, Requirement
@@ -46,13 +47,6 @@ class _EmbeddedRuntimeCollisionError(RuntimeError):
     packages."""
 
 
-class EditableRuntimeRequirementError(RuntimeError):
-    """The project being built editable has not marked ``dependencies``
-    as ``dynamic``, so retrofy cannot legitimately inject itself as a
-    runtime requirement.
-    """
-
-
 def _embedded_runtime_files() -> dict[str, bytes]:
     """Return ``{relpath: bytes}`` for the ``_retrofy_rt`` payload that
     gets dropped into converted packages.
@@ -71,31 +65,21 @@ def _embedded_runtime_files() -> dict[str, bytes]:
     return out
 
 
-def _assert_editable_dependencies_dynamic(source_root: pathlib.Path) -> None:
-    """Raise ``EditableRuntimeRequirementError`` unless the project at
-    ``source_root`` lists ``dependencies`` in ``[project].dynamic``,
-    which is what lets this backend splice ``Requires-Dist: retrofy``
-    into the editable METADATA in a PEP 621-compliant way.
+def _dependencies_are_dynamic(source_root: pathlib.Path) -> bool:
+    """Return whether the project at ``source_root`` leaves its
+    ``dependencies`` to the build backend: listed in ``[project].dynamic``
+    (fully dynamic, or partially dynamic as per PEP 808), or with no
+    ``[project]`` table (or ``pyproject.toml``) at all. Only then may retrofy
+    add itself to them; static dependencies are left as they are (PEP 621).
     """
     pyproject = source_root / "pyproject.toml"
     if not pyproject.exists():
-        return
+        return True
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    project = data.get("project", {})
-    dynamic = project.get("dynamic", []) or []
-    if "dependencies" in dynamic:
-        return
-    raise EditableRuntimeRequirementError(
-        "Editable installs of retrofy-using projects need retrofy at "
-        "runtime, but this project's pyproject.toml does not mark "
-        "``dependencies`` as dynamic, so retrofy cannot inject itself "
-        "as a runtime requirement in a PEP 621-compliant way.\n\n"
-        "Add the following to pyproject.toml:\n\n"
-        "    [project]\n"
-        '    dynamic = ["dependencies"]\n\n'
-        "Non-editable builds of the same project are unaffected and "
-        "impose no such requirement.",
-    )
+    project = data.get("project")
+    if project is None:
+        return True
+    return "dependencies" in (project.get("dynamic", []) or [])
 
 
 def _read_target_python(source_root: pathlib.Path) -> str | None:
@@ -259,7 +243,8 @@ def _apply_editable_metadata_edits(text: str) -> str:
     Any new ``METADATA`` edit for editable installs goes here, not in
     the hooks.
     """
-    text = _splice_retrofy_requires_dist(text)
+    if _dependencies_are_dynamic(pathlib.Path.cwd()):
+        text = _splice_retrofy_requires_dist(text)
     floor = _read_target_python(pathlib.Path.cwd())
     if floor is not None:
         text = _lower_requires_python(text, floor)
@@ -296,13 +281,67 @@ def lower_metadata_requires_python(dist_info_path: pathlib.Path) -> None:
         metadata_path.write_text(new_text, encoding="utf-8")
 
 
+def _editable_pth_name(pkg: str) -> str:
+    return f"_retrofy.__editable_compat__.{pkg}.pth"
+
+
+def _editable_pth_script(pkg: str) -> str:
+    """The ``.pth`` line which registers the import-time converter for
+    ``pkg``. If retrofy cannot be imported, importing ``pkg`` (or any of its
+    submodules) instead raises an ``ImportError`` saying how to fix it;
+    interpreter startup, and other imports (e.g. pip, to install retrofy),
+    are unaffected.
+    """
+    # site execs the line in a function (with separate globals and locals),
+    # so the class and function bodies below only use their arguments and
+    # literals: names bound here (e.g. exc) aren't visible to them.
+    code = textwrap.dedent(f"""\
+        try:
+            import retrofy._meta_hook_converter as c
+        except ImportError as exc:
+            class RetrofyMissingFinder:
+                retrofy_missing_package = {pkg!r}
+
+                def __init__(self, message):
+                    self.message = message
+
+                def find_spec(self, name, path=None, target=None):
+                    if name == {pkg!r} or name.startswith({pkg!r} + "."):
+                        raise ImportError(self.message, name=name)
+                    return None
+
+            # (site may run this line more than once.)
+            if not any(
+                getattr(finder, "retrofy_missing_package", None) == {pkg!r}
+                for finder in sys.meta_path
+            ):
+                sys.meta_path.insert(0, RetrofyMissingFinder(
+                    {pkg!r} + " is installed in editable mode, which needs "
+                    "retrofy to make its code compatible at import time, but "
+                    "retrofy could not be imported (" + str(exc) + "). Install "
+                    "retrofy (pip install retrofy), or see retrofy's README for "
+                    "editable installs on Python 3.7/3.8."
+                ))
+        else:
+            c.register_hook([{pkg!r}])
+    """)
+    # site runs a .pth line (only) if it starts with "import".
+    return f"import sys; exec({code!r})\n"
+
+
 def compatibility_via_import_hook(wheel: pathlib.Path):
     """
     Add a pth hook to ensure make imported code compatible at import time
     (i.e. suitable for editable mode)
 
     """
-    _assert_editable_dependencies_dynamic(pathlib.Path.cwd())
+    if not _dependencies_are_dynamic(pathlib.Path.cwd()):
+        _log.warning(
+            "The dependencies are static (not in [project].dynamic), so retrofy "
+            "is not added to those of the editable install: install retrofy "
+            "yourself, or list dependencies in "
+            "[project].dynamic. Without retrofy, the package fails to import.",
+        )
 
     editable_copy = wheel.parent / (wheel.name + ".copy.whl")
     shutil.copy(wheel, editable_copy)
@@ -320,11 +359,10 @@ def compatibility_via_import_hook(wheel: pathlib.Path):
         top_level_pkgs = [pkg for pkg in top_level if pkg]
 
         for pkg in top_level_pkgs:
-            fn = f"_retrofy.__editable_compat__.{pkg}.pth"
-            script = (
-                f"import retrofy._meta_hook_converter as c; c.register_hook(['{pkg}']);"
+            whl.write(
+                zipfile.ZipInfo(_editable_pth_name(pkg)),
+                _editable_pth_script(pkg),
             )
-            whl.write(zipfile.ZipInfo(fn), script)
 
         # PEP 660: the METADATA in the built editable wheel must match
         # what ``prepare_metadata_for_build_editable`` returned. Route
