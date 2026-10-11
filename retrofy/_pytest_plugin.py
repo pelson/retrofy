@@ -39,6 +39,11 @@ display, traceback machinery, and ``inspect.findsource`` all read from
 bytecode. For unchanged user code (asserts, function bodies) the
 displayed text is identical to what's on disk; only lines near a
 rewriter's injection point differ from the user's authored source.
+
+Only files of the project under test (under pytest's rootdir, outside
+any ``site-packages``) are converted. Other distributions' pytest
+plugins are also marked for rewriting by pytest, but they already run
+on the current interpreter and must not be exposed to the converter.
 """
 
 from __future__ import annotations
@@ -77,10 +82,32 @@ def _stash_converted_source(filename: str, converted: str) -> None:
     linecache.cache[filename] = (len(converted), None, lines, filename)
 
 
-def _read_and_convert(fn) -> str | None:
-    """Return the retrofy-converted source for *fn*, or ``None`` if the
-    file can't be read, decoded, converted, or is unchanged by convert.
+_SITE_PACKAGES_DIRNAMES = frozenset({"site-packages", "dist-packages"})
+
+
+def _is_project_file(fn, config: Config) -> bool:
+    """Whether *fn* belongs to the project under test.
+
+    Pytest marks every plugin module for assertion rewriting, including
+    other distributions' ``pytest11`` plugins. Those already run on the
+    current interpreter, so only files under the rootdir are converted
+    — excluding any ``site-packages`` tree there (e.g. a venv kept in
+    the project directory).
     """
+    try:
+        rel = Path(fn).resolve().relative_to(config.rootpath.resolve())
+    except ValueError:
+        return False
+    return _SITE_PACKAGES_DIRNAMES.isdisjoint(rel.parts)
+
+
+def _read_and_convert(fn, config: Config) -> str | None:
+    """Return the retrofy-converted source for *fn*, or ``None`` if the
+    file isn't part of the project under test, or can't be read,
+    decoded, converted, or is unchanged by convert.
+    """
+    if not _is_project_file(fn, config):
+        return None
     try:
         source_bytes = Path(fn).read_bytes()
     except OSError:
@@ -119,7 +146,7 @@ def _install_rewriter_patches() -> None:
     orig_rewrite_test = _r._rewrite_test
 
     def _rewrite_test(fn: Path, cfg: Config) -> tuple[os.stat_result, CodeType]:
-        converted = _read_and_convert(fn)
+        converted = _read_and_convert(fn, cfg)
         if converted is None:
             return orig_rewrite_test(fn, cfg)
         stat = os.stat(fn)
@@ -141,7 +168,7 @@ def _install_rewriter_patches() -> None:
     def exec_module(self: AssertionRewritingHook, module: ModuleType) -> None:
         spec = module.__spec__
         if spec is not None and spec.origin:
-            converted = _read_and_convert(spec.origin)
+            converted = _read_and_convert(spec.origin, self.config)
             if converted is not None:
                 _stash_converted_source(spec.origin, converted)
         return orig_exec_module(self, module)
