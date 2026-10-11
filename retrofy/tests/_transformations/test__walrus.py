@@ -186,9 +186,10 @@ def test_comp():
 
 
 def test_subexpression__single():
-    case_source = "filtered_data = [y for x in data if (y := f(x)) is not None]"
+    """One walrus, evaluated first in the filter, unused elsewhere: one line."""
+    case_source = "filtered_data = [y for x in data if (y := f(x)) is not None]\n"
     expected = (
-        "filtered_data = [y for x, y in ([x, f(x)] for x in data) if y is not None]"
+        "filtered_data = [y for x, y in ((x, f(x)) for x in data) if y is not None]\n"
     )
     module = cst.parse_module(case_source)
     result = _converters.convert_walrus_operator(module)
@@ -196,37 +197,59 @@ def test_subexpression__single():
 
 
 def test_subexpression__multiple():
-    case_source = "filtered_data = [y for x in data if (y := f(x)) is not None and (z := g(x + 1)) > 2]"  # noqa:   E501
-    # Now with proper short-circuiting: g(x + 1) is only called when y is not None
-    expected = "filtered_data = [y for x, y, z in ((x, y, g(x + 1)) for x, y in ((x, f(x)) for x in data) if y is not None) if z > 2]"  # noqa:   E501
-
+    """g(x + 1) is only called when y is not None (two walruses: helper)."""
+    case_source = "filtered_data = [y for x in data if (y := f(x)) is not None and (z := g(x + 1)) > 2]\n"
+    expected = textwrap.dedent("""\
+    def _retrofy_comp_0(_retrofy_iter):
+        # [y for x in data if (y := f(x)) is not None and (z := g(x + 1)) > 2]
+        global y, z
+        for x in _retrofy_iter:
+            y = f(x)
+            if y is not None:
+                z = g(x + 1)
+                if z > 2:
+                    yield y
+    filtered_data = [_retrofy_item for _retrofy_item in _retrofy_comp_0(data)]
+    """)
     module = cst.parse_module(case_source)
     result = _converters.convert_walrus_operator(module)
     assert result.code == expected
 
 
 def test_set_comprehension():
-    case_source = "{y for x in data if (y := f(x)) is not None}"
-    expected = "{y for x, y in ([x, f(x)] for x in data) if y is not None}"
+    """One walrus, evaluated first in the filter, unused elsewhere: one line."""
+    case_source = "{y for x in data if (y := f(x)) is not None}\n"
+    expected = "{y for x, y in ((x, f(x)) for x in data) if y is not None}\n"
     module = cst.parse_module(case_source)
     result = _converters.convert_walrus_operator(module)
     assert result.code == expected
 
 
 def test_dict_comprehension_short_circuit():
-    """Test dict comprehension with proper short-circuiting."""
-    case_source = "{k: v for x in data if (y := f(x)) and (v := g(x, y))}"
-    # Proper short-circuiting: g(x, y) should only be called when y is truthy
-    expected = "{k: v for x, y, v in ((x, y, g(x, y)) for x, y in ((x, f(x)) for x in data) if y) if v}"  # noqa:   E501
+    """g(x, y) is only called when y is truthy (two walruses: helper)."""
+    case_source = "{k: v for x in data if (y := f(x)) and (v := g(x, y))}\n"
+    expected = textwrap.dedent("""\
+    def _retrofy_comp_0(_retrofy_iter):
+        # {k: v for x in data if (y := f(x)) and (v := g(x, y))}
+        global y, v
+        for x in _retrofy_iter:
+            y = f(x)
+            if y:
+                v = g(x, y)
+                if v:
+                    yield (k, v)
+    {_retrofy_key: _retrofy_value for _retrofy_key, _retrofy_value in _retrofy_comp_0(data)}
+    """)
     module = cst.parse_module(case_source)
     result = _converters.convert_walrus_operator(module)
     assert result.code == expected
 
 
 def test_nested_comprehension():
-    case_source = "[z for x in data for y in items if (z := f(x, y)) > 0]"
+    """Several ``for`` clauses thread all loop variables through."""
+    case_source = "[z for x in data for y in items if (z := f(x, y)) > 0]\n"
     expected = (
-        "[z for x, y, z in ([x, y, f(x, y)] for x in data for y in items) if z > 0]"
+        "[z for x, y, z in ((x, y, f(x, y)) for x in data for y in items) if z > 0]\n"
     )
     module = cst.parse_module(case_source)
     result = _converters.convert_walrus_operator(module)
@@ -251,20 +274,32 @@ def test_simple_short_circuit_and():
 
 
 def test_nested_dict_comprehension():
+    """g(z) is only called when z is truthy (two walruses: helper)."""
     case_source = (
-        "{k: v for x in data for y in items if (z := f(x, y)) and (v := g(z))}"
+        "{k: v for x in data for y in items if (z := f(x, y)) and (v := g(z))}\n"
     )
-    # This is a complex case - for now, we'll accept the non-short-circuiting behavior
-    # A full fix would require more sophisticated comprehension transformation
-    expected = "{k: v for x, y, z, v in ([x, y, f(x, y), g(z)] for x in data for y in items) if z and v}"  # noqa: E501
+    expected = textwrap.dedent("""\
+    def _retrofy_comp_0(_retrofy_iter):
+        # {k: v for x in data for y in items if (z := f(x, y)) and (v := g(z))}
+        global z, v
+        for x in _retrofy_iter:
+            for y in items:
+                z = f(x, y)
+                if z:
+                    v = g(z)
+                    if v:
+                        yield (k, v)
+    {_retrofy_key: _retrofy_value for _retrofy_key, _retrofy_value in _retrofy_comp_0(data)}
+    """)
     module = cst.parse_module(case_source)
     result = _converters.convert_walrus_operator(module)
     assert result.code == expected
 
 
 def test_nested_set_comprehension():
-    case_source = "{z for x in data for y in items if (z := f(x, y)) > threshold}"
-    expected = "{z for x, y, z in ([x, y, f(x, y)] for x in data for y in items) if z > threshold}"
+    """Several ``for`` clauses thread all loop variables through."""
+    case_source = "{z for x in data for y in items if (z := f(x, y)) > threshold}\n"
+    expected = "{z for x, y, z in ((x, y, f(x, y)) for x in data for y in items) if z > threshold}\n"
     module = cst.parse_module(case_source)
     result = _converters.convert_walrus_operator(module)
     assert result.code == expected
@@ -553,6 +588,45 @@ COMPREHENSION_CASES = {
         def f():
             return C().m()
         """,
+    "global-mangled-name": """
+        class C:
+            def m(self):
+                global __g
+                __g = 0
+                [_C__g := 1 for a in [2]]
+                first = __g
+                [__g := 2 for a in [3]]
+                return first, __g
+        def f():
+            return C().m()
+        """,
+    "one-line-filter": """
+        def f():
+            calls = []
+            def rec(v):
+                calls.append(v)
+                return v
+            res = [y * 10 for x in range(5) if (y := rec(x % 3)) > 0]
+            return res, calls
+        """,
+    "one-line-earlier-filter-and-clauses": """
+        def f():
+            calls = []
+            def rec(v):
+                calls.append(v)
+                return v
+            res = [(x, z) for x in range(4) if rec(x) % 2 for y in range(x) if (z := x * y) > 1]
+            return res, calls
+        """,
+    "one-line-genexp-lazy": """
+        def f():
+            calls = []
+            def rec(v):
+                calls.append(v)
+                return v
+            gen = (y for x in range(3) if (y := rec(x)) >= 0)
+            return next(gen), calls
+        """,
     "async": """
         import asyncio
         async def agen():
@@ -575,11 +649,22 @@ def _run_f(source: str):
     return namespace["f"]()
 
 
+# Results to compare against instead of running the snippet natively: older
+# CPythons reject a mangled walrus target declared ``global`` (a compiler bug
+# that CPython's own test_named_expression_scope_mangled_names covers), while
+# the converted code runs fine on them.
+COMPREHENSION_RESULTS = {"global-mangled-name": (1, 2)}
+
+
 @pytest.mark.parametrize("name", COMPREHENSION_CASES)
 def test_comprehension_semantics_preserved(name):
     source = textwrap.dedent(COMPREHENSION_CASES[name])
     converted = _converters.convert(source)
-    assert _run_f(converted) == _run_f(source), converted
+    if name in COMPREHENSION_RESULTS:
+        expected = COMPREHENSION_RESULTS[name]
+    else:
+        expected = _run_f(source)
+    assert _run_f(converted) == expected, converted
 
 
 def test_comprehension_module_level_binding():
@@ -604,3 +689,72 @@ def test_comprehension_in_lambda():
         """)
     converted = _converters.convert(source)
     assert _run_f(converted) == _run_f(source)
+
+
+def _uses_helper(source: str) -> bool:
+    module = cst.parse_module(textwrap.dedent(source))
+    return "def _retrofy_comp_" in _converters.convert_walrus_operator(module).code
+
+
+@pytest.mark.parametrize(
+    ("source", "helper"),
+    [
+        pytest.param("r = [y for x in d if (y := f(x))]\n", False, id="simple-filter"),
+        pytest.param(
+            "r = [y for x in d if p(x) and (y := f(x))]\n",
+            True,
+            id="walrus-not-evaluated-first",
+        ),
+        pytest.param(
+            "r = [y for x in d if p(x) if (y := f(x))]\n",
+            True,
+            id="walrus-not-in-first-filter",
+        ),
+        pytest.param(
+            "r = [y for x in d if (y := f(x))]\nprint(y)\n",
+            True,
+            id="target-used-after",
+        ),
+        pytest.param(
+            "def g():\n    r = [y for x in d if (y := f(x))]\n    return locals()\n",
+            True,
+            id="scope-uses-locals",
+        ),
+        pytest.param("r = [y := f(x) for x in d]\n", True, id="walrus-in-element"),
+        pytest.param(
+            "r = [y for x in d if (y := f(y))]\n",
+            True,
+            id="target-read-in-its-own-value",
+        ),
+    ],
+)
+def test_comprehension_one_line_only_when_equivalent(source, helper):
+    """The one-line form keeps the comprehension in place (and its line
+    numbers), but the binding stays inside it, so it's only used when that
+    can't be observed."""
+    assert _uses_helper(source) is helper
+
+
+def test_comprehension_one_line_keeps_layout():
+    source = textwrap.dedent("""\
+        res = [
+            y * 2
+            for x in data
+            if (y := f(x))
+        ]
+        """)
+    expected = textwrap.dedent("""\
+        res = [
+            y * 2
+            for x, y in ((x, f(x)) for x in data)
+            if y
+        ]
+        """)
+    result = _converters.convert_walrus_operator(cst.parse_module(source))
+    assert result.code == expected
+
+
+def test_comprehension_helper_keeps_original_as_comment():
+    source = "def g():\n    t = 0\n    return [t := t + x for x in d]\n"
+    result = _converters.convert_walrus_operator(cst.parse_module(source)).code
+    assert "        # [t := t + x for x in d]\n" in result
