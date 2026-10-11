@@ -177,10 +177,13 @@ and appropriate.
   * `contextlib`: `AbstractContextManager`, `AbstractAsyncContextManager`
   * `re`: `Pattern`, `Match`
 
-* `typing` -> `typing_extensions` fallbacks for `Literal`, `final`, `TypedDict`,
-  `get_args` and `get_origin`, gated on `sys.version_info`. Add
-  `typing_extensions` to your dependencies (with an appropriate environment marker)
-  if your runtime floor needs them.
+* `typing` -> `typing_extensions` fallbacks, gated on `sys.version_info`, for
+  `Literal`, `final`, `TypedDict` (3.8), `get_args`, `get_origin` (3.10), `Self`,
+  `LiteralString`, `Never`, `assert_never`, `assert_type`, `reveal_type`,
+  `dataclass_transform` (3.11) and `override` (3.12). Add `typing_extensions` to
+  your dependencies (with an environment marker such as
+  `python_version < "3.12"`, for the newest name you use) if your runtime floor
+  needs them.
 
 * PEP-810 - lazy imports: `lazy import x` and `lazy from x import y` are rewritten
   to deferred imports which reify on first use. The small runtime this needs is

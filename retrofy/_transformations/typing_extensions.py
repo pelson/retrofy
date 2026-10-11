@@ -23,6 +23,14 @@ TYPING_EXTENSIONS_CONFIG = BackportConfig(
         BackportFeature("get_origin", (3, 10)),
         BackportFeature("final", (3, 8)),
         BackportFeature("TypedDict", (3, 8)),
+        BackportFeature("Self", (3, 11)),
+        BackportFeature("LiteralString", (3, 11)),
+        BackportFeature("Never", (3, 11)),
+        BackportFeature("assert_never", (3, 11)),
+        BackportFeature("assert_type", (3, 11)),
+        BackportFeature("reveal_type", (3, 11)),
+        BackportFeature("dataclass_transform", (3, 11)),
+        BackportFeature("override", (3, 12)),
     ),
 )
 
