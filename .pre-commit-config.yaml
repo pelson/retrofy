@@ -4,6 +4,10 @@ repos:
     hooks:
       - id: mypy
         additional_dependencies: ["types-mock"]
+        # mypy parses with the host interpreter's ``ast``: retrofy's own
+        # source uses PEP 758 ``except A, B:`` (via ruff format), which
+        # only parses on 3.14+.
+        language_version: python3.14
         # mypy doesn't parse PEP 810 ``lazy`` syntax; exclude files
         # that use it natively. Tracked at
         # https://github.com/pelson/retrofy/issues/32 — fix is to run

@@ -636,10 +636,12 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Set up Python 3.13
+    # 3.14: the mypy hook needs a host that parses PEP 758 (see
+    # ``.pre-commit-config.yaml``).
+    - name: Set up Python 3.14
       uses: actions/setup-python@v5
       with:
-        python-version: "3.13"
+        python-version: "3.14"
 
     - name: Install dependencies
       run: |
