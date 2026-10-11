@@ -47,9 +47,14 @@ def test_if__multiple():
         assert a is 3
     """)
 
+    # bar() must only be called when the left-hand side is false.
     expected = textwrap.dedent("""
-    a = foo(); b = bar()
-    if a > 5 or b < 6:
+    a = foo()
+    _retrofy_cond_0 = a > 5
+    if not _retrofy_cond_0:
+        b = bar()
+        _retrofy_cond_0 = b < 6
+    if _retrofy_cond_0:
         assert a is 3
     """)
     module = cst.parse_module(test_case_source)
@@ -102,24 +107,15 @@ def test_while__multiple():
         process(chunk)
     """)
 
+    # random.random() must only be called when chunk is truthy.
     expected = textwrap.dedent("""
-    while True:
-        chunk = file.read(8192); alive = random.random()
-        if not (chunk and alive > 2): break
-        process(chunk)
-    """)
-
-    # In actual fact, the short-circuiting nature of logical
-    # operators means that perhaps this should really be (but perhaps not
-    # for or):
-    expected_idealistc = textwrap.dedent("""
     while True:
         chunk = file.read(8192)
         if not chunk: break
         alive = random.random()
         if not (alive > 2): break
         process(chunk)
-    """)  # noqa: F841
+    """)
 
     module = cst.parse_module(test_case_source)
     result = _converters.convert_walrus_operator(module)
@@ -423,6 +419,28 @@ SEMANTIC_CASES = {
             else:
                 return ("else", n)
             return ("broke", n)
+        """,
+    "one-line-suites": """
+        def f(g, h, k):
+            if (x := g()) and (y := h()): return (x, y)
+            n = 0
+            while (z := k()) and n < 2: n += 1
+            else: return ("else", n)
+            return "no"
+        """,
+    "comprehension-walrus-in-condition": """
+        def f(g, h, k):
+            # leading comment
+            if [y for x in [g(), h()] if (y := x)] and k():
+                return "yes"
+            return "no"
+        """,
+    "for-header-walrus-in-if-body": """
+        def f(g, h, k):
+            if g():
+                for _ in (x := [h()]):
+                    return x
+            return "no"
         """,
 }
 
