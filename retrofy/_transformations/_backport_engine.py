@@ -41,6 +41,11 @@ class BackportConfig:
     source_module: str  # e.g. "typing", "collections.abc"
     fallback_module: str  # e.g. "typing_extensions", "typing"
     features: Tuple[BackportFeature, ...] = field(default_factory=tuple)
+    # The distribution providing ``fallback_module``, when it is not part of
+    # the standard library. Fallback imports are then wrapped so that a
+    # missing (or too old) distribution raises an ``ImportError`` naming the
+    # package to install, rather than a bare ``No module named ...``.
+    fallback_distribution: Optional[str] = None
 
     @property
     def feature_lookup(self) -> Dict[str, BackportFeature]:
@@ -75,6 +80,18 @@ def _dotted_to_cst(dotted: str) -> cst.BaseExpression:
     for part in parts[1:]:
         node = cst.Attribute(value=node, attr=cst.Name(part))
     return node
+
+
+def _simple_lines(statements) -> List[cst.SimpleStatementLine]:
+    """The simple statement lines of a block, looking into ``try`` bodies
+    (where guarded fallback imports live)."""
+    out: List[cst.SimpleStatementLine] = []
+    for stmt in statements:
+        if isinstance(stmt, cst.SimpleStatementLine):
+            out.append(stmt)
+        elif isinstance(stmt, cst.Try):
+            out.extend(_simple_lines(stmt.body.body))
+    return out
 
 
 def _make_direct_import(dotted: str) -> cst.SimpleStatementLine:
@@ -359,9 +376,7 @@ class _AnalysisVisitor(cst.CSTVisitor):
             names = self._import_alias_names(substmt)
             return any(n in self.lookup for n in names)
 
-        for stmt in node.body.body:
-            if not isinstance(stmt, cst.SimpleStatementLine):
-                continue
+        for stmt in _simple_lines(node.body.body):
             for substmt in stmt.body:
                 if isinstance(substmt, cst.Assign):
                     val = substmt.value
@@ -381,9 +396,7 @@ class _AnalysisVisitor(cst.CSTVisitor):
                 ) and _import_touches_a_feature(substmt):
                     return "conditional_import"
         if isinstance(node.orelse, cst.Else):
-            for stmt in node.orelse.body.body:
-                if not isinstance(stmt, cst.SimpleStatementLine):
-                    continue
+            for stmt in _simple_lines(node.orelse.body.body):
                 for substmt in stmt.body:
                     if isinstance(
                         substmt,
@@ -777,16 +790,20 @@ class _BackportTransformer(cst.CSTTransformer):
             ],
         )
         else_body = cst.IndentedBlock(
-            [
-                cst.SimpleStatementLine(
-                    [
-                        cst.ImportFrom(
-                            module=_dotted_to_cst(self.config.fallback_module),
-                            names=fallback_aliases,
-                        ),
-                    ],
-                ),
-            ],
+            self._guard_fallback(
+                [
+                    cst.SimpleStatementLine(
+                        [
+                            cst.ImportFrom(
+                                module=_dotted_to_cst(self.config.fallback_module),
+                                names=fallback_aliases,
+                            ),
+                        ],
+                    ),
+                ],
+                version,
+                [u.feature for u in usages],
+            ),
         )
         return cst.If(
             test=self._version_condition(version, cst.GreaterThanEqual()),
@@ -834,9 +851,44 @@ class _BackportTransformer(cst.CSTTransformer):
             )
         return cst.If(
             test=self._version_condition(version, cst.LessThan()),
-            body=cst.IndentedBlock(statements),
+            body=cst.IndentedBlock(
+                self._guard_fallback(
+                    statements,
+                    version,
+                    [feature for _, feature in features],
+                ),
+            ),
             leading_lines=[] if nested else [cst.EmptyLine()],
         )
+
+    def _guard_fallback(
+        self,
+        statements: List[cst.SimpleStatementLine],
+        version: Tuple[int, int],
+        features: List[BackportFeature],
+    ) -> List[cst.BaseStatement]:
+        """Wrap the fallback *statements* so that a missing or too-old
+        ``fallback_distribution`` fails with an actionable message."""
+        dist = self.config.fallback_distribution
+        if dist is None:
+            return list(statements)
+        names = ", ".join(
+            f"{self.config.source_module}.{f.name}"
+            for f in sorted(features, key=lambda f: f.name)
+        )
+        message = (
+            f"{{__name__}} needs the {dist!r} package (for {names}) on "
+            f"Python < {version[0]}.{version[1]}. Install or upgrade it, e.g. "
+            f"with `pip install -U {dist}`."
+        )
+        guard = cst.parse_statement(
+            "try:\n"
+            "    pass\n"
+            "except (ImportError, AttributeError) as _retrofy_error:\n"
+            f"    raise ImportError(f{message!r}) from _retrofy_error\n",
+        )
+        assert isinstance(guard, cst.Try)
+        return [guard.with_changes(body=cst.IndentedBlock(list(statements)))]
 
     @staticmethod
     def _import_alias(name: str, alias: str) -> cst.ImportAlias:

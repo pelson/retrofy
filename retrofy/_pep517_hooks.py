@@ -21,6 +21,7 @@ from setuptools_ext import WheelModifier
 import tomlkit
 
 from ._converters import convert
+from ._transformations.typing_extensions import TYPING_EXTENSIONS_CONFIG
 
 _log = logging.getLogger("retrofy.build")
 
@@ -132,6 +133,56 @@ def _retrofy_version() -> str:
     return __version__
 
 
+def _add_requires_dist(text: str, requirement: str) -> str:
+    """Return ``text`` with ``Requires-Dist: {requirement}`` appended to the
+    METADATA header block."""
+    # PEP 566 / RFC 822: the first blank line ends the header block and
+    # starts the long-description body. The new Requires-Dist must go
+    # inside the header block.
+    header, sep, body = text.partition("\n\n")
+    header = header.rstrip("\n")
+    suffix = sep + body if sep else "\n"
+    return header + f"\nRequires-Dist: {requirement}" + suffix
+
+
+# The first typing_extensions release providing every name retrofy falls
+# back to it for (``override`` arrived in 4.4.0).
+_TYPING_EXTENSIONS_MIN_VERSION = "4.4"
+
+
+def _typing_extensions_requirement(floor: str) -> str | None:
+    """Return the ``typing_extensions`` requirement needed on ``floor`` by
+    the typing fallbacks retrofy may emit, or ``None`` if every backported
+    name is in ``typing`` already.
+
+    Derived from configuration only, not from the converted source: the
+    pre-flight ``prepare_metadata_for_build_wheel`` hook must reach the same
+    answer as the post-build hook without having converted anything.
+    """
+    newest = max(f.min_version for f in TYPING_EXTENSIONS_CONFIG.features)
+    if Version(floor).release[:2] >= newest:
+        return None
+    return (
+        f"typing_extensions>={_TYPING_EXTENSIONS_MIN_VERSION}; "
+        f'python_version < "{newest[0]}.{newest[1]}"'
+    )
+
+
+def _splice_typing_extensions_requires_dist(text: str, floor: str) -> str:
+    """Add the ``typing_extensions`` requirement for ``floor``, if any.
+
+    Callers only do so when the project's dependencies are dynamic (PEP 621).
+    With static dependencies the user declares it, and the guarded fallback
+    imports name the package if it is missing at runtime.
+    """
+    requirement = _typing_extensions_requirement(floor)
+    if requirement is None:
+        return text
+    if f"Requires-Dist: {requirement}" in text.partition("\n\n")[0].split("\n"):
+        return text
+    return _add_requires_dist(text, requirement)
+
+
 def _splice_retrofy_requires_dist(text: str) -> str:
     """Return ``text`` with ``Requires-Dist: retrofy=={VERSION}`` added
     to the METADATA header block, where ``VERSION`` is the exact version
@@ -145,13 +196,7 @@ def _splice_retrofy_requires_dist(text: str) -> str:
     runtime resolver to make a policy decision (stable vs prerelease,
     PyPI vs find-links) which is not stable across uv versions.
     """
-    # PEP 566 / RFC 822: the first blank line ends the header block and
-    # starts the long-description body. The new Requires-Dist must go
-    # inside the header block.
-    header, sep, body = text.partition("\n\n")
-    header = header.rstrip("\n")
-    suffix = sep + body if sep else "\n"
-    return header + f"\nRequires-Dist: retrofy=={_retrofy_version()}" + suffix
+    return _add_requires_dist(text, f"retrofy=={_retrofy_version()}")
 
 
 def _rewrite_requires_python_floor(existing: str | None, floor: str) -> str:
@@ -225,6 +270,8 @@ def _apply_wheel_metadata_edits(text: str) -> str:
     floor = _read_target_python(pathlib.Path.cwd())
     if floor is not None:
         text = _lower_requires_python(text, floor)
+        if _dependencies_are_dynamic(pathlib.Path.cwd()):
+            text = _splice_typing_extensions_requires_dist(text, floor)
     return text
 
 
@@ -243,11 +290,14 @@ def _apply_editable_metadata_edits(text: str) -> str:
     Any new ``METADATA`` edit for editable installs goes here, not in
     the hooks.
     """
-    if _dependencies_are_dynamic(pathlib.Path.cwd()):
+    dynamic = _dependencies_are_dynamic(pathlib.Path.cwd())
+    if dynamic:
         text = _splice_retrofy_requires_dist(text)
     floor = _read_target_python(pathlib.Path.cwd())
     if floor is not None:
         text = _lower_requires_python(text, floor)
+        if dynamic:
+            text = _splice_typing_extensions_requires_dist(text, floor)
     return text
 
 

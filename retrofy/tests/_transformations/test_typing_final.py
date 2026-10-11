@@ -1,10 +1,12 @@
+import dataclasses
 import sys
 import textwrap
 from typing import Any, Dict
 
 import libcst as cst
 
-from retrofy._transformations.typing_extensions import transform_typing_extensions
+from retrofy._transformations._backport_engine import transform
+from retrofy._transformations.typing_extensions import TYPING_EXTENSIONS_CONFIG
 
 
 def execute_code_with_results(code: str) -> Dict[str, Any]:
@@ -24,7 +26,12 @@ def execute_code_with_results(code: str) -> Dict[str, Any]:
 def transform_typing_final(source_code: str) -> str:
     """Apply typing.final transformation to source code."""
     module = cst.parse_module(source_code)
-    return transform_typing_extensions(module.code)
+    # Without the missing-package guard; see test_typing_extensions.py.
+    unguarded = dataclasses.replace(
+        TYPING_EXTENSIONS_CONFIG,
+        fallback_distribution=None,
+    )
+    return transform(module.code, unguarded)
     # transformer = TypingFinalTransformer()
     # transformed_module = module.visit(transformer)
     # return transformed_module.code

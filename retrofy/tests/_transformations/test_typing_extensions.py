@@ -1,7 +1,18 @@
+import dataclasses
+import sys
 import textwrap
+import types
 from typing import Any, Dict
 
 import pytest
+
+from retrofy._transformations._backport_engine import transform
+from retrofy._transformations.typing_extensions import TYPING_EXTENSIONS_CONFIG
+
+UNGUARDED_CONFIG = dataclasses.replace(
+    TYPING_EXTENSIONS_CONFIG,
+    fallback_distribution=None,
+)
 
 
 def execute_code_with_results(code: str) -> Dict[str, Any]:
@@ -26,12 +37,13 @@ def execute_code_with_results(code: str) -> Dict[str, Any]:
 
 
 def transform_typing_extensions(source_code: str) -> str:
-    """Apply typing_extensions transformation to source code."""
-    from retrofy._transformations.typing_extensions import (
-        transform_typing_extensions as transform,
-    )
+    """Apply typing_extensions transformation to source code.
 
-    return transform(source_code)
+    Uses the configuration without the missing-package guard, so that
+    these tests show the placement of the fallbacks plainly; the guard
+    is covered by the ``_transform_guarded`` tests.
+    """
+    return transform(source_code, UNGUARDED_CONFIG)
 
 
 def test_literal_from_typing():
@@ -2269,9 +2281,6 @@ def test_fallback_error_when_typing_extensions_unusable(
 ):
     """Run the fallback branch as on Python 3.10, with typing_extensions
     either not installed or lacking ``Self``."""
-    import sys
-    import types
-
     code = _transform_guarded(source)
     with monkeypatch.context() as m:
         m.setattr(sys, "version_info", (3, 10, 0, "final", 0))
@@ -2291,8 +2300,4 @@ def test_fallback_error_when_typing_extensions_unusable(
 
 def _transform_guarded(source_code: str) -> str:
     """The production configuration, with the missing-package guard."""
-    from retrofy._transformations.typing_extensions import (
-        transform_typing_extensions as transform,
-    )
-
-    return transform(source_code)
+    return transform(source_code, TYPING_EXTENSIONS_CONFIG)

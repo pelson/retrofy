@@ -32,6 +32,7 @@ TYPING_EXTENSIONS_CONFIG = BackportConfig(
         BackportFeature("dataclass_transform", (3, 11)),
         BackportFeature("override", (3, 12)),
     ),
+    fallback_distribution="typing_extensions",
 )
 
 
