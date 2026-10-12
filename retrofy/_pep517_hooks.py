@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import textwrap
+import typing
 import zipfile
 
 from packaging.requirements import InvalidRequirement, Requirement
@@ -101,9 +102,15 @@ def _read_target_python(source_root: pathlib.Path) -> str | None:
     floor = data.get("tool", {}).get("retrofy", {}).get("target-python")
     if not floor:
         return None
+    return _validate_target_python(floor, "[tool.retrofy] target-python")
+
+
+def _validate_target_python(floor: object, where: str) -> str:
+    """Return *floor* if it is a single version like ``"3.9"``; raise
+    otherwise. *where* names the setting in the error messages."""
     if not isinstance(floor, str):
         raise TypeError(
-            f'[tool.retrofy] target-python must be a string (e.g. "3.9"), '
+            f'{where} must be a string (e.g. "3.9"), '
             f"got {type(floor).__name__} {floor!r}. Quote the value in "
             f"pyproject.toml -- TOML floats like ``3.10`` lose their "
             f"trailing zero and silently lower the floor.",
@@ -114,7 +121,7 @@ def _read_target_python(source_root: pathlib.Path) -> str | None:
         parsed = None
     if parsed is None or len(parsed.release) < 2:
         raise ValueError(
-            f"[tool.retrofy] target-python must be a single version like "
+            f"{where} must be a single version like "
             f'"3.9" or "3.9.7"; got {floor!r}. Range specifiers '
             f'(">=3.9", "3.9,!=3.12.*") and lone-major values ("3") are '
             f"not accepted here -- put any such exclusions in "
@@ -433,8 +440,105 @@ def compatibility_via_import_hook(wheel: pathlib.Path):
     editable_copy.unlink()
 
 
+def _runtime_payload_dirs(
+    lazy_runtime_dirs: set[str],
+    existing_entries: set[str],
+) -> list[str]:
+    """The ``_retrofy_rt`` directories (``/``-separated, relative to the
+    artefact root) to inject, one beside each converted module that imports
+    from it.
+
+    The canonical home of the runtime is ``retrofy/_retrofy_rt/``: when the
+    artefact is retrofy's own, the converted module's sibling already holds
+    the payload byte-for-byte, so it is skipped. Anything else already
+    under a ``_retrofy_rt`` name would be silently shadowed, so it is an
+    error: ``_retrofy_rt`` is retrofy's reserved namespace inside converted
+    packages.
+    """
+    targets = []
+    for pkg_dir in sorted(lazy_runtime_dirs):
+        target_dir = f"{pkg_dir}/_retrofy_rt" if pkg_dir else "_retrofy_rt"
+        if f"{target_dir}/lazy_imports.py" in existing_entries:
+            continue
+        clash = [
+            e
+            for e in existing_entries
+            if e == target_dir
+            or e == f"{target_dir}/"
+            or e.startswith(f"{target_dir}/")
+        ]
+        if clash:
+            raise _EmbeddedRuntimeCollisionError(
+                f"package directory {pkg_dir!r} already contains a "
+                f"`_retrofy_rt` entry ({clash[0]!r}); `_retrofy_rt` "
+                f"is reserved as retrofy's runtime namespace inside "
+                f"converted packages.",
+            )
+        targets.append(target_dir)
+    return targets
+
+
+def _convert_wheel(
+    source: pathlib.Path,
+    destination: pathlib.Path,
+    edit_metadata: typing.Callable[[str], str],
+) -> bool:
+    """Write a converted copy of the wheel *source* to *destination* (which
+    may be the same path): lowered source, the ``_retrofy_rt`` runtime where
+    needed, and METADATA passed through *edit_metadata*. RECORD is rehashed.
+
+    Returns whether anything changed; if not, *destination* is not written.
+    """
+    has_modifications = False
+    # Directories within the wheel whose converted modules emitted a
+    # ``from ._retrofy_rt.lazy_imports import (...)`` line.
+    lazy_runtime_dirs: set[str] = set()
+    # Read from a copy, so that *destination* may be *source*.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source_copy = pathlib.Path(tmpdir) / source.name
+        shutil.copy(source, source_copy)
+        with zipfile.ZipFile(str(source_copy), "r") as whl_zip:
+            whl = WheelModifier(whl_zip)
+            existing_entries = set(whl_zip.namelist())
+
+            for filename in whl_zip.namelist():
+                if filename.endswith(".py"):
+                    code = whl.read(filename).decode("utf-8")
+                    new_code = convert(code)
+                    if new_code != code:
+                        _log.info("Converted %s to compatibility syntax", filename)
+                        whl.write(filename, new_code.encode("utf-8"))
+                        has_modifications = True
+                        if _LAZY_RUNTIME_IMPORT_MARKER in new_code:
+                            lazy_runtime_dirs.add(posixpath.dirname(filename))
+
+            payload_dirs = _runtime_payload_dirs(lazy_runtime_dirs, existing_entries)
+            if payload_dirs:
+                payload = _embedded_runtime_files()
+                for target_dir in payload_dirs:
+                    for relpath, data in payload.items():
+                        # WheelModifier.write needs a ZipInfo for entries
+                        # not already in the source wheel.
+                        whl.write(zipfile.ZipInfo(f"{target_dir}/{relpath}"), data)
+                    _log.info("Injected retrofy runtime payload into %s/", target_dir)
+                has_modifications = True
+
+            metadata_name = whl.dist_info_dirname() + "/METADATA"
+            metadata_text = whl.read(metadata_name).decode("utf-8")
+            new_metadata = edit_metadata(metadata_text)
+            if new_metadata != metadata_text:
+                whl.write(metadata_name, new_metadata.encode("utf-8"))
+                _log.info("Applied METADATA edits to %s", metadata_name)
+                has_modifications = True
+
+            if has_modifications:
+                with destination.open("wb") as whl_fh:
+                    whl.write_wheel(whl_fh)
+    return has_modifications
+
+
 def compatibility_via_rewrite(wheel: pathlib.Path):
-    """Change code within the given wheel to be compatible"""
+    """``post-build-wheel`` hook: make the built wheel compatible, in place."""
     if os.environ.get("RETROFY_DISABLE_REWRITE") == "1":
         # Escape hatch for the chicken-and-egg bootstrap: producing
         # retrofy's *own* wheel from source needs a wheel-build pass
@@ -444,88 +548,12 @@ def compatibility_via_rewrite(wheel: pathlib.Path):
         # makes it a no-op.
         _log.info("RETROFY_DISABLE_REWRITE=1 — skipping wheel rewrite")
         return
-    editable_copy = wheel.parent / (wheel.name + ".copy.whl")
-    shutil.copy(wheel, editable_copy)
-
-    has_modifications = False
-    # Directories within the wheel whose converted modules emitted a
-    # ``from ._retrofy_rt.lazy_imports import (...)`` line. Each one
-    # needs a sibling ``_retrofy_rt/`` sub-package dropped in.
-    lazy_runtime_dirs: set[str] = set()
-
-    with zipfile.ZipFile(str(editable_copy), "r") as whl_zip:
-        whl = WheelModifier(whl_zip)
-        existing_entries = set(whl_zip.namelist())
-
-        for filename in whl_zip.namelist():
-            if filename.endswith(".py"):
-                code = whl.read(filename).decode("utf-8")
-                new_code = convert(code)
-                if new_code != code:
-                    _log.info("Converted %s to compatibility syntax", filename)
-                    whl.write(filename, new_code)
-                    has_modifications = True
-                    if _LAZY_RUNTIME_IMPORT_MARKER in new_code:
-                        lazy_runtime_dirs.add(posixpath.dirname(filename))
-
-        if lazy_runtime_dirs:
-            payload = _embedded_runtime_files()
-            for pkg_dir in sorted(lazy_runtime_dirs):
-                target_dir = f"{pkg_dir}/_retrofy_rt" if pkg_dir else "_retrofy_rt"
-                # The canonical home of the runtime lives at
-                # ``retrofy/_retrofy_rt/`` -- that is the source we are
-                # otherwise copying from. When the wheel under rewrite
-                # IS retrofy's own wheel, the converted module's own
-                # sibling already contains the payload byte-for-byte, so
-                # skip the inject (and the clash check below).
-                if f"{target_dir}/lazy_imports.py" in existing_entries:
-                    continue
-                # ``_retrofy_rt`` is retrofy's reserved namespace inside
-                # converted packages. If a user already ships anything
-                # under that name we'd silently shadow it — refuse to.
-                clash = [
-                    e
-                    for e in existing_entries
-                    if e == target_dir
-                    or e == f"{target_dir}/"
-                    or e.startswith(f"{target_dir}/")
-                ]
-                if clash:
-                    raise _EmbeddedRuntimeCollisionError(
-                        f"package directory {pkg_dir!r} already contains a "
-                        f"`_retrofy_rt` entry ({clash[0]!r}); `_retrofy_rt` "
-                        f"is reserved as retrofy's runtime namespace inside "
-                        f"converted packages.",
-                    )
-                for relpath, data in payload.items():
-                    # WheelModifier.write needs a ZipInfo for entries
-                    # not already in the source wheel (which the
-                    # injected payload never is).
-                    whl.write(zipfile.ZipInfo(f"{target_dir}/{relpath}"), data)
-                _log.info(
-                    "Injected retrofy runtime payload into %s/",
-                    target_dir,
-                )
-                has_modifications = True
-
-        # PEP 517: the METADATA in the built wheel must match what
-        # ``prepare_metadata_for_build_wheel`` returned. Route the edit
-        # through ``_apply_wheel_metadata_edits`` so this hook and the
-        # pre-flight ``lower_metadata_requires_python`` share one policy
-        # definition.
-        metadata_name = whl.dist_info_dirname() + "/METADATA"
-        metadata_text = whl.read(metadata_name).decode("utf-8")
-        new_metadata = _apply_wheel_metadata_edits(metadata_text)
-        if new_metadata != metadata_text:
-            whl.write(metadata_name, new_metadata)
-            _log.info("Applied wheel-install METADATA edits to %s", metadata_name)
-            has_modifications = True
-
-        if has_modifications:
-            with wheel.open("wb") as whl_fh:
-                whl.write_wheel(whl_fh)
-
-    editable_copy.unlink()
+    # PEP 517: the METADATA in the built wheel must match what
+    # ``prepare_metadata_for_build_wheel`` returned. Route the edit
+    # through ``_apply_wheel_metadata_edits`` so this hook and the
+    # pre-flight ``lower_metadata_requires_python`` share one policy
+    # definition.
+    _convert_wheel(wheel, wheel, _apply_wheel_metadata_edits)
 
 
 def _strip_top_level(member_name: str) -> tuple[str, str]:
@@ -594,6 +622,42 @@ def _patch_pyproject_for_lowered_sdist(text: str, floor: str) -> str:
     return tomlkit.dumps(doc)
 
 
+def _convert_directory(root: pathlib.Path) -> bool:
+    """Convert the ``.py`` files under *root* in place, and add the
+    ``_retrofy_rt`` runtime beside converted modules that need it.
+
+    Returns whether anything changed.
+    """
+    existing_entries = {
+        p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()
+    }
+    has_modifications = False
+    lazy_runtime_dirs: set[str] = set()
+    for py in sorted(root.rglob("*.py")):
+        text = py.read_text(encoding="utf-8")
+        new_text = convert(text)
+        if new_text != text:
+            py.write_text(new_text, encoding="utf-8")
+            _log.info("Converted %s to compatibility syntax", py.relative_to(root))
+            has_modifications = True
+            if _LAZY_RUNTIME_IMPORT_MARKER in new_text:
+                lazy_runtime_dirs.add(
+                    posixpath.dirname(py.relative_to(root).as_posix()),
+                )
+
+    payload_dirs = _runtime_payload_dirs(lazy_runtime_dirs, existing_entries)
+    if payload_dirs:
+        payload = _embedded_runtime_files()
+        for target_dir in payload_dirs:
+            inject_dir = root / target_dir
+            inject_dir.mkdir(parents=True, exist_ok=True)
+            for relpath, data in payload.items():
+                (inject_dir / relpath).write_bytes(data)
+            _log.info("Injected retrofy runtime payload into %s/", target_dir)
+        has_modifications = True
+    return has_modifications
+
+
 def lower_sdist(sdist_path: pathlib.Path) -> None:
     """``post-build-sdist`` hook.
 
@@ -636,65 +700,11 @@ def lower_sdist(sdist_path: pathlib.Path) -> None:
                 tar.extractall(tmp)  # noqa: S202  # see comment above
 
         root = tmp / top
-        existing_entries = {
-            str(p.relative_to(root)).replace(os.sep, "/")
-            for p in root.rglob("*")
-            if p.is_file()
-        }
-
-        has_modifications = False
-
         # Convert sources unconditionally -- the same modern syntax that
         # the wheel hook lowers is unparseable on any older Python, so
         # source lowering is universally useful even when the project
         # has not opted into metadata lowering via ``target-python``.
-        lazy_runtime_dirs: set[str] = set()
-        for py in root.rglob("*.py"):
-            text = py.read_text(encoding="utf-8")
-            new_text = convert(text)
-            if new_text != text:
-                py.write_text(new_text, encoding="utf-8")
-                _log.info(
-                    "Converted %s to compatibility syntax",
-                    py.relative_to(root),
-                )
-                has_modifications = True
-                if _LAZY_RUNTIME_IMPORT_MARKER in new_text:
-                    rel = posixpath.dirname(
-                        str(py.relative_to(root)).replace(os.sep, "/"),
-                    )
-                    lazy_runtime_dirs.add(rel)
-
-        # Inject _retrofy_rt/ payload where needed.
-        if lazy_runtime_dirs:
-            payload = _embedded_runtime_files()
-            for pkg_dir in sorted(lazy_runtime_dirs):
-                target_dir = f"{pkg_dir}/_retrofy_rt" if pkg_dir else "_retrofy_rt"
-                if f"{target_dir}/lazy_imports.py" in existing_entries:
-                    continue
-                clash = [
-                    e
-                    for e in existing_entries
-                    if e == target_dir
-                    or e == f"{target_dir}/"
-                    or e.startswith(f"{target_dir}/")
-                ]
-                if clash:
-                    raise _EmbeddedRuntimeCollisionError(
-                        f"package directory {pkg_dir!r} already contains a "
-                        f"`_retrofy_rt` entry ({clash[0]!r}); `_retrofy_rt` "
-                        f"is reserved as retrofy's runtime namespace inside "
-                        f"converted packages.",
-                    )
-                inject_dir = root / target_dir.replace("/", os.sep)
-                inject_dir.mkdir(parents=True, exist_ok=True)
-                for relpath, data in payload.items():
-                    (inject_dir / relpath).write_bytes(data)
-                _log.info(
-                    "Injected retrofy runtime payload into %s/",
-                    target_dir,
-                )
-                has_modifications = True
+        has_modifications = _convert_directory(root)
 
         # Metadata lowering is opt-in via ``[tool.retrofy] target-python``.
         if floor is not None:
