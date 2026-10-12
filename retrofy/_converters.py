@@ -17,6 +17,7 @@ from ._transformations import (
     match_statement,
     pep585_builtins,
     pep585_imports,
+    pep617_with,
     pep758_except,
     type_alias,
     typing_extensions,
@@ -393,6 +394,11 @@ def convert_sequence_subscript(module: cst.Module) -> cst.Module:
     return pep585_builtins.convert(module)
 
 
+def convert_pep617_with(module: cst.Module) -> cst.Module:
+    """Lower PEP 617 parenthesised context managers, keeping line numbers."""
+    return pep617_with.convert(module)
+
+
 def convert_pep758_except(module: cst.Module) -> cst.Module:
     """Lower PEP 758 ``except A, B:`` to ``except (A, B):``."""
     return pep758_except.convert(module)
@@ -447,6 +453,7 @@ def convert(code: str) -> str:
         err.lineno = getattr(exc, "raw_line", None)
         err.offset = getattr(exc, "raw_column", None)
         raise err from exc
+    mod = convert_pep617_with(mod)
     mod = convert_pep758_except(mod)
     mod = convert_sequence_subscript(mod)
     mod = convert_walrus_operator(mod)
