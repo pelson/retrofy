@@ -25,6 +25,16 @@ def _module_dotted_name(node: Optional[cst.BaseExpression]) -> Optional[str]:
     return ".".join(reversed(parts))
 
 
+def is_module_docstring(stmt: cst.CSTNode) -> bool:
+    """Whether *stmt* is a docstring (as the first statement of a module)."""
+    return (
+        isinstance(stmt, cst.SimpleStatementLine)
+        and len(stmt.body) == 1
+        and isinstance(stmt.body[0], cst.Expr)
+        and isinstance(stmt.body[0].value, (cst.SimpleString, cst.ConcatenatedString))
+    )
+
+
 class ImportManager:
     """Helper class for managing automatic imports in transformations."""
 
@@ -84,13 +94,8 @@ class ImportManager:
         position = 0
 
         # Skip module docstrings
-        if body and isinstance(body[0], cst.SimpleStatementLine):
-            if (
-                len(body[0].body) == 1
-                and isinstance(body[0].body[0], cst.Expr)
-                and isinstance(body[0].body[0].value, cst.SimpleString)
-            ):
-                position = 1
+        if body and is_module_docstring(body[0]):
+            position = 1
 
         # Skip __future__ imports
         for i in range(position, len(body)):
@@ -301,6 +306,8 @@ class EnhancedImportManager:
         module_name: str,
     ) -> bool:
         """Check if a direct import exists early in the module (before non-import statements)."""
+        if body and is_module_docstring(body[0]):
+            body = body[1:]
         for stmt in body:
             if isinstance(stmt, cst.SimpleStatementLine):
                 # Check if this is an import statement
@@ -363,13 +370,8 @@ class EnhancedImportManager:
         position = 0
 
         # Skip module docstrings
-        if body and isinstance(body[0], cst.SimpleStatementLine):
-            if (
-                len(body[0].body) == 1
-                and isinstance(body[0].body[0], cst.Expr)
-                and isinstance(body[0].body[0].value, cst.SimpleString)
-            ):
-                position = 1
+        if body and is_module_docstring(body[0]):
+            position = 1
 
         # Skip __future__ imports
         for i in range(position, len(body)):
@@ -404,13 +406,8 @@ class EnhancedImportManager:
         position = 0
 
         # Skip module docstrings
-        if body and isinstance(body[0], cst.SimpleStatementLine):
-            if (
-                len(body[0].body) == 1
-                and isinstance(body[0].body[0], cst.Expr)
-                and isinstance(body[0].body[0].value, cst.SimpleString)
-            ):
-                position = 1
+        if body and is_module_docstring(body[0]):
+            position = 1
 
         # Skip all imports
         for i in range(position, len(body)):

@@ -87,3 +87,11 @@ def test_wheel_hook_is_idempotent(tmp_path, monkeypatch):
     first = whl.read_bytes()
     compatibility_via_rewrite(whl)
     assert whl.read_bytes() == first
+
+
+def test_build_requires_what_the_hooks_import(pyproject):
+    # The inline hooks import retrofy from the checkout, so retrofy's runtime
+    # dependencies must be available in the build environment.
+    build_requires = set(pyproject["build-system"]["requires"])
+    missing = set(pyproject["project"]["dependencies"]) - build_requires
+    assert not missing

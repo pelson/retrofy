@@ -188,12 +188,10 @@ def _validate_target_python(floor: object, where: str) -> str:
 
 
 def _retrofy_version() -> str:
-    # Imported lazily so this module is safe to import without retrofy's
-    # own setuptools-scm-generated ``_version.py`` being on disk yet
-    # (e.g. during retrofy's own bootstrap build).
-    from . import __version__
-
-    return __version__
+    # Read _version.py when needed rather than ``retrofy.__version__``: when
+    # retrofy builds itself, this module is imported before setuptools-scm
+    # writes _version.py, and ``__init__`` falls back to a placeholder.
+    return importlib.import_module(f"{__package__}._version").__version__
 
 
 def _add_requires_dist(text: str, requirement: str) -> str:
@@ -596,12 +594,8 @@ def _convert_wheel(
 def compatibility_via_rewrite(wheel: pathlib.Path):
     """``post-build-wheel`` hook: make the built wheel compatible, in place."""
     if os.environ.get("RETROFY_DISABLE_REWRITE") == "1":
-        # Escape hatch for the chicken-and-egg bootstrap: producing
-        # retrofy's *own* wheel from source needs a wheel-build pass
-        # whose source still contains raw ``lazy from``, run without
-        # any rewrite hook in the way. Setting this env var on that
-        # first pass keeps the hook installed (entry point intact) but
-        # makes it a no-op.
+        # Escape hatch: build a wheel of the raw (unconverted) source,
+        # keeping the hook installed but making it a no-op.
         _log.info("RETROFY_DISABLE_REWRITE=1 — skipping wheel rewrite")
         return
     # PEP 517: the METADATA in the built wheel must match what
@@ -723,8 +717,8 @@ def lower_sdist(sdist_path: pathlib.Path) -> None:
     ``Requires-Python`` / ``[build-system].requires`` rewrites are
     gated on ``[tool.retrofy] target-python``.
 
-    ``RETROFY_DISABLE_REWRITE=1`` short-circuits to a no-op for the
-    retrofy self-build bootstrap, matching the wheel hook.
+    ``RETROFY_DISABLE_REWRITE=1`` short-circuits to a no-op, matching the
+    wheel hook.
     """
     if os.environ.get("RETROFY_DISABLE_REWRITE") == "1":
         _log.info("RETROFY_DISABLE_REWRITE=1 — skipping sdist rewrite")
