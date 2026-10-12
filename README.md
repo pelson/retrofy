@@ -76,28 +76,42 @@ It is imperative that you test the produced wheels with the target versions, as 
 may be syntax which is not yet handled in retrofy, resulting in a SyntaxError on your
 desired Python version.
 
-### Lowering `Requires-Python` on the built wheel
+### Lowering `Requires-Python`
 
-By default `retrofy` only rewrites your project's source. The built wheel's
-`Requires-Python` metadata still reflects whatever `requires-python` you declared in
-`[project]` — which is normally your *source* target, not the target you've lowered
-to. Opt in to lowering the wheel's `Requires-Python` floor by adding
-`[tool.retrofy] target-python` to your `pyproject.toml`:
+The built artefacts can install on an older Python than the source needs. Tell
+retrofy which, with `[tool.retrofy] target-python`, and list `requires-python` as
+dynamic so retrofy can supply it:
 
 ```toml
+[build-system]
+requires = ["multistage-build>=0.4", "setuptools", "retrofy"]
+build-backend = "multistage_build:backend"
+
 [project]
-requires-python = ">=3.13"      # your source target
+dynamic = ["requires-python"]
 
 [tool.retrofy]
-target-python = "3.9"           # what the built wheel can install onto
+target-python = "3.9"           # what the built artefacts install onto
+source-python = "3.15"          # what the source itself needs (informational)
 ```
 
-With this set, retrofy's `compatibility_via_rewrite` post-build-wheel hook also
-rewrites the wheel's METADATA so `pip install your-pkg` accepts Python 3.9+.
+retrofy then supplies `requires-python = ">=3.9"` to setuptools for wheel, sdist and
+editable builds, in memory (`pyproject.toml` is never modified). `source-python`
+records what the unconverted source needs; it doesn't limit which Python builds the
+project (retrofy only parses the source), and retrofy checks that `target-python`
+isn't newer. Tools that read
+`pyproject.toml` directly see that the value is dynamic and ask the build backend,
+as PEP 621 requires.
 
-Note that the source still declares `requires-python = ">=3.13"`, so installing
-from an sdist on Python 3.9 will fail loudly at parse time — that's expected, since
-the source contains syntax that 3.9 cannot parse. Only the *wheel* has been lowered.
+A static `requires-python` (your *source* target, e.g. `">=3.13"`) also works:
+retrofy lowers `Requires-Python` in the built metadata, keeping any other clauses
+such as `!=3.12.*`. But changing a static field in the build deviates from PEP 621,
+and tools that read `pyproject.toml` directly (rather than asking the backend) will
+see the source target.
+
+Either way, the sdist is lowered too: its source is converted, its `pyproject.toml`
+gets a static `requires-python = ">=3.9"`, and `retrofy` is dropped from its build
+requirements, so it builds on 3.9 without retrofy.
 
 ### Editable installs
 

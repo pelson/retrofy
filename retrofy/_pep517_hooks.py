@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import importlib
 import importlib.resources
 import logging
 import os
@@ -105,6 +106,98 @@ def _read_target_python(source_root: pathlib.Path) -> str | None:
     return _validate_target_python(floor, "[tool.retrofy] target-python")
 
 
+def _read_source_python(source_root: pathlib.Path) -> str | None:
+    """Return ``[tool.retrofy] source-python`` (e.g. ``"3.15"``): the Python
+    the on-disk source runs on unconverted, or ``None`` if not declared.
+
+    Declarative: it doesn't limit which Python builds the project, since
+    retrofy's hooks only parse the source.
+    """
+    pyproject = source_root / "pyproject.toml"
+    if not pyproject.exists():
+        return None
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    source = data.get("tool", {}).get("retrofy", {}).get("source-python")
+    if not source:
+        return None
+    return _validate_target_python(source, "[tool.retrofy] source-python")
+
+
+def post_load_backend(backend: object) -> None:
+    """``post-load-backend`` hook (multistage-build >= 0.4).
+
+    multistage-build calls it once the build backend is imported, before
+    any PEP 517 call reaches it. Checks ``[tool.retrofy] source-python``
+    against ``target-python``, then supplies a dynamic ``requires-python``
+    (see :func:`supply_dynamic_requires_python`).
+    """
+    root = pathlib.Path.cwd()
+    source = _read_source_python(root)
+    target = _read_target_python(root)
+    if source is not None and target is not None and Version(target) > Version(source):
+        raise ValueError(
+            f"[tool.retrofy] target-python ({target}) is newer than "
+            f"source-python ({source}); target-python is the oldest Python "
+            f"the built artefacts support.",
+        )
+    supply_dynamic_requires_python(backend)
+
+
+def supply_dynamic_requires_python(backend: object) -> None:
+    """``post-load-backend`` hook (multistage-build >= 0.4).
+
+    When ``requires-python`` is listed in ``[project].dynamic``, supply it
+    as ``>={target-python}`` from ``[tool.retrofy] target-python``: the
+    built artefacts are lowered to that floor, even though the on-disk
+    source needs a newer Python.
+
+    setuptools only accepts a dynamic ``requires-python`` from ``setup.py``,
+    and rejects it already in ``get_requires_for_build_*``, the first call a
+    frontend makes. This hook runs before every call (multistage-build calls
+    it once the backend is imported), and wraps setuptools' pyproject loader
+    so that the parsed configuration of this project's ``pyproject.toml``
+    carries the value. Nothing is written to disk. Other backends handle
+    their dynamic fields themselves and are left alone.
+    """
+    root = pathlib.Path.cwd()
+    pyproject = root / "pyproject.toml"
+    if not pyproject.exists():
+        return
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    if "requires-python" not in (data.get("project", {}).get("dynamic", []) or []):
+        return
+    if not getattr(backend, "__name__", "").startswith("setuptools"):
+        return
+    floor = _read_target_python(root)
+    if floor is None:
+        raise ValueError(
+            "requires-python is listed in [project].dynamic, which retrofy "
+            "supplies from [tool.retrofy] target-python; set it, e.g. "
+            'target-python = "3.9".',
+        )
+
+    # Only reachable when the backend is setuptools, which retrofy itself
+    # doesn't otherwise need here.
+    pyprojecttoml = importlib.import_module("setuptools.config.pyprojecttoml")
+    original = getattr(pyprojecttoml, "load_file")
+    if getattr(original, "_retrofy_supplies_requires_python", False):
+        return  # already wrapped in this process
+    target = pyproject.resolve()
+    requires_python = f">={floor}"
+
+    def load_file(filepath):  # type: ignore[no-untyped-def]
+        loaded = original(filepath)
+        project = loaded.get("project", {})
+        dynamic = project.get("dynamic", [])
+        if pathlib.Path(filepath).resolve() == target and "requires-python" in dynamic:
+            project["dynamic"] = [d for d in dynamic if d != "requires-python"]
+            project["requires-python"] = requires_python
+        return loaded
+
+    setattr(load_file, "_retrofy_supplies_requires_python", True)
+    setattr(pyprojecttoml, "load_file", load_file)
+
+
 def _validate_target_python(floor: object, where: str) -> str:
     """Return *floor* if it is a single version like ``"3.9"``; raise
     otherwise. *where* names the setting in the error messages."""
@@ -132,12 +225,10 @@ def _validate_target_python(floor: object, where: str) -> str:
 
 
 def _retrofy_version() -> str:
-    # Imported lazily so this module is safe to import without retrofy's
-    # own setuptools-scm-generated ``_version.py`` being on disk yet
-    # (e.g. during retrofy's own bootstrap build).
-    from . import __version__
-
-    return __version__
+    # Read _version.py when needed rather than ``retrofy.__version__``: when
+    # retrofy builds itself, this module is imported before setuptools-scm
+    # writes _version.py, and ``__init__`` falls back to a placeholder.
+    return importlib.import_module(f"{__package__}._version").__version__
 
 
 def _add_requires_dist(text: str, requirement: str) -> str:
@@ -540,12 +631,8 @@ def _convert_wheel(
 def compatibility_via_rewrite(wheel: pathlib.Path):
     """``post-build-wheel`` hook: make the built wheel compatible, in place."""
     if os.environ.get("RETROFY_DISABLE_REWRITE") == "1":
-        # Escape hatch for the chicken-and-egg bootstrap: producing
-        # retrofy's *own* wheel from source needs a wheel-build pass
-        # whose source still contains raw ``lazy from``, run without
-        # any rewrite hook in the way. Setting this env var on that
-        # first pass keeps the hook installed (entry point intact) but
-        # makes it a no-op.
+        # Escape hatch: build a wheel of the raw (unconverted) source,
+        # keeping the hook installed but making it a no-op.
         _log.info("RETROFY_DISABLE_REWRITE=1 — skipping wheel rewrite")
         return
     # PEP 517: the METADATA in the built wheel must match what
@@ -594,6 +681,8 @@ def _patch_pyproject_for_lowered_sdist(text: str, floor: str) -> str:
       ``[project].dynamic``, drop it.
     - drop ``retrofy`` from ``[build-system].requires`` (PEP 503
       normalised match).
+    - drop ``[tool.retrofy] source-python``: the sdist's source has been
+      lowered to ``target-python``.
 
     Uses ``tomlkit`` for a round-trip edit that preserves comments and
     formatting wherever it doesn't conflict with the edit.
@@ -607,6 +696,10 @@ def _patch_pyproject_for_lowered_sdist(text: str, floor: str) -> str:
             new_requires = _build_requires_drop_retrofy(list(requires))
             if new_requires != list(requires):
                 build_system["requires"] = new_requires
+
+    retrofy_config = doc.get("tool", {}).get("retrofy")
+    if retrofy_config is not None and "source-python" in retrofy_config:
+        del retrofy_config["source-python"]
 
     project = doc.get("project")
     if project is not None:
@@ -667,8 +760,8 @@ def lower_sdist(sdist_path: pathlib.Path) -> None:
     ``Requires-Python`` / ``[build-system].requires`` rewrites are
     gated on ``[tool.retrofy] target-python``.
 
-    ``RETROFY_DISABLE_REWRITE=1`` short-circuits to a no-op for the
-    retrofy self-build bootstrap, matching the wheel hook.
+    ``RETROFY_DISABLE_REWRITE=1`` short-circuits to a no-op, matching the
+    wheel hook.
     """
     if os.environ.get("RETROFY_DISABLE_REWRITE") == "1":
         _log.info("RETROFY_DISABLE_REWRITE=1 — skipping sdist rewrite")

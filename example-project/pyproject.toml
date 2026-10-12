@@ -1,5 +1,5 @@
 [build-system]
-requires = ["multistage-build>=0.2", "setuptools", "retrofy>=0.3"]
+requires = ["multistage-build>=0.4", "setuptools", "retrofy>=0.3"]
 build-backend = "multistage_build:backend"
 
 [tool.multistage-build]
@@ -9,16 +9,13 @@ build-backend = "setuptools.build_meta"
 name = "retrofy-test-project"
 version = "0.1"
 description = "A project full of the latest and greatest Python (syntax) features"
-# Declares the Python version the on-disk *source* needs. The source
-# uses PEP 810 ``lazy from`` and other 3.15+ syntax; retrofy's
-# ``post-build-wheel`` / ``post-build-sdist`` hooks lower this floor
-# in the built artefacts according to ``[tool.retrofy] target-python``.
-requires-python = ">=3.15"
-# Retrofy injects ``Requires-Dist: retrofy`` for editable installs (it
-# needs retrofy at runtime for the import-time rewriter). PEP 621
-# requires this to be opted into via ``dynamic``; wheel installs are
-# unaffected.
-dynamic = ["dependencies"]
+# ``requires-python`` is dynamic: retrofy supplies ``>=`` its
+# ``[tool.retrofy] target-python`` (the on-disk source itself needs 3.15,
+# for PEP 810 ``lazy from`` and other new syntax, but the built artefacts
+# are lowered). Retrofy also injects ``Requires-Dist: retrofy`` for
+# editable installs (it needs retrofy at runtime for the import-time
+# rewriter); PEP 621 requires both to be opted into via ``dynamic``.
+dynamic = ["dependencies", "requires-python"]
 
 [project.optional-dependencies]
 test = [
@@ -41,6 +38,9 @@ include = ["example_project", "example_project.*"]
 # retrofy rewrites both artefacts so they install on the floor below.
 # Set deliberately broad to exercise retrofy's lowering reach.
 target-python = "3.7"
+# The Python the on-disk source runs on unconverted (PEP 810 ``lazy from``
+# and other 3.15 syntax).
+source-python = "3.15"
 
 # The on-disk source uses post-current-Python syntax that retrofy
 # backports at build / import time. Tell ruff to lint it against the

@@ -1,24 +1,58 @@
 [build-system]
-# retrofy's own source uses PEP 810 ``lazy from``. The wheel build runs
-# the project's ``compatibility_via_rewrite`` hook against itself so the
-# shipped wheel is plain Python. Bootstraps from a previously published
-# retrofy in this build env -- those releases predate ``lazy from`` in
-# the source and lower the new source cleanly.
+# retrofy builds itself with the build hooks in this checkout, declared in
+# [tool.multistage-build] below, rather than with an installed retrofy's
+# entry points: a build can then use a hook as soon as it's written (e.g.
+# post-load-backend, which supplies the dynamic requires-python). So
+# retrofy isn't a build requirement, but what its hooks import is (the same
+# as [project].dependencies). The source uses PEP 810 ``lazy from``, which
+# the build (on 3.15) runs natively; the post-build-wheel hook lowers the
+# shipped wheel to plain Python.
 requires = [
-  "multistage-build>=0.2",
+  "multistage-build>=0.4",
   "setuptools",
   "setuptools_scm[toml]",
-  "retrofy",
+  "libcst>=1.1",
+  "setuptools-ext",
+  "tomli; python_version < '3.11'",
+  "tomlkit",
+  "packaging",
 ]
 build-backend = "multistage_build:backend"
 
 [tool.multistage-build]
 build-backend = "setuptools.build_meta"
+# retrofy's own build hooks. They are the same functions that
+# [project.entry-points.multistage_build] exports, but that table only takes
+# effect for *other* projects, which build with retrofy installed: here
+# retrofy isn't installed, so the hooks are named explicitly and loaded from
+# this checkout (hook-path). test_build_hooks_declared_inline keeps the two
+# lists identical.
+post-load-backend = [
+  { hook-function = "retrofy._pep517_hooks:post_load_backend", hook-path = "." },
+]
+post-build-wheel = [
+  { hook-function = "retrofy._pep517_hooks:compatibility_via_rewrite", hook-path = "." },
+]
+post-build-sdist = [
+  { hook-function = "retrofy._pep517_hooks:lower_sdist", hook-path = "." },
+]
+post-build-editable = [
+  { hook-function = "retrofy._pep517_hooks:compatibility_via_import_hook", hook-path = "." },
+]
+post-prepare-metadata-for-build-editable = [
+  { hook-function = "retrofy._pep517_hooks:inject_runtime_requirement", hook-path = "." },
+]
+post-prepare-metadata-for-build-wheel = [
+  { hook-function = "retrofy._pep517_hooks:lower_metadata_requires_python", hook-path = "." },
+]
 
 [project]
 name = "retrofy"
 dynamic = [
   "version",
+  # Supplied from [tool.retrofy] target-python by retrofy's own
+  # post-load-backend hook: the source needs 3.15, the built wheel doesn't.
+  "requires-python",
 ]
 description = "A tool to convert modern Python code to less modern Python versions"
 readme = "README.md"
@@ -29,7 +63,6 @@ classifiers = [
 authors = [
   { name = "Phil Elson", email = "pelson.pub@gmail.com" },
 ]
-requires-python = ">=3.15"
 license = "Apache-2.0"
 
 # The core dependencies of the project.
@@ -59,6 +92,7 @@ Homepage = "https://github.com/pelson/retrofy"
 
 [project.entry-points.multistage_build]
 # Declare automatic hooks for a multistage-build using project.
+post-load-backend = "retrofy._pep517_hooks:post_load_backend"
 post-build-wheel = "retrofy._pep517_hooks:compatibility_via_rewrite"
 post-build-sdist = "retrofy._pep517_hooks:lower_sdist"
 post-build-editable = "retrofy._pep517_hooks:compatibility_via_import_hook"
@@ -86,6 +120,9 @@ follow_imports = "skip"
 # libcst does not build there. Use ``retrofy setup-editable`` from a
 # 3.9+ converter venv to drive 3.7/3.8 targets.
 target-python = "3.9"
+# The Python the on-disk source runs on unconverted (it uses PEP 810
+# ``lazy from``). requires-python is the built wheel's floor, above.
+source-python = "3.15"
 
 [tool.setuptools.packages.find]
 include = ["retrofy", "retrofy.*"]

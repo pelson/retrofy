@@ -282,3 +282,31 @@ def test_runtime_union_isinstance_equivalence(value, expected):
         native: dict = {}
         exec(_ISINSTANCE_UNION_SOURCE, native)
         assert native["check"](value) == expected
+
+
+@pytest.mark.parametrize(
+    ("source", "module"),
+    [
+        pytest.param(
+            '"""Doc."""\nimport sys\nfrom collections.abc import Mapping\n',
+            "sys",
+            id="sys-for-version-check",
+        ),
+        pytest.param(
+            '"""Doc."""\nimport typing\n\nx: list[int] = []\n',
+            "typing",
+            id="typing-for-pep585",
+        ),
+        pytest.param(
+            '"""Doc."""\nimport collections.abc\n\nx: collections.abc.Mapping[str, int]\n',
+            "collections.abc",
+            id="source-module-for-attribute-fallback",
+        ),
+    ],
+)
+def test_existing_import_kept_once_after_docstring(source, module):
+    # A module docstring hid the existing import from the check, so it was
+    # added again; re-converting then kept adding more (#79).
+    once = _converters.convert(source)
+    assert once.splitlines().count(f"import {module}") == 1, once
+    assert _converters.convert(once) == once

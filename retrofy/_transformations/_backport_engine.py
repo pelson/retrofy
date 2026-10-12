@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import libcst as cst
 
-from .import_utils import EnhancedImportManager
+from .import_utils import EnhancedImportManager, is_module_docstring
 
 
 @dataclass(frozen=True)
@@ -105,6 +105,8 @@ def _has_early_direct_import(
     body: List[cst.BaseStatement],
     dotted: str,
 ) -> bool:
+    if body and is_module_docstring(body[0]):
+        body = body[1:]
     for stmt in body:
         if isinstance(stmt, cst.SimpleStatementLine):
             has_any_import = any(
