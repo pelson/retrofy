@@ -195,6 +195,11 @@ and appropriate.
 
 * PEP-572 - walrus operator
 
+* PEP-617 - parenthesised context managers: `with (a as x, b as y):` ->
+  `with a as x, b as y:`. Line breaks and comments inside the parentheses move
+  into parentheses around the individual items, so both line numbers and comments
+  are kept.
+
 * PEP-758 - `except` / `except*` with several exception types and no
   parentheses: `except A, B:` -> `except (A, B):`
 
