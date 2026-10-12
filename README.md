@@ -141,6 +141,25 @@ retrofy setup-editable path/to/project --target-python /path/to/py3.7/bin/python
 
 It does *not* install the project's dependencies into the target environment.
 
+## Converting existing code
+
+Converting in the project's own build (above) is best, because the project's CI
+can then test the result on the old Pythons. For code whose build you don't
+control, there are two commands, each writing a converted copy:
+
+```
+retrofy wheel some_pkg-1.0-py3-none-any.whl --target-python 3.9 -o converted/
+retrofy files src/ -o converted-src/
+```
+
+`retrofy wheel` takes a pure-Python (`py3-none-any`) wheel and keeps its name and
+version. It lowers the code, adds retrofy's small runtime where needed, lowers
+`Requires-Python` to `--target-python`, and adds `typing_extensions` to the
+dependencies when the code may need it. `retrofy files` converts the `.py` files in
+a copy of a directory, copying other files as they are; the output directory must
+be empty. Neither can check the converted code's behaviour, so test it on the
+target Python before relying on it.
+
 ## pytest integration
 
 retrofy registers a pytest plugin (via the `pytest11` entry point) which routes
