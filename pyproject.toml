@@ -28,7 +28,7 @@ build-backend = "setuptools.build_meta"
 # this checkout (hook-path). test_build_hooks_declared_inline keeps the two
 # lists identical.
 post-load-backend = [
-  { hook-function = "retrofy._pep517_hooks:supply_dynamic_requires_python", hook-path = "." },
+  { hook-function = "retrofy._pep517_hooks:post_load_backend", hook-path = "." },
 ]
 post-build-wheel = [
   { hook-function = "retrofy._pep517_hooks:compatibility_via_rewrite", hook-path = "." },
@@ -92,7 +92,7 @@ Homepage = "https://github.com/pelson/retrofy"
 
 [project.entry-points.multistage_build]
 # Declare automatic hooks for a multistage-build using project.
-post-load-backend = "retrofy._pep517_hooks:supply_dynamic_requires_python"
+post-load-backend = "retrofy._pep517_hooks:post_load_backend"
 post-build-wheel = "retrofy._pep517_hooks:compatibility_via_rewrite"
 post-build-sdist = "retrofy._pep517_hooks:lower_sdist"
 post-build-editable = "retrofy._pep517_hooks:compatibility_via_import_hook"
@@ -120,6 +120,9 @@ follow_imports = "skip"
 # libcst does not build there. Use ``retrofy setup-editable`` from a
 # 3.9+ converter venv to drive 3.7/3.8 targets.
 target-python = "3.9"
+# The Python the on-disk source runs on unconverted (it uses PEP 810
+# ``lazy from``). requires-python is the built wheel's floor, above.
+source-python = "3.15"
 
 [tool.setuptools.packages.find]
 include = ["retrofy", "retrofy.*"]

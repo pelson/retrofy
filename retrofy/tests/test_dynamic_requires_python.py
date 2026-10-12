@@ -119,7 +119,7 @@ def test_registered_as_post_load_backend_hook():
     # A set: Python < 3.10 lists a distribution once per sys.path entry that
     # finds it.
     values = {ep.value for ep in group if ep.name == "post-load-backend"}
-    assert values == {"retrofy._pep517_hooks:supply_dynamic_requires_python"}
+    assert values == {"retrofy._pep517_hooks:post_load_backend"}
 
 
 def test_wraps_the_loader_once(project):

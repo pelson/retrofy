@@ -92,10 +92,14 @@ dynamic = ["requires-python"]
 
 [tool.retrofy]
 target-python = "3.9"           # what the built artefacts install onto
+source-python = "3.15"          # what the source itself needs (informational)
 ```
 
 retrofy then supplies `requires-python = ">=3.9"` to setuptools for wheel, sdist and
-editable builds, in memory (`pyproject.toml` is never modified). Tools that read
+editable builds, in memory (`pyproject.toml` is never modified). `source-python`
+records what the unconverted source needs; it doesn't limit which Python builds the
+project (retrofy only parses the source), and retrofy checks that `target-python`
+isn't newer. Tools that read
 `pyproject.toml` directly see that the value is dynamic and ask the build backend,
 as PEP 621 requires.
 

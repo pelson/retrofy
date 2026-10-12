@@ -38,6 +38,9 @@ include = ["example_project", "example_project.*"]
 # retrofy rewrites both artefacts so they install on the floor below.
 # Set deliberately broad to exercise retrofy's lowering reach.
 target-python = "3.7"
+# The Python the on-disk source runs on unconverted (PEP 810 ``lazy from``
+# and other 3.15 syntax).
+source-python = "3.15"
 
 # The on-disk source uses post-current-Python syntax that retrofy
 # backports at build / import time. Tell ruff to lint it against the

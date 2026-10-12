@@ -18,10 +18,7 @@ from setuptools import build_meta
 import setuptools.config.pyprojecttoml as pyprojecttoml
 
 import retrofy
-from retrofy._pep517_hooks import (  # type: ignore[attr-defined]
-    _patch_pyproject_for_lowered_sdist,
-    post_load_backend,
-)
+from retrofy._pep517_hooks import _patch_pyproject_for_lowered_sdist, post_load_backend
 
 if sys.version_info >= (3, 11):
     import tomllib
