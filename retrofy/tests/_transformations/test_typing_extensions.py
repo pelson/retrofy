@@ -1,7 +1,18 @@
+import dataclasses
+import sys
 import textwrap
+import types
 from typing import Any, Dict
 
 import pytest
+
+from retrofy._transformations._backport_engine import transform
+from retrofy._transformations.typing_extensions import TYPING_EXTENSIONS_CONFIG
+
+UNGUARDED_CONFIG = dataclasses.replace(
+    TYPING_EXTENSIONS_CONFIG,
+    fallback_distribution=None,
+)
 
 
 def execute_code_with_results(code: str) -> Dict[str, Any]:
@@ -26,12 +37,13 @@ def execute_code_with_results(code: str) -> Dict[str, Any]:
 
 
 def transform_typing_extensions(source_code: str) -> str:
-    """Apply typing_extensions transformation to source code."""
-    from retrofy._transformations.typing_extensions import (
-        transform_typing_extensions as transform,
-    )
+    """Apply typing_extensions transformation to source code.
 
-    return transform(source_code)
+    Uses the configuration without the missing-package guard, so that
+    these tests show the placement of the fallbacks plainly; the guard
+    is covered by the ``_transform_guarded`` tests.
+    """
+    return transform(source_code, UNGUARDED_CONFIG)
 
 
 def test_literal_from_typing():
@@ -2105,3 +2117,187 @@ def test_invalid_runtime_code():
     result = transform_typing_extensions(source)
     assert result == expected
     assert expected == transform_typing_extensions(expected)
+
+
+# Plain runtime objects added to ``typing`` in 3.11 / 3.12 (#17). Names that
+# only work together with a backported ``TypedDict`` (``Required``,
+# ``NotRequired``) or need new syntax (``Unpack``, ``TypeVarTuple``) are not
+# in this list.
+TYPING_311_312_FEATURES = [
+    ("Self", (3, 11)),
+    ("LiteralString", (3, 11)),
+    ("Never", (3, 11)),
+    ("assert_never", (3, 11)),
+    ("assert_type", (3, 11)),
+    ("reveal_type", (3, 11)),
+    ("dataclass_transform", (3, 11)),
+    ("override", (3, 12)),
+]
+
+
+@pytest.mark.parametrize(("name", "version"), TYPING_311_312_FEATURES)
+def test_newer_feature_from_typing(name, version):
+    source = textwrap.dedent(f"""
+    from typing import {name}
+
+    x = {name}
+    """)
+
+    expected = textwrap.dedent(f"""
+    import sys
+
+    if sys.version_info >= {version}:
+        from typing import {name}
+    else:
+        from typing_extensions import {name}
+
+    x = {name}
+    """)
+
+    result = transform_typing_extensions(source)
+    assert result == expected
+    assert expected == transform_typing_extensions(expected)
+
+
+@pytest.mark.parametrize(("name", "version"), TYPING_311_312_FEATURES)
+def test_newer_feature_typing_dot(name, version):
+    source = textwrap.dedent(f"""
+    import typing
+
+    x = typing.{name}
+    """)
+
+    expected = textwrap.dedent(f"""
+    import sys
+    import typing
+
+    if sys.version_info < {version}:
+        import typing_extensions
+        typing.{name} = typing_extensions.{name}
+
+    x = typing.{name}
+    """)
+
+    result = transform_typing_extensions(source)
+    assert result == expected
+    assert expected == transform_typing_extensions(expected)
+
+
+def test_self_and_override_run():
+    """The converted code runs, on Pythons with and without the names in
+    ``typing`` (the latter needs ``typing_extensions`` installed)."""
+    source = textwrap.dedent("""
+    from typing import Self, override
+
+    class Base:
+        def clone(self) -> Self:
+            return type(self)()
+
+    class Child(Base):
+        @override
+        def clone(self) -> Self:
+            return Child()
+
+    clone = Child().clone()
+    is_override = Child.clone.__override__
+    """)
+
+    results = execute_code_with_results(transform_typing_extensions(source))
+    assert type(results["clone"]).__name__ == "Child"
+    assert results["is_override"] is True
+
+
+def test_fallback_import_is_guarded():
+    """A missing or too-old typing_extensions fails with a message naming
+    the package and the Python version that needs it."""
+    source = textwrap.dedent("""
+    from typing import Self
+
+    x = Self
+    """)
+
+    expected = textwrap.dedent("""
+    import sys
+
+    if sys.version_info >= (3, 11):
+        from typing import Self
+    else:
+        try:
+            from typing_extensions import Self
+        except (ImportError, AttributeError) as _retrofy_error:
+            raise ImportError(f"{__name__} needs the 'typing_extensions' package (for typing.Self) on Python < 3.11. Install or upgrade it, e.g. with `pip install -U typing_extensions`.") from _retrofy_error
+
+    x = Self
+    """)  # noqa: E501
+
+    result = _transform_guarded(source)
+    assert result == expected
+    assert expected == _transform_guarded(expected)
+
+
+def test_fallback_assignment_is_guarded():
+    source = textwrap.dedent("""
+    import typing
+
+    def f():
+        return typing.Self, typing.LiteralString
+    """)
+
+    expected = textwrap.dedent("""
+    import sys
+    import typing
+
+    if sys.version_info < (3, 11):
+        try:
+            import typing_extensions
+            typing.Self = typing_extensions.Self
+            typing.LiteralString = typing_extensions.LiteralString
+        except (ImportError, AttributeError) as _retrofy_error:
+            raise ImportError(f"{__name__} needs the 'typing_extensions' package (for typing.LiteralString, typing.Self) on Python < 3.11. Install or upgrade it, e.g. with `pip install -U typing_extensions`.") from _retrofy_error
+
+    def f():
+        return typing.Self, typing.LiteralString
+    """)  # noqa: E501
+
+    result = _transform_guarded(source)
+    assert result == expected
+    assert expected == _transform_guarded(expected)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from typing import Self\n",
+        "import typing\n\nx = typing.Self\n",
+        "def f():\n    from typing import Self\n    return Self\n\nf()\n",
+    ],
+    ids=["from-import", "attribute", "nested-from-import"],
+)
+@pytest.mark.parametrize("installed", ["missing", "too-old"])
+def test_fallback_error_when_typing_extensions_unusable(
+    monkeypatch,
+    source,
+    installed,
+):
+    """Run the fallback branch as on Python 3.10, with typing_extensions
+    either not installed or lacking ``Self``."""
+    code = _transform_guarded(source)
+    with monkeypatch.context() as m:
+        m.setattr(sys, "version_info", (3, 10, 0, "final", 0))
+        m.setitem(
+            sys.modules,
+            "typing_extensions",
+            None if installed == "missing" else types.ModuleType("typing_extensions"),
+        )
+        with pytest.raises(ImportError) as excinfo:
+            exec(code, {"__name__": "somepkg.mod"})
+    assert str(excinfo.value) == (
+        "somepkg.mod needs the 'typing_extensions' package (for typing.Self) "
+        "on Python < 3.11. Install or upgrade it, e.g. with "
+        "`pip install -U typing_extensions`."
+    )
+
+
+def _transform_guarded(source_code: str) -> str:
+    """The production configuration, with the missing-package guard."""
+    return transform(source_code, TYPING_EXTENSIONS_CONFIG)

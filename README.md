@@ -177,10 +177,15 @@ and appropriate.
   * `contextlib`: `AbstractContextManager`, `AbstractAsyncContextManager`
   * `re`: `Pattern`, `Match`
 
-* `typing` -> `typing_extensions` fallbacks for `Literal`, `final`, `TypedDict`,
-  `get_args` and `get_origin`, gated on `sys.version_info`. Add
-  `typing_extensions` to your dependencies (with an appropriate environment marker)
-  if your runtime floor needs them.
+* `typing` -> `typing_extensions` fallbacks, gated on `sys.version_info`, for
+  `Literal`, `final`, `TypedDict` (3.8), `get_args`, `get_origin` (3.10), `Self`,
+  `LiteralString`, `Never`, `assert_never`, `assert_type`, `reveal_type`,
+  `dataclass_transform` (3.11) and `override` (3.12). With `target-python` below
+  3.12 and `dependencies` listed in `[project] dynamic`, retrofy adds
+  `Requires-Dist: typing_extensions>=4.4; python_version < "3.12"` to the wheel
+  and editable metadata. With static `dependencies`, add it yourself. Either way,
+  if `typing_extensions` is missing (or too old) at runtime, the import fails with
+  an `ImportError` naming the package and the Python version that needs it.
 
 * PEP-810 - lazy imports: `lazy import x` and `lazy from x import y` are rewritten
   to deferred imports which reify on first use. The small runtime this needs is

@@ -1099,3 +1099,112 @@ def test_editable_pth_installs_one_finder_when_run_repeatedly(
     for _ in range(2):
         _run_pth(_editable_pth(static_editable_wheel))
     assert len(sys.meta_path) == before + 1
+
+
+_TYPING_EXTENSIONS_REQUIRES = (
+    'Requires-Dist: typing_extensions>=4.4; python_version < "3.12"'
+)
+
+
+def _requires_dist(text: str) -> list[str]:
+    header, _, _ = text.partition("\n\n")
+    return [line for line in header.splitlines() if line.startswith("Requires-Dist:")]
+
+
+@pytest.mark.parametrize(
+    ("pyproject", "expected"),
+    [
+        pytest.param(
+            """\
+            [project]
+            name = "dummypkg"
+            dynamic = ["dependencies"]
+            [tool.retrofy]
+            target-python = "3.9"
+            """,
+            True,
+            id="dynamic-below-3.12",
+        ),
+        pytest.param(
+            """\
+            [project]
+            name = "dummypkg"
+            dependencies = ["httpx"]
+            [tool.retrofy]
+            target-python = "3.9"
+            """,
+            False,
+            id="static-dependencies",
+        ),
+        pytest.param(
+            """\
+            [project]
+            name = "dummypkg"
+            dynamic = ["dependencies"]
+            [tool.retrofy]
+            target-python = "3.12"
+            """,
+            False,
+            id="floor-has-every-name-in-typing",
+        ),
+        pytest.param(
+            """\
+            [project]
+            name = "dummypkg"
+            dynamic = ["dependencies"]
+            """,
+            False,
+            id="no-target-python",
+        ),
+    ],
+)
+def test_typing_extensions_requirement_consistent_across_wheel_hooks(
+    tmp_path,
+    monkeypatch,
+    pyproject,
+    expected,
+):
+    """typing_extensions is added for the typing fallbacks retrofy emits,
+    identically in the prepared metadata and in the built wheel (PEP 517)."""
+    _write_pyproject(tmp_path, pyproject)
+    monkeypatch.chdir(tmp_path)
+    metadata = (
+        "Metadata-Version: 2.1\n"
+        "Name: dummypkg\n"
+        "Version: 0.0.0\n"
+        "Requires-Dist: httpx\n"
+        "\n"
+        "Body.\n"
+    )
+
+    dist_info = tmp_path / "dummypkg-0.0.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(metadata, encoding="utf-8")
+    lower_metadata_requires_python(dist_info)
+    prepared = (dist_info / "METADATA").read_text(encoding="utf-8")
+
+    whl = _make_minimal_wheel(tmp_path, metadata)
+    compatibility_via_rewrite(whl)
+    with zipfile.ZipFile(whl) as z:
+        built = z.read("dummypkg-0.0.0.dist-info/METADATA").decode("utf-8")
+
+    assert _requires_dist(prepared) == _requires_dist(built)
+    assert (_TYPING_EXTENSIONS_REQUIRES in _requires_dist(built)) is expected
+    assert "Requires-Dist: httpx" in _requires_dist(built)
+
+
+def test_typing_extensions_requirement_in_editable_metadata(tmp_path, monkeypatch):
+    _write_pyproject(
+        tmp_path,
+        """\
+        [project]
+        name = "dummypkg"
+        dynamic = ["dependencies"]
+        [tool.retrofy]
+        target-python = "3.9"
+        """,
+    )
+    monkeypatch.chdir(tmp_path)
+    whl = _make_editable_wheel(tmp_path)
+    compatibility_via_import_hook(whl)
+    assert _TYPING_EXTENSIONS_REQUIRES in _requires_dist(_editable_metadata(whl))
