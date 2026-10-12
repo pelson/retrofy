@@ -2,8 +2,6 @@
 Test walrus operator short-circuiting behavior.
 """
 
-import pytest
-
 
 def test_short_circuit_and():
     """Test that short-circuiting prevents unnecessary function calls."""
@@ -27,7 +25,6 @@ def test_short_circuit_and():
     assert call_count == 2  # Should not call expensive_func for empty string
 
 
-@pytest.mark.xfail(reason="retrofy bug", strict=True)
 def test_dict_comprehension_short_circuit():
     """Test short-circuiting in dict comprehension."""
     data = [{"name": "Alice", "value": 25}, {"name": "", "value": 30}]

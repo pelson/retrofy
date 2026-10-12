@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import typing
+
 import libcst as cst
 import libcst.matchers as m
 
@@ -89,6 +91,102 @@ def _block_statements(block: cst.BaseSuite) -> list[cst.BaseStatement]:
     return list(block.body)
 
 
+_COMPREHENSIONS = (cst.ListComp, cst.SetComp, cst.DictComp, cst.GeneratorExp)
+_Comprehension = typing.Union[cst.ListComp, cst.SetComp, cst.DictComp, cst.GeneratorExp]
+
+
+class _WalrusTargets(cst.CSTVisitor):
+    """Collect the names bound by walruses, outside nested lambdas (whose
+    walruses bind in the lambda's own scope)."""
+
+    def __init__(self) -> None:
+        self.names: list[str] = []
+
+    def visit_Lambda(self, node: cst.Lambda) -> bool:
+        return False
+
+    def visit_NamedExpr(self, node: cst.NamedExpr) -> None:
+        if isinstance(node.target, cst.Name) and node.target.value not in self.names:
+            self.names.append(node.target.value)
+
+
+class _ScopeDeclarations(cst.CSTVisitor):
+    """The ``global`` / ``nonlocal`` names declared directly in a function
+    body (not in nested functions or classes)."""
+
+    def __init__(self, body: cst.CSTNode) -> None:
+        self.body = body
+        self.globals: set[str] = set()
+        self.nonlocals: set[str] = set()
+
+    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
+        return False
+
+    def visit_ClassDef(self, node: cst.ClassDef) -> bool:
+        return False
+
+    def visit_Global(self, node: cst.Global) -> None:
+        self.globals.update(item.name.value for item in node.names)
+
+    def visit_Nonlocal(self, node: cst.Nonlocal) -> None:
+        self.nonlocals.update(item.name.value for item in node.names)
+
+
+def _mangle(name: str, class_name: str | None) -> str:
+    """The name the compiler uses for *name* inside class *class_name*:
+    private names (``__x``, but not ``__x__``) are mangled to ``_Class__x``.
+    """
+    if class_name is None or not name.startswith("__") or name.endswith("__"):
+        return name
+    stripped = class_name.lstrip("_")
+    return f"_{stripped}{name}" if stripped else name
+
+
+def _first_evaluated(expr: cst.BaseExpression) -> cst.BaseExpression:
+    """The sub-expression of *expr* that is evaluated first."""
+    while True:
+        if isinstance(
+            expr,
+            (cst.Comparison, cst.BooleanOperation, cst.BinaryOperation),
+        ):
+            expr = expr.left
+        elif isinstance(expr, cst.UnaryOperation):
+            expr = expr.expression
+        elif isinstance(expr, (cst.Attribute, cst.Subscript)):
+            expr = expr.value
+        elif isinstance(expr, cst.Call):
+            expr = expr.func
+        else:
+            return expr
+
+
+_DYNAMIC_SCOPE_ACCESS = m.Name(
+    value=m.MatchIfTrue(lambda name: name in {"locals", "vars", "eval", "exec"}),
+)
+
+
+def _comprehension_is_async(node: _Comprehension) -> bool:
+    """Whether *node* needs an async generator: ``async for`` anywhere, or
+    ``await`` outside the first iterable (which runs in the enclosing
+    scope)."""
+    for_in: cst.CompFor | None = node.for_in
+    parts: list[cst.CSTNode] = []
+    first = True
+    while for_in is not None:
+        if for_in.asynchronous is not None:
+            return True
+        if not first:
+            parts.append(for_in.iter)
+        parts.extend(for_in.ifs)
+        first = False
+        for_in = for_in.inner_for_in
+    if isinstance(node, cst.DictComp):
+        parts += [node.key, node.value]
+    else:
+        parts.append(node.elt)
+    return any(m.findall(part, m.Await()) for part in parts)
+
+
 def _with_leading_lines(
     node: cst.BaseCompoundStatement,
     statements: list[cst.BaseStatement],
@@ -114,21 +212,33 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
        result = (x := calc()) -> x = calc(); result = x
        return (x := calc())   -> x = calc(); return x
 
-    4. List comprehensions:
-       [y for x in data if (y := f(x))] -> [y for x, y in ([x, f(x)] for x in data)]
+    4. Comprehensions and generator expressions (list / set / dict / genexp).
+       A walrus target binds in the enclosing function (or module) scope and
+       is assigned per item. Where nothing else can see the binding (one
+       walrus, evaluated first in the innermost clause's first filter, its
+       target unused elsewhere in the scope), the value is threaded through
+       an inner generator, keeping the comprehension in place:
 
-    5. Set comprehensions:
-       {y for x in data if (y := f(x))} -> {y for x, y in ([x, f(x)] for x in data)}
+       [y for x in data if (y := f(x)) is not None] ->
+       [y for x, y in ((x, f(x)) for x in data) if y is not None]
 
-    6. Dict comprehensions:
-       {k: v for x in data if (y := f(x))} -> {k: v for x, y in ([x, f(x)] for x in data)}
+       Otherwise the comprehension becomes a call to a helper generator
+       defined before the statement (with the original as a comment),
+       declaring the targets ``nonlocal`` (or ``global``):
 
-    7. Nested comprehensions:
-       [z for x in data for y in items if (z := f(x, y))] ->
-       [z for x, y, z in ([x, y, f(x, y)] for x in data for y in items)]
+       total = [t := t + x for x in data] ->
+       def _retrofy_comp_0(_retrofy_iter):
+           # [t := t + x for x in data]
+           nonlocal t
+           for x in _retrofy_iter:
+               t = t + x; yield t
+       total = [_retrofy_item for _retrofy_item in _retrofy_comp_0(data)]
 
+       In a function, a never-run ``if False: t = None`` gives ``nonlocal`` a
+       binding. Generator expressions stay lazy; async comprehensions get an
+       ``async def`` helper.
 
-    8. Short-circuiting boolean expressions in if / while conditions:
+    5. Short-circuiting boolean expressions in if / while conditions:
        while (x := func()) and (y := g(x)) > 0: ... ->
        while True:
            x = func()
@@ -151,9 +261,9 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
 
     Remaining Limitations:
     - Complex assignment targets (libcst doesn't support obj.attr := value syntax)
-    - Complex short-circuiting: Only simple two-assignment AND operations in
-      comprehensions are fully supported for short-circuiting. More complex
-      boolean expressions may fall back to non-short-circuiting behavior
+    - A walrus in a comprehension inside a ``lambda`` binds in the lambda's
+      scope, which the helper can't reach; such comprehensions are left to
+      plain hoisting.
     - Short-circuiting is only preserved through ``and``/``or``/``not`` and
       conditional expressions. Assignments inside any other expression
       (e.g. ``f((x := a()) and (y := b()))``) are hoisted in front of the
@@ -165,7 +275,21 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
 
     def __init__(self) -> None:
         self.assignments_stack: list[list[cst.Assign]] = []
+        # Statements (helper functions) to run before the current statement.
+        self._preludes: list[list[cst.BaseStatement]] = []
+        # Enclosing scopes, innermost last: ("function", _ScopeDeclarations),
+        # ("lambda", None), ("class", <class name>) or ("generated", None)
+        # for the helpers below. Module scope is the empty stack.
+        self._scopes: list[tuple[str, _ScopeDeclarations | str | None]] = []
+        # Nodes whose visit enters a new scope (function / lambda / class
+        # bodies), mapped to the scope entry to push.
+        self._scope_entries: dict[
+            int,
+            tuple[str, _ScopeDeclarations | str | None],
+        ] = {}
+        self._module: cst.Module | None = None
         self._temp_count = 0
+        self._comp_count = 0
         super().__init__()
 
     def _temp_name(self) -> cst.Name:
@@ -349,474 +473,330 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
             ],
         )
 
-    def _extract_assignment_target(
+    def _enclosing_scope(self) -> tuple[str, _ScopeDeclarations | None, bool]:
+        """The innermost real (non-helper) scope, and whether the current
+        position is inside a generated helper."""
+        in_helper = False
+        for kind, data in reversed(self._scopes):
+            if kind == "generated":
+                in_helper = True
+                continue
+            declarations = data if isinstance(data, _ScopeDeclarations) else None
+            return kind, declarations, in_helper
+        return "module", None, in_helper
+
+    def _enclosing_class(self) -> str | None:
+        for kind, data in reversed(self._scopes):
+            if kind == "class":
+                assert isinstance(data, str)
+                return data
+        return None
+
+    def _thread_through_generator(
         self,
-        assignment: cst.Assign,
-    ) -> cst.BaseAssignTargetExpression:
-        """Extract the target from an assignment."""
-        return assignment.targets[0].target
+        node: _Comprehension,
+        scope: cst.CSTNode,
+    ) -> _Comprehension | None:
+        """The one-line lowering, where it is provably equivalent.
 
-    def _transform_comprehension_with_walrus(
-        self,
-        node: cst.ListComp | cst.SetComp | cst.DictComp,
-        assignments: list[cst.Assign],
-    ) -> cst.CSTNode:
-        """Transform comprehension containing walrus assignments."""
-        if isinstance(node, cst.ListComp):
-            return self._transform_list_comprehension(node, assignments)
-        elif isinstance(node, cst.SetComp):
-            return self._transform_set_comprehension(node, assignments)
-        elif isinstance(node, cst.DictComp):
-            return self._transform_dict_comprehension(node, assignments)
-        else:
-            raise ValueError(f"Unsupported comprehension type: {type(node).__name__}")
+        ``[y for x in data if (y := f(x)) is not None]`` becomes
+        ``[y for x, y in ((x, f(x)) for x in data) if y is not None]``: the
+        walrus value is computed alongside the loop variables in an inner
+        generator. That keeps the comprehension on its own lines (and lazy),
+        but ``y`` then only exists inside the comprehension, so it is only
+        used when nothing else in *scope* refers to it, and when the walrus
+        is evaluated first in its clause, so moving it into the inner
+        generator doesn't change what runs.
+        """
+        walruses = m.findall(node, m.NamedExpr())
+        if len(walruses) != 1 or _comprehension_is_async(node):
+            return None
+        walrus = walruses[0]
+        assert isinstance(walrus, cst.NamedExpr)
+        if not isinstance(walrus.target, cst.Name):
+            return None
+        name = walrus.target.value
 
-    def _transform_list_comprehension(
-        self,
-        node: cst.ListComp,
-        assignments: list[cst.Assign],
-    ) -> cst.ListComp:
-        """Transform list comprehension with walrus assignments."""
-        return self._generic_comprehension_transform(
-            node,
-            assignments,
-            is_short_circuit=True,
-        )
+        clauses: list[cst.CompFor] = []
+        for_in: cst.CompFor | None = node.for_in
+        while for_in is not None:
+            clauses.append(for_in)
+            for_in = for_in.inner_for_in
+        last = clauses[-1]
+        # The walrus must come first in the first ``if`` of the innermost
+        # clause: nothing evaluated before it in an item is then reordered.
+        if not last.ifs or _first_evaluated(last.ifs[0].test) is not walrus:
+            return None
 
-    def _transform_nested_list_comprehension(
-        self,
-        node: cst.ListComp,
-        assignments: list[cst.Assign],
-    ) -> cst.ListComp:
-        """Transform nested list comprehension with walrus assignments."""
-        # Extract variable targets and values from assignments
-        var_targets = [self._extract_assignment_target(a) for a in assignments]
-        var_values = [a.value for a in assignments]
+        # Within an item, ``name`` may only be read after the walrus: in the
+        # innermost clause's ``if``s or in the produced value(s).
+        target = m.Name(value=name)
+        after = [
+            *last.ifs,
+            *([node.key, node.value] if isinstance(node, cst.DictComp) else [node.elt]),
+        ]
+        inside = len(m.findall(node, target))
+        allowed = sum(len(m.findall(part, target)) for part in after)
+        if inside != allowed or m.findall(walrus.value, target):
+            return None
+        # Nothing else in the scope may see the binding.
+        if len(m.findall(scope, target)) != inside or m.findall(
+            scope,
+            _DYNAMIC_SCOPE_ACCESS,
+        ):
+            return None
 
-        # Collect all for-in clauses including nested ones
-        for_clauses = []
-        current_for = node.for_in
-        while current_for is not None:
-            for_clauses.append(current_for)
-            current_for = current_for.inner_for_in
+        def element(target_expr: cst.BaseExpression) -> cst.Element:
+            if isinstance(target_expr, cst.Tuple) and not target_expr.lpar:
+                target_expr = _parenthesize(target_expr)
+            return cst.Element(target_expr)
 
-        # Create new target that includes all original targets plus walrus variables
-        all_targets = []
-        for for_clause in for_clauses:
-            all_targets.append(for_clause.target)
-        all_targets.extend(var_targets)
-
-        new_target = self._combine_multiple_targets(all_targets)
-
-        # Create new iterator that produces tuples of all values
-        all_values = []
-        for for_clause in for_clauses:
-            all_values.append(for_clause.target)
-        all_values.extend(var_values)
-
-        # Build nested generator expression
-        nested_gen = self._build_nested_generator(for_clauses, all_values)
-
-        # Collect if clauses from the original nested comprehension
-        # These need to be moved to the outer comprehension since walrus variables
-        # will be in scope there
-        outer_ifs = []
-        for for_clause in for_clauses:
-            outer_ifs.extend(for_clause.ifs)
-
-        # Update the comprehension with flattened structure
-        return node.with_changes(
-            for_in=cst.CompFor(
-                target=new_target,
-                iter=nested_gen,
-                ifs=outer_ifs,  # Move if clauses to outer comprehension where walrus variables are in scope
+        loop_targets = [element(clause.target) for clause in clauses]
+        inner_for_in = node.for_in.deep_replace(last, last.with_changes(ifs=[]))
+        assert isinstance(inner_for_in, cst.CompFor)
+        inner = cst.GeneratorExp(
+            elt=cst.Tuple(elements=[*loop_targets, cst.Element(walrus.value)]),
+            # The original layout before ``for`` goes to the outer clause.
+            for_in=inner_for_in.with_changes(
+                whitespace_before=cst.SimpleWhitespace(" "),
             ),
         )
-
-    def _transform_set_comprehension(
-        self,
-        node: cst.SetComp,
-        assignments: list[cst.Assign],
-    ) -> cst.SetComp:
-        """Transform set comprehension with walrus assignments."""
-        return self._generic_comprehension_transform(
-            node,
-            assignments,
-            is_short_circuit=True,
+        first_if = last.ifs[0]
+        outer = cst.CompFor(
+            whitespace_before=node.for_in.whitespace_before,
+            target=cst.Tuple(
+                elements=[*loop_targets, cst.Element(walrus.target)],
+                lpar=[],
+                rpar=[],
+            ),
+            iter=inner,
+            ifs=[
+                first_if.with_changes(
+                    test=first_if.test.deep_replace(walrus, walrus.target),
+                ),
+                *last.ifs[1:],
+            ],
         )
+        return node.with_changes(for_in=outer)
 
-    def _transform_dict_comprehension(
-        self,
-        node: cst.DictComp,
-        assignments: list[cst.Assign],
-    ) -> cst.DictComp:
-        """Transform dict comprehension with walrus assignments."""
-        return self._generic_comprehension_transform(
-            node,
-            assignments,
-            is_short_circuit=True,
-        )
+    def _lower_comprehension(self, node: _Comprehension) -> cst.BaseExpression:
+        """Lower a comprehension containing walruses to a helper generator.
 
-    def _combine_targets(
-        self,
-        original: cst.BaseAssignTargetExpression,
-        walrus_targets: list[cst.BaseAssignTargetExpression],
-    ) -> cst.BaseAssignTargetExpression:
-        """Combine original target with walrus variable targets."""
-        elements = [cst.Element(original)]
-        for target in walrus_targets:
-            elements.append(cst.Element(target))
-
-        # Create tuple without parentheses for comprehension targets
-        return cst.Tuple(elements=elements, lpar=[], rpar=[])
-
-    def _combine_multiple_targets(
-        self,
-        targets: list[cst.BaseAssignTargetExpression],
-    ) -> cst.BaseAssignTargetExpression:
-        """Combine multiple targets into a single tuple target."""
-        elements = [cst.Element(target) for target in targets]
-        return cst.Tuple(elements=elements, lpar=[], rpar=[])
-
-    def _build_nested_generator(
-        self,
-        for_clauses: list[cst.CompFor],
-        all_values: list[cst.BaseExpression],
-    ) -> cst.GeneratorExp:
-        """Build a nested generator expression that produces tuples of all values."""
-        # Create the tuple of all values
-        tuple_expr = cst.Tuple(
-            elements=[cst.Element(value) for value in all_values],
-            lpar=[cst.LeftSquareBracket()],
-            rpar=[cst.RightSquareBracket()],
-        )
-
-        # Build the generator preserving the original nested structure
-        # Start from the innermost and build outward
-        # NOTE: We remove if clauses from the inner generator because walrus variables
-        # won't be in scope there. The if clauses should be moved to the outer comprehension.
-        current_gen = None
-        for i in range(len(for_clauses) - 1, -1, -1):
-            current_gen = cst.CompFor(
-                target=for_clauses[i].target,
-                iter=for_clauses[i].iter,
-                ifs=(),  # Remove if clauses from inner generator - they'll be handled by outer comprehension
-                inner_for_in=current_gen,
+        PEP 572: a walrus target in a comprehension binds in the enclosing
+        function (or module) scope, and is assigned once per item. The
+        comprehension becomes a call to a generator function defined just
+        before the statement, which declares the targets ``nonlocal`` (or
+        ``global``) and loops exactly like the comprehension. The first
+        iterable is passed in, so it is still evaluated eagerly and in
+        the enclosing scope. Defining the helper has no side effects, so
+        hoisting it is safe; generator expressions stay lazy.
+        """
+        kind, declarations, in_helper = self._enclosing_scope()
+        targets = _WalrusTargets()
+        node.visit(targets)
+        prelude: list[cst.BaseStatement] = []
+        header: list[cst.BaseStatement] = []
+        if kind == "module":
+            global_names, nonlocal_names = targets.names, []
+        else:
+            assert declarations is not None
+            # Compare as the compiler does: ``global __x`` in a method
+            # declares ``_Class__x``.
+            class_name = self._enclosing_class()
+            declared_globals = {_mangle(n, class_name) for n in declarations.globals}
+            declared_nonlocals = {
+                _mangle(n, class_name) for n in declarations.nonlocals
+            }
+            global_names = [
+                n for n in targets.names if _mangle(n, class_name) in declared_globals
+            ]
+            nonlocal_names = [n for n in targets.names if n not in global_names]
+            if not in_helper:
+                # ``nonlocal`` needs a binding in the enclosing function. The
+                # walrus makes the name local to it anyway, so a never-run
+                # assignment changes nothing else.
+                for name in nonlocal_names:
+                    if _mangle(name, class_name) not in declared_nonlocals:
+                        prelude.append(
+                            cst.If(
+                                test=cst.Name("False"),
+                                body=cst.SimpleStatementSuite(
+                                    body=[
+                                        cst.Assign(
+                                            targets=[cst.AssignTarget(cst.Name(name))],
+                                            value=cst.Name("None"),
+                                        ),
+                                    ],
+                                ),
+                            ),
+                        )
+        if global_names:
+            header.append(
+                cst.SimpleStatementLine(
+                    body=[
+                        cst.Global(
+                            names=[cst.NameItem(cst.Name(n)) for n in global_names],
+                        ),
+                    ],
+                ),
+            )
+        if nonlocal_names:
+            header.append(
+                cst.SimpleStatementLine(
+                    body=[
+                        cst.Nonlocal(
+                            names=[cst.NameItem(cst.Name(n)) for n in nonlocal_names],
+                        ),
+                    ],
+                ),
             )
 
-        return cst.GeneratorExp(elt=tuple_expr, for_in=current_gen)
-
-    def _transform_nested_set_comprehension(
-        self,
-        node: cst.SetComp,
-        assignments: list[cst.Assign],
-    ) -> cst.SetComp:
-        """Transform nested set comprehension with walrus assignments."""
-        # Extract variable targets and values from assignments
-        var_targets = [self._extract_assignment_target(a) for a in assignments]
-        var_values = [a.value for a in assignments]
-
-        # Collect all for-in clauses including nested ones
-        for_clauses = []
-        current_for = node.for_in
-        while current_for is not None:
-            for_clauses.append(current_for)
-            current_for = current_for.inner_for_in
-
-        # Create new target that includes all original targets plus walrus variables
-        all_targets = []
-        for for_clause in for_clauses:
-            all_targets.append(for_clause.target)
-        all_targets.extend(var_targets)
-
-        new_target = self._combine_multiple_targets(all_targets)
-
-        # Create new iterator that produces tuples of all values
-        all_values = []
-        for for_clause in for_clauses:
-            all_values.append(for_clause.target)
-        all_values.extend(var_values)
-
-        # Build nested generator expression
-        nested_gen = self._build_nested_generator(for_clauses, all_values)
-
-        # Collect if clauses from the original nested comprehension
-        # These need to be moved to the outer comprehension since walrus variables
-        # will be in scope there
-        outer_ifs = []
-        for for_clause in for_clauses:
-            outer_ifs.extend(for_clause.ifs)
-
-        # Update the comprehension with flattened structure
-        return node.with_changes(
-            for_in=cst.CompFor(
-                target=new_target,
-                iter=nested_gen,
-                ifs=outer_ifs,  # Move if clauses to outer comprehension where walrus variables are in scope
-            ),
-        )
-
-    def _transform_nested_dict_comprehension(
-        self,
-        node: cst.DictComp,
-        assignments: list[cst.Assign],
-    ) -> cst.DictComp:
-        """Transform nested dict comprehension with walrus assignments."""
-        # Extract variable targets and values from assignments
-        var_targets = [self._extract_assignment_target(a) for a in assignments]
-        var_values = [a.value for a in assignments]
-
-        # Collect all for-in clauses including nested ones
-        for_clauses = []
-        current_for = node.for_in
-        while current_for is not None:
-            for_clauses.append(current_for)
-            current_for = current_for.inner_for_in
-
-        # Create new target that includes all original targets plus walrus variables
-        all_targets = []
-        for for_clause in for_clauses:
-            all_targets.append(for_clause.target)
-        all_targets.extend(var_targets)
-
-        new_target = self._combine_multiple_targets(all_targets)
-
-        # Create new iterator that produces tuples of all values
-        all_values = []
-        for for_clause in for_clauses:
-            all_values.append(for_clause.target)
-        all_values.extend(var_values)
-
-        # Build nested generator expression
-        nested_gen = self._build_nested_generator(for_clauses, all_values)
-
-        # Collect if clauses from the original nested comprehension
-        # These need to be moved to the outer comprehension since walrus variables
-        # will be in scope there
-        outer_ifs = []
-        for for_clause in for_clauses:
-            outer_ifs.extend(for_clause.ifs)
-
-        # Update the comprehension with flattened structure
-        return node.with_changes(
-            for_in=cst.CompFor(
-                target=new_target,
-                iter=nested_gen,
-                ifs=outer_ifs,  # Move if clauses to outer comprehension where walrus variables are in scope
-            ),
-        )
-
-    def _create_tuple_expression(
-        self,
-        original: cst.BaseAssignTargetExpression,
-        values: list[cst.BaseExpression],
-    ) -> cst.BaseExpression:
-        """Create tuple expression combining original and walrus values."""
-        elements = [cst.Element(original)]
-        for value in values:
-            elements.append(cst.Element(value))
-
-        return cst.Tuple(
-            elements=elements,
-            lpar=[cst.LeftSquareBracket()],
-            rpar=[cst.RightSquareBracket()],
-        )
-
-    def _comprehension_needs_short_circuiting(
-        self,
-        condition: cst.CompIf,
-    ) -> bool:
-        """Check if a comprehension condition needs short-circuiting."""
-        return isinstance(condition.test, cst.BooleanOperation) and isinstance(
-            condition.test.operator,
-            cst.And,
-        )
-
-    def _extract_first_condition_from_and(
-        self,
-        condition: cst.BaseExpression,
-    ) -> cst.BaseExpression | None:
-        """Extract the first condition from an AND expression."""
-        if isinstance(condition, cst.BooleanOperation) and isinstance(
-            condition.operator,
-            cst.And,
-        ):
-            return condition.left
-        return None
-
-    def _extract_second_condition_from_and(
-        self,
-        condition: cst.BaseExpression,
-    ) -> cst.BaseExpression | None:
-        """Extract the second condition from an AND expression."""
-        if isinstance(condition, cst.BooleanOperation) and isinstance(
-            condition.operator,
-            cst.And,
-        ):
-            return condition.right
-        return None
-
-    def _generic_comprehension_transform(
-        self,
-        node: cst.ListComp | cst.SetComp | cst.DictComp,
-        assignments: list[cst.Assign],
-        is_short_circuit: bool = False,
-    ) -> cst.ListComp | cst.SetComp | cst.DictComp:
-        """Generic comprehension transformation that works for all comprehension types."""
-        # Handle nested comprehensions
-        if node.for_in.inner_for_in is not None:
-            return self._handle_nested_comprehension(node, assignments)
-
-        # Check if we need short-circuiting for comprehensions
-        if (
-            is_short_circuit
-            and len(assignments) == 2
-            and node.for_in.ifs
-            and self._comprehension_needs_short_circuiting(node.for_in.ifs[0])
-        ):
-            return self._generic_two_assignment_short_circuit(node, assignments)
-
-        # Standard transformation
-        return self._generic_standard_comprehension_transform(node, assignments)
-
-    def _generic_two_assignment_short_circuit(
-        self,
-        node: cst.ListComp | cst.SetComp | cst.DictComp,
-        assignments: list[cst.Assign],
-    ) -> cst.ListComp | cst.SetComp | cst.DictComp:
-        """Generic two-assignment short-circuiting for any comprehension type."""
-        first_assign, second_assign = assignments
-
-        # Extract targets and values
-        first_target = self._extract_assignment_target(first_assign)
-        first_value = first_assign.value
-        second_target = self._extract_assignment_target(second_assign)
-        second_value = second_assign.value
-
-        original_target = node.for_in.target
-
-        # Create inner generator: ((x, f(x)) for x in data)
-        inner_gen = cst.GeneratorExp(
-            elt=cst.Tuple(
-                elements=[cst.Element(original_target), cst.Element(first_value)],
-                lpar=[cst.LeftParen()],
-                rpar=[cst.RightParen()],
-            ),
-            for_in=cst.CompFor(
-                target=original_target,
-                iter=node.for_in.iter,
-                ifs=(),
-            ),
-        )
-
-        # Create middle generator: ((x, y, g(x, y)) for x, y in inner_gen if y)
-        middle_target = cst.Tuple(
-            elements=[cst.Element(original_target), cst.Element(first_target)],
-            lpar=[],
-            rpar=[],
-        )
-
-        # Extract the condition for the first variable from the original if clause
-        first_condition = self._extract_first_condition_from_and(
-            node.for_in.ifs[0].test,
-        )
-
-        middle_gen = cst.GeneratorExp(
-            elt=cst.Tuple(
-                elements=[
-                    cst.Element(original_target),
-                    cst.Element(first_target),
-                    cst.Element(second_value),
-                ],
-                lpar=[cst.LeftParen()],
-                rpar=[cst.RightParen()],
-            ),
-            for_in=cst.CompFor(
-                target=middle_target,
-                iter=inner_gen,
-                ifs=[cst.CompIf(test=first_condition)] if first_condition else [],
-            ),
-        )
-
-        # Create outer target that includes all variables
-        outer_target = cst.Tuple(
-            elements=[
-                cst.Element(original_target),
-                cst.Element(first_target),
-                cst.Element(second_target),
-            ],
-            lpar=[],
-            rpar=[],
-        )
-
-        # Extract the condition for the second variable
-        second_condition = self._extract_second_condition_from_and(
-            node.for_in.ifs[0].test,
-        )
-
-        # Update the comprehension
-        return node.with_changes(
-            for_in=cst.CompFor(
-                target=outer_target,
-                iter=middle_gen,
-                ifs=[cst.CompIf(test=second_condition)] if second_condition else [],
-            ),
-        )
-
-    def _generic_standard_comprehension_transform(
-        self,
-        node: cst.ListComp | cst.SetComp | cst.DictComp,
-        assignments: list[cst.Assign],
-    ) -> cst.ListComp | cst.SetComp | cst.DictComp:
-        """Generic standard comprehension transformation."""
-        var_targets = [self._extract_assignment_target(a) for a in assignments]
-        var_values = [a.value for a in assignments]
-        original_target = node.for_in.target
-        new_target = self._combine_targets(original_target, var_targets)
-
-        new_iter = cst.GeneratorExp(
-            elt=self._create_tuple_expression(original_target, var_values),
-            for_in=cst.CompFor(
-                target=original_target,
-                iter=node.for_in.iter,
-                ifs=(),
-            ),
-        )
-
-        return node.with_changes(
-            for_in=cst.CompFor(
-                target=new_target,
-                iter=new_iter,
-                ifs=node.for_in.ifs,
-            ),
-        )
-
-    def _handle_nested_comprehension(
-        self,
-        node: cst.ListComp | cst.SetComp | cst.DictComp,
-        assignments: list[cst.Assign],
-    ) -> cst.ListComp | cst.SetComp | cst.DictComp:
-        """Handle nested comprehensions by delegating to specific methods."""
-        if isinstance(node, cst.ListComp):
-            return self._transform_nested_list_comprehension(node, assignments)
-        elif isinstance(node, cst.SetComp):
-            return self._transform_nested_set_comprehension(node, assignments)
-        elif isinstance(node, cst.DictComp):
-            return self._transform_nested_dict_comprehension(node, assignments)
+        if isinstance(node, cst.DictComp):
+            produced: cst.BaseExpression = cst.Tuple(
+                elements=[cst.Element(node.key), cst.Element(node.value)],
+            )
         else:
-            raise ValueError(f"Unsupported comprehension type: {type(node).__name__}")
+            produced = node.elt
+            if isinstance(produced, cst.NamedExpr) and not produced.lpar:
+                produced = _parenthesize(produced)
+        produce = cst.SimpleStatementLine(body=[cst.Expr(cst.Yield(value=produced))])
+        iterable = cst.Name("_retrofy_iter")
+        is_async = _comprehension_is_async(node)
+        helper_name = cst.Name(f"_retrofy_comp_{self._comp_count}")
+        self._comp_count += 1
+        # Keep the original comprehension visible, as a comment.
+        original = [
+            cst.EmptyLine(comment=cst.Comment(f"# {line}".rstrip()))
+            for line in cst.Module(body=[]).code_for_node(node).splitlines()
+        ]
+        body = [*header, *self._comprehension_loops(node.for_in, iterable, produce)]
+        body[0] = body[0].with_changes(leading_lines=original)
+        helper = cst.FunctionDef(
+            name=helper_name,
+            params=cst.Parameters(params=[cst.Param(iterable)]),
+            body=cst.IndentedBlock(body=body),
+            asynchronous=cst.Asynchronous() if is_async else None,
+        )
+        # Lower the walruses (and any nested comprehensions) in the helper.
+        self._scopes.append(("generated", None))
+        helper = helper.with_changes(body=helper.body.visit(self))
+        self._scopes.pop()
+        self._preludes[-1].extend([*prelude, helper])
+
+        call = cst.Call(func=helper_name, args=[cst.Arg(_standalone(node.for_in.iter))])
+        if isinstance(node, cst.GeneratorExp):
+            return call.with_changes(lpar=node.lpar, rpar=node.rpar)
+        item = cst.Name("_retrofy_item")
+        for_in = cst.CompFor(
+            target=item,
+            iter=call,
+            asynchronous=cst.Asynchronous() if is_async else None,
+        )
+        if isinstance(node, cst.DictComp):
+            key, value = cst.Name("_retrofy_key"), cst.Name("_retrofy_value")
+            return node.with_changes(
+                key=key,
+                value=value,
+                for_in=for_in.with_changes(
+                    target=cst.Tuple(
+                        elements=[cst.Element(key), cst.Element(value)],
+                        lpar=[],
+                        rpar=[],
+                    ),
+                ),
+            )
+        return node.with_changes(elt=item, for_in=for_in)
+
+    def _comprehension_loops(
+        self,
+        for_in: cst.CompFor,
+        iterable: cst.BaseExpression,
+        innermost: cst.BaseStatement,
+    ) -> list[cst.BaseStatement]:
+        """The nested ``for`` / ``if`` statements equivalent to *for_in*."""
+        if for_in.inner_for_in is None:
+            body = [innermost]
+        else:
+            body = self._comprehension_loops(
+                for_in.inner_for_in,
+                _standalone(for_in.inner_for_in.iter),
+                innermost,
+            )
+        for condition in reversed(for_in.ifs):
+            body = [
+                cst.If(
+                    test=_standalone(condition.test),
+                    body=cst.IndentedBlock(body=body),
+                ),
+            ]
+        return [
+            cst.For(
+                target=_standalone(for_in.target),
+                iter=iterable,
+                body=cst.IndentedBlock(body=body),
+                asynchronous=for_in.asynchronous,
+            ),
+        ]
 
     # Every statement collects the walrus assignments in its expressions,
     # and runs them just before itself.
+    # Statement lines (and one-line suites) collect the helper functions
+    # needed by their expressions, and run them just before themselves.
     def on_visit(self, node: cst.CSTNode) -> bool:
+        if id(node) in self._scope_entries:
+            self._scopes.append(self._scope_entries[id(node)])
         if isinstance(node, _SCOPED_STATEMENTS):
             self.assignments_stack.append([])
+        if isinstance(
+            node,
+            (
+                cst.SimpleStatementLine,
+                cst.SimpleStatementSuite,
+                cst.BaseCompoundStatement,
+            ),
+        ):
+            self._preludes.append([])
         return super().on_visit(node)
 
     def on_leave(self, original_node, updated_node):  # type: ignore[no-untyped-def]
         updated = super().on_leave(original_node, updated_node)
-        if not isinstance(original_node, _SCOPED_STATEMENTS):
-            return updated
+        if id(original_node) in self._scope_entries:
+            self._scopes.pop()
+        if isinstance(original_node, _SCOPED_STATEMENTS):
+            updated = self._prepend_assignments(original_node, updated)
+        if isinstance(
+            original_node,
+            (
+                cst.SimpleStatementLine,
+                cst.SimpleStatementSuite,
+                cst.BaseCompoundStatement,
+            ),
+        ):
+            prelude = self._preludes.pop()
+            if prelude:
+                if isinstance(original_node, cst.SimpleStatementSuite):
+                    # ``if c: x = [...]``: the helper needs a block of its own.
+                    return cst.IndentedBlock(
+                        body=[*prelude, cst.SimpleStatementLine(body=updated.body)],
+                    )
+                nodes = (
+                    list(updated.nodes)
+                    if isinstance(updated, cst.FlattenSentinel)
+                    else [updated]
+                )
+                return cst.FlattenSentinel(
+                    _with_leading_lines(
+                        original_node,
+                        [
+                            *prelude,
+                            nodes[0].with_changes(leading_lines=[]),
+                            *nodes[1:],
+                        ],
+                    ),
+                )
+        return updated
+
+    def _prepend_assignments(self, original_node, updated):  # type: ignore[no-untyped-def]
         assignments = self.assignments_stack.pop()
         if not assignments:
             return updated
@@ -837,6 +817,65 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
                 ],
             ),
         )
+
+    # Scopes start at a function / lambda / class *body*: decorators,
+    # defaults and bases run in the enclosing scope.
+    def visit_FunctionDef(self, node: cst.FunctionDef) -> None:
+        declarations = _ScopeDeclarations(node.body)
+        node.body.visit(declarations)
+        self._scope_entries[id(node.body)] = ("function", declarations)
+
+    def visit_Lambda(self, node: cst.Lambda) -> None:
+        self._scope_entries[id(node.body)] = ("lambda", None)
+
+    def visit_ClassDef(self, node: cst.ClassDef) -> None:
+        self._scope_entries[id(node.body)] = ("class", node.name.value)
+
+    def _visit_comprehension(self, node: _Comprehension) -> bool:
+        # Handled as a whole in _leave_comprehension. Inside a lambda the
+        # targets bind in the lambda's scope, which a helper defined before
+        # the statement can't reach, so fall back to plain hoisting.
+        if not _contains_walrus(node):
+            return True
+        return self._enclosing_scope()[0] == "lambda"
+
+    def _leave_comprehension(self, original_node, updated_node):  # type: ignore[no-untyped-def]
+        kind, declarations, _ = self._enclosing_scope()
+        if not _contains_walrus(original_node) or kind == "lambda":
+            return updated_node
+        scope = declarations.body if declarations is not None else self._module
+        assert scope is not None
+        threaded = self._thread_through_generator(original_node, scope)
+        if threaded is not None:
+            return threaded
+        return self._lower_comprehension(original_node)
+
+    def visit_Module(self, node: cst.Module) -> None:
+        self._module = node
+
+    def visit_ListComp(self, node: cst.ListComp) -> bool:
+        return self._visit_comprehension(node)
+
+    def visit_SetComp(self, node: cst.SetComp) -> bool:
+        return self._visit_comprehension(node)
+
+    def visit_DictComp(self, node: cst.DictComp) -> bool:
+        return self._visit_comprehension(node)
+
+    def visit_GeneratorExp(self, node: cst.GeneratorExp) -> bool:
+        return self._visit_comprehension(node)
+
+    def leave_ListComp(self, original_node, updated_node):  # type: ignore[no-untyped-def]
+        return self._leave_comprehension(original_node, updated_node)
+
+    def leave_SetComp(self, original_node, updated_node):  # type: ignore[no-untyped-def]
+        return self._leave_comprehension(original_node, updated_node)
+
+    def leave_DictComp(self, original_node, updated_node):  # type: ignore[no-untyped-def]
+        return self._leave_comprehension(original_node, updated_node)
+
+    def leave_GeneratorExp(self, original_node, updated_node):  # type: ignore[no-untyped-def]
+        return self._leave_comprehension(original_node, updated_node)
 
     # ``if`` and ``while`` lower their own condition and children.
     def visit_If(self, node: cst.If) -> bool:
@@ -865,18 +904,6 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
             return statements[0]
         return cst.FlattenSentinel(statements)
 
-    def visit_ListComp(self, node: cst.ListComp) -> None:
-        """Push scope for list comprehensions."""
-        self.assignments_stack.append([])
-
-    def visit_SetComp(self, node: cst.SetComp) -> None:
-        """Push scope for set comprehensions."""
-        self.assignments_stack.append([])
-
-    def visit_DictComp(self, node: cst.DictComp) -> None:
-        """Push scope for dict comprehensions."""
-        self.assignments_stack.append([])
-
     def leave_NamedExpr(
         self,
         node: cst.NamedExpr,
@@ -894,40 +921,3 @@ class WalrusOperatorTransformer(cst.CSTTransformer):
         )
         # Reference the assigned value in place of the walrus.
         return updated_node.target
-
-    def leave_ListComp(
-        self,
-        original_node: cst.ListComp,
-        updated_node: cst.ListComp,
-    ) -> cst.ListComp:
-        """Transform list comprehension with walrus assignments."""
-        assignments = self.assignments_stack.pop()
-        if not assignments:
-            return updated_node
-
-        return self._transform_comprehension_with_walrus(updated_node, assignments)
-
-    # Add support for other comprehension types
-    def leave_SetComp(
-        self,
-        original_node: cst.SetComp,
-        updated_node: cst.SetComp,
-    ) -> cst.SetComp:
-        """Transform set comprehension with walrus assignments."""
-        assignments = self.assignments_stack.pop()
-        if not assignments:
-            return updated_node
-
-        return self._transform_comprehension_with_walrus(updated_node, assignments)
-
-    def leave_DictComp(
-        self,
-        original_node: cst.DictComp,
-        updated_node: cst.DictComp,
-    ) -> cst.DictComp:
-        """Transform dict comprehension with walrus assignments."""
-        assignments = self.assignments_stack.pop()
-        if not assignments:
-            return updated_node
-
-        return self._transform_comprehension_with_walrus(updated_node, assignments)
