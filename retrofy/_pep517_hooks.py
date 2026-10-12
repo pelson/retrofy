@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import importlib
 import importlib.resources
 import logging
 import os
@@ -103,6 +104,61 @@ def _read_target_python(source_root: pathlib.Path) -> str | None:
     if not floor:
         return None
     return _validate_target_python(floor, "[tool.retrofy] target-python")
+
+
+def supply_dynamic_requires_python(backend: object) -> None:
+    """``post-load-backend`` hook (multistage-build >= 0.4).
+
+    When ``requires-python`` is listed in ``[project].dynamic``, supply it
+    as ``>={target-python}`` from ``[tool.retrofy] target-python``: the
+    built artefacts are lowered to that floor, even though the on-disk
+    source needs a newer Python.
+
+    setuptools only accepts a dynamic ``requires-python`` from ``setup.py``,
+    and rejects it already in ``get_requires_for_build_*``, the first call a
+    frontend makes. This hook runs before every call (multistage-build calls
+    it once the backend is imported), and wraps setuptools' pyproject loader
+    so that the parsed configuration of this project's ``pyproject.toml``
+    carries the value. Nothing is written to disk. Other backends handle
+    their dynamic fields themselves and are left alone.
+    """
+    root = pathlib.Path.cwd()
+    pyproject = root / "pyproject.toml"
+    if not pyproject.exists():
+        return
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    if "requires-python" not in (data.get("project", {}).get("dynamic", []) or []):
+        return
+    if not getattr(backend, "__name__", "").startswith("setuptools"):
+        return
+    floor = _read_target_python(root)
+    if floor is None:
+        raise ValueError(
+            "requires-python is listed in [project].dynamic, which retrofy "
+            "supplies from [tool.retrofy] target-python; set it, e.g. "
+            'target-python = "3.9".',
+        )
+
+    # Only reachable when the backend is setuptools, which retrofy itself
+    # doesn't otherwise need here.
+    pyprojecttoml = importlib.import_module("setuptools.config.pyprojecttoml")
+    original = getattr(pyprojecttoml, "load_file")
+    if getattr(original, "_retrofy_supplies_requires_python", False):
+        return  # already wrapped in this process
+    target = pyproject.resolve()
+    requires_python = f">={floor}"
+
+    def load_file(filepath):  # type: ignore[no-untyped-def]
+        loaded = original(filepath)
+        project = loaded.get("project", {})
+        dynamic = project.get("dynamic", [])
+        if pathlib.Path(filepath).resolve() == target and "requires-python" in dynamic:
+            project["dynamic"] = [d for d in dynamic if d != "requires-python"]
+            project["requires-python"] = requires_python
+        return loaded
+
+    setattr(load_file, "_retrofy_supplies_requires_python", True)
+    setattr(pyprojecttoml, "load_file", load_file)
 
 
 def _validate_target_python(floor: object, where: str) -> str:

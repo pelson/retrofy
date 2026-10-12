@@ -59,6 +59,7 @@ Homepage = "https://github.com/pelson/retrofy"
 
 [project.entry-points.multistage_build]
 # Declare automatic hooks for a multistage-build using project.
+post-load-backend = "retrofy._pep517_hooks:supply_dynamic_requires_python"
 post-build-wheel = "retrofy._pep517_hooks:compatibility_via_rewrite"
 post-build-sdist = "retrofy._pep517_hooks:lower_sdist"
 post-build-editable = "retrofy._pep517_hooks:compatibility_via_import_hook"

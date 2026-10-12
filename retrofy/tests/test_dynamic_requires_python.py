@@ -18,9 +18,7 @@ import pytest
 from setuptools import build_meta
 import setuptools.config.pyprojecttoml as pyprojecttoml
 
-from retrofy._pep517_hooks import (  # type: ignore[attr-defined]
-    supply_dynamic_requires_python,
-)
+from retrofy._pep517_hooks import supply_dynamic_requires_python
 
 DYNAMIC_PYPROJECT = """\
     [build-system]
@@ -113,8 +111,20 @@ def test_left_alone(project, tmp_path, case):
 
 
 def test_registered_as_post_load_backend_hook():
-    (entry_point,) = importlib.metadata.entry_points(
-        group="multistage_build",
-        name="post-load-backend",
-    )
-    assert entry_point.value == "retrofy._pep517_hooks:supply_dynamic_requires_python"
+    entry_points = importlib.metadata.entry_points()
+    if hasattr(entry_points, "select"):
+        group = entry_points.select(group="multistage_build")
+    else:  # Python < 3.10: a dict of groups.
+        group = entry_points.get("multistage_build", [])
+    # A set: Python < 3.10 lists a distribution once per sys.path entry that
+    # finds it.
+    values = {ep.value for ep in group if ep.name == "post-load-backend"}
+    assert values == {"retrofy._pep517_hooks:supply_dynamic_requires_python"}
+
+
+def test_wraps_the_loader_once(project):
+    project(DYNAMIC_PYPROJECT + '[tool.retrofy]\ntarget-python = "3.9"\n')
+    supply_dynamic_requires_python(build_meta)
+    wrapped = pyprojecttoml.load_file
+    supply_dynamic_requires_python(build_meta)
+    assert pyprojecttoml.load_file is wrapped
