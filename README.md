@@ -190,6 +190,9 @@ and appropriate.
 
 * PEP-572 - walrus operator
 
+* PEP-758 - `except` / `except*` with several exception types and no
+  parentheses: `except A, B:` -> `except (A, B):`
+
 * PEP-636 - match statements (structural pattern matching):
   * Literal patterns: `case 42:` -> `if value == 42:`
   * Variable binding: `case x:` -> `x = value`
