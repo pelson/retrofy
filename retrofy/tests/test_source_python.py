@@ -29,7 +29,7 @@ PROJECT = """\
     [project]
     name = "demo"
     version = "0.1"
-    requires-python = ">=3.9"
+    dynamic = ["requires-python"]
 
     [tool.retrofy]
     target-python = "3.9"
@@ -69,9 +69,10 @@ def test_target_python_not_newer_than_source_python(project):
 def test_lowered_sdist_drops_source_python():
     text = textwrap.dedent(PROJECT) + 'source-python = "3.15"\n'
     lowered = tomllib.loads(_patch_pyproject_for_lowered_sdist(text, "3.9"))
-    # The sdist's source has been lowered to target-python.
+    # The sdist's source is already lowered, and its requires-python static.
+    assert lowered["project"]["requires-python"] == ">=3.9"
     assert "source-python" not in lowered["tool"]["retrofy"]
-    assert lowered["tool"]["retrofy"]["target-python"] == "3.9"
+    assert "target-python" not in lowered["tool"]["retrofy"]
 
 
 @pytest.mark.parametrize("path", [".", "example-project"])

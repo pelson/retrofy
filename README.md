@@ -103,13 +103,12 @@ isn't newer. Tools that read
 `pyproject.toml` directly see that the value is dynamic and ask the build backend,
 as PEP 621 requires.
 
-A static `requires-python` (your *source* target, e.g. `">=3.13"`) also works:
-retrofy lowers `Requires-Python` in the built metadata, keeping any other clauses
-such as `!=3.12.*`. But changing a static field in the build deviates from PEP 621,
-and tools that read `pyproject.toml` directly (rather than asking the backend) will
-see the source target.
+With `target-python` set, a static (or missing) `requires-python` is an error:
+changing a static field during the build would deviate from PEP 621, and tools that
+read `pyproject.toml` directly would see the wrong floor. Record what the source
+itself needs in `source-python` instead.
 
-Either way, the sdist is lowered too: its source is converted, its `pyproject.toml`
+The sdist is lowered too: its source is converted, its `pyproject.toml`
 gets a static `requires-python = ">=3.9"`, and `retrofy` is dropped from its build
 requirements, so it builds on 3.9 without retrofy.
 

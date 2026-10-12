@@ -92,9 +92,8 @@ def _read_target_python(source_root: pathlib.Path) -> str | None:
 
     The value must be a single PEP 440 version (``"3.9"``, ``"3.9.7"``)
     -- range specifiers like ``">=3.9"`` or ``"3.9,!=3.12.*"`` are
-    rejected. ``target-python`` names the exact floor to lower to, not a
-    specifier; any range-shaped exclusions belong in the project's own
-    ``[project].requires-python`` and are preserved by the rewrite.
+    rejected: ``target-python`` names the floor, and retrofy supplies
+    ``requires-python = ">={target-python}"``.
     """
     pyproject = source_root / "pyproject.toml"
     if not pyproject.exists():
@@ -104,6 +103,37 @@ def _read_target_python(source_root: pathlib.Path) -> str | None:
     if not floor:
         return None
     return _validate_target_python(floor, "[tool.retrofy] target-python")
+
+
+def _read_target_python_requiring_dynamic(source_root: pathlib.Path) -> str | None:
+    """Return ``[tool.retrofy] target-python`` (or ``None``), after checking
+    that ``requires-python`` is listed in ``[project].dynamic``: with a
+    target-python, retrofy supplies requires-python (see
+    :func:`supply_dynamic_requires_python`).
+
+    A static requires-python used to be lowered in the built metadata, but
+    a build changing a static field deviates from PEP 621, and tools that
+    read pyproject.toml directly would see the source's floor.
+    """
+    floor = _read_target_python(source_root)
+    if floor is None:
+        return None
+    data = tomllib.loads((source_root / "pyproject.toml").read_text(encoding="utf-8"))
+    project = data.get("project", {})
+    if "requires-python" not in (project.get("dynamic", []) or []):
+        static = project.get("requires-python")
+        found = (
+            f'a static requires-python = "{static}"' if static else "no requires-python"
+        )
+        raise ValueError(
+            f"[tool.retrofy] target-python is set, so retrofy supplies "
+            f"requires-python (>={floor}), but [project] has {found}. List it "
+            f'as dynamic instead:\n\n    [project]\n    dynamic = ["requires-python"]'
+            f"\n\nThis needs multistage-build>=0.4 in [build-system].requires. "
+            f"To record the Python the source itself needs, set "
+            f'[tool.retrofy] source-python (e.g. "3.15").',
+        )
+    return floor
 
 
 def _read_source_python(source_root: pathlib.Path) -> str | None:
@@ -133,7 +163,7 @@ def post_load_backend(backend: object) -> None:
     """
     root = pathlib.Path.cwd()
     source = _read_source_python(root)
-    target = _read_target_python(root)
+    target = _read_target_python_requiring_dynamic(root)
     if source is not None and target is not None and Version(target) > Version(source):
         raise ValueError(
             f"[tool.retrofy] target-python ({target}) is newer than "
@@ -217,9 +247,7 @@ def _validate_target_python(floor: object, where: str) -> str:
             f"{where} must be a single version like "
             f'"3.9" or "3.9.7"; got {floor!r}. Range specifiers '
             f'(">=3.9", "3.9,!=3.12.*") and lone-major values ("3") are '
-            f"not accepted here -- put any such exclusions in "
-            f"``[project].requires-python`` instead, and retrofy will "
-            f"preserve them when lowering the floor.",
+            f"not accepted.",
         )
     return floor
 
@@ -365,11 +393,11 @@ def _apply_wheel_metadata_edits(text: str) -> str:
     Any new ``METADATA`` edit for wheel installs goes here, not in the
     hooks.
     """
-    floor = _read_target_python(pathlib.Path.cwd())
-    if floor is not None:
-        text = _lower_requires_python(text, floor)
-        if _dependencies_are_dynamic(pathlib.Path.cwd()):
-            text = _splice_typing_extensions_requires_dist(text, floor)
+    # Requires-Python itself comes from the backend: retrofy supplies the
+    # dynamic requires-python before the build.
+    floor = _read_target_python_requiring_dynamic(pathlib.Path.cwd())
+    if floor is not None and _dependencies_are_dynamic(pathlib.Path.cwd()):
+        text = _splice_typing_extensions_requires_dist(text, floor)
     return text
 
 
@@ -391,11 +419,9 @@ def _apply_editable_metadata_edits(text: str) -> str:
     dynamic = _dependencies_are_dynamic(pathlib.Path.cwd())
     if dynamic:
         text = _splice_retrofy_requires_dist(text)
-    floor = _read_target_python(pathlib.Path.cwd())
-    if floor is not None:
-        text = _lower_requires_python(text, floor)
-        if dynamic:
-            text = _splice_typing_extensions_requires_dist(text, floor)
+    floor = _read_target_python_requiring_dynamic(pathlib.Path.cwd())
+    if floor is not None and dynamic:
+        text = _splice_typing_extensions_requires_dist(text, floor)
     return text
 
 
@@ -675,14 +701,14 @@ def _build_requires_drop_retrofy(requires: list[str]) -> list[str]:
 def _patch_pyproject_for_lowered_sdist(text: str, floor: str) -> str:
     """Patch a sdist's ``pyproject.toml`` for the lowered sdist:
 
-    - rewrite ``[project].requires-python`` so its lower bound is
-      ``>={floor}``, preserving other clauses (``!=``, ``<``, ...) from
-      the source spec; if ``requires-python`` was in
-      ``[project].dynamic``, drop it.
+    - make ``[project].requires-python`` static, ``>={floor}``: the
+      dynamic value retrofy supplies, as the lowered sdist builds without
+      retrofy.
     - drop ``retrofy`` from ``[build-system].requires`` (PEP 503
       normalised match).
-    - drop ``[tool.retrofy] source-python``: the sdist's source has been
-      lowered to ``target-python``.
+    - drop ``[tool.retrofy] target-python`` and ``source-python``: the
+      sdist's source is already lowered and its requires-python static, so
+      building it (with or without retrofy) has nothing left to lower.
 
     Uses ``tomlkit`` for a round-trip edit that preserves comments and
     formatting wherever it doesn't conflict with the edit.
@@ -698,19 +724,17 @@ def _patch_pyproject_for_lowered_sdist(text: str, floor: str) -> str:
                 build_system["requires"] = new_requires
 
     retrofy_config = doc.get("tool", {}).get("retrofy")
-    if retrofy_config is not None and "source-python" in retrofy_config:
-        del retrofy_config["source-python"]
+    if retrofy_config is not None:
+        for key in ("target-python", "source-python"):
+            if key in retrofy_config:
+                del retrofy_config[key]
 
     project = doc.get("project")
     if project is not None:
         dynamic = project.get("dynamic")
         if dynamic is not None and "requires-python" in dynamic:
             project["dynamic"] = [d for d in dynamic if d != "requires-python"]
-        existing = project.get("requires-python")
-        project["requires-python"] = _rewrite_requires_python_floor(
-            str(existing) if existing else None,
-            floor,
-        )
+        project["requires-python"] = f">={floor}"
 
     return tomlkit.dumps(doc)
 
@@ -766,7 +790,7 @@ def lower_sdist(sdist_path: pathlib.Path) -> None:
     if os.environ.get("RETROFY_DISABLE_REWRITE") == "1":
         _log.info("RETROFY_DISABLE_REWRITE=1 — skipping sdist rewrite")
         return
-    floor = _read_target_python(pathlib.Path.cwd())
+    floor = _read_target_python_requiring_dynamic(pathlib.Path.cwd())
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = pathlib.Path(tmpdir)
@@ -808,14 +832,6 @@ def lower_sdist(sdist_path: pathlib.Path) -> None:
                 if new_text != text:
                     pyproj.write_text(new_text, encoding="utf-8")
                     has_modifications = True
-            pkg_info = root / "PKG-INFO"
-            if pkg_info.exists():
-                text = pkg_info.read_text(encoding="utf-8")
-                new_text = _lower_requires_python(text, floor)
-                if new_text != text:
-                    pkg_info.write_text(new_text, encoding="utf-8")
-                    has_modifications = True
-
         if not has_modifications:
             return
 
