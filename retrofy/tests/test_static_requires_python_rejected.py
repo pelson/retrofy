@@ -153,3 +153,17 @@ def test_static_requires_python_untouched_without_target_python(project, tmp_pat
     dist_info = _dist_info(tmp_path, ">=3.15")
     lower_metadata_requires_python(dist_info)
     assert "Requires-Python: >=3.15\n" in (dist_info / "METADATA").read_text()
+
+
+def test_lowered_sdist_builds_with_retrofy_hooks(project, tmp_path, monkeypatch):
+    # The lowered sdist's pyproject.toml has a static requires-python; when it
+    # is built where retrofy's hooks run (retrofy's own sdist declares them
+    # inline), that must not be rejected: it drops target-python.
+    project(DYNAMIC)
+    sdist = _sdist(tmp_path, DYNAMIC)
+    lower_sdist(sdist)
+    unpacked = tmp_path / "unpacked"
+    with tarfile.open(sdist) as tar:
+        tar.extractall(unpacked)
+    monkeypatch.chdir(unpacked / "dummypkg-0.0.0")
+    lower_metadata_requires_python(_dist_info(tmp_path, ">=3.9"))

@@ -95,39 +95,6 @@ def test_inject_runtime_requirement_adds_even_if_retrofy_already_present(
     assert PINNED_REQUIRES in lines
 
 
-def test_lower_metadata_requires_python_rewrites_when_target_set(tmp_path, monkeypatch):
-    # Pip pre-flights Requires-Python from the prepared metadata
-    # before deciding to invoke build_wheel. When the source declares
-    # >=3.15 but target-python is 3.9, the *prepared* METADATA must
-    # already say >=3.9 or pip refuses to build on <3.15 interpreters.
-    (tmp_path / "pyproject.toml").write_text(
-        textwrap.dedent(
-            """\
-            [project]
-            name = "x"
-            requires-python = ">=3.15"
-            [tool.retrofy]
-            target-python = "3.9"
-            """,
-        ),
-        encoding="utf-8",
-    )
-    dist_info = _write_metadata(
-        tmp_path,
-        """\
-        Metadata-Version: 2.1
-        Name: some-project
-        Version: 0.1.0
-        Requires-Python: >=3.15
-        """,
-    )
-    monkeypatch.chdir(tmp_path)
-    lower_metadata_requires_python(dist_info)
-    text = (dist_info / "METADATA").read_text(encoding="utf-8")
-    assert "Requires-Python: >=3.9" in text
-    assert "Requires-Python: >=3.15" not in text
-
-
 def test_lower_metadata_requires_python_no_op_when_target_unset(tmp_path, monkeypatch):
     (tmp_path / "pyproject.toml").write_text(
         textwrap.dedent(
@@ -442,42 +409,6 @@ def _make_minimal_wheel(tmp_path: pathlib.Path, metadata_text: str) -> pathlib.P
     return whl
 
 
-def test_compatibility_via_rewrite_lowers_requires_python_when_opted_in(
-    tmp_path,
-    monkeypatch,
-):
-    (tmp_path / "pyproject.toml").write_text(
-        textwrap.dedent(
-            """\
-            [project]
-            name = "dummypkg"
-            [tool.retrofy]
-            target-python = "3.9"
-            """,
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.chdir(tmp_path)
-
-    metadata = (
-        "Metadata-Version: 2.1\n"
-        "Name: dummypkg\n"
-        "Version: 0.0.0\n"
-        "Requires-Python: >=3.15\n"
-        "\n"
-        "Body.\n"
-    )
-    whl = _make_minimal_wheel(tmp_path, metadata)
-
-    compatibility_via_rewrite(whl)
-
-    with zipfile.ZipFile(whl) as z:
-        new_metadata = z.read("dummypkg-0.0.0.dist-info/METADATA").decode("utf-8")
-    header, _, _ = new_metadata.partition("\n\n")
-    assert "Requires-Python: >=3.9" in header
-    assert "Requires-Python: >=3.15" not in header
-
-
 def test_compatibility_via_rewrite_leaves_requires_python_when_not_opted_in(
     tmp_path,
     monkeypatch,
@@ -623,6 +554,7 @@ def test_lower_sdist_is_reproducible(tmp_path, monkeypatch):
                 """\
                 [project]
                 name = "dummypkg"
+                dynamic = ["requires-python"]
                 [tool.retrofy]
                 target-python = "3.9"
                 """,
@@ -642,6 +574,7 @@ def test_lower_sdist_is_reproducible(tmp_path, monkeypatch):
                     """\
                     [project]
                     name = "dummypkg"
+                    dynamic = ["requires-python"]
                     [tool.retrofy]
                     target-python = "3.9"
                     """,
@@ -661,6 +594,7 @@ def test_lower_sdist_converts_py_files(tmp_path, monkeypatch):
             """\
             [project]
             name = "dummypkg"
+            dynamic = ["requires-python"]
             [tool.retrofy]
             target-python = "3.9"
             """,
@@ -689,6 +623,7 @@ def test_lower_sdist_injects_runtime_payload(tmp_path, monkeypatch):
             """\
             [project]
             name = "dummypkg"
+            dynamic = ["requires-python"]
             [tool.retrofy]
             target-python = "3.9"
             """,
@@ -709,33 +644,6 @@ def test_lower_sdist_injects_runtime_payload(tmp_path, monkeypatch):
     files = _read_sdist(sdist)
     assert "dummypkg/_retrofy_rt/lazy_imports.py" in files
     assert b"def lazy_from" in files["dummypkg/_retrofy_rt/lazy_imports.py"]
-
-
-def test_lower_sdist_patches_pyproject_requires_python(tmp_path, monkeypatch):
-    pyproject = _opt_in_pyproject(
-        """\
-        [build-system]
-        requires = ["multistage-build>=0.2", "setuptools", "retrofy>=0.3"]
-        build-backend = "multistage_build:backend"
-
-        [project]
-        name = "dummypkg"
-        version = "0.1"
-        requires-python = ">=3.15"
-
-        [tool.retrofy]
-        target-python = "3.9"
-        """,
-    )
-    (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    sdist = _make_minimal_sdist(tmp_path, {"pyproject.toml": pyproject})
-
-    lower_sdist(sdist)
-
-    new = _read_sdist(sdist)["pyproject.toml"].decode("utf-8")
-    assert 'requires-python = ">=3.9"' in new
-    assert ">=3.15" not in new
 
 
 def test_lower_sdist_patches_pyproject_dynamic_requires_python(tmp_path, monkeypatch):
@@ -787,6 +695,7 @@ def test_lower_sdist_strips_retrofy_from_build_requires(spec, tmp_path, monkeypa
         "\n"
         "[project]\n"
         'name = "dummypkg"\n'
+        'dynamic = ["requires-python"]\n'
         'version = "0.1"\n'
         "\n"
         "[tool.retrofy]\n"
@@ -804,28 +713,6 @@ def test_lower_sdist_strips_retrofy_from_build_requires(spec, tmp_path, monkeypa
     )
     assert "retrofy" not in requires_line.lower()
     assert "multistage-build" in requires_line
-
-
-def test_lower_sdist_patches_pkg_info(tmp_path, monkeypatch):
-    (tmp_path / "pyproject.toml").write_text(
-        _opt_in_pyproject(
-            """\
-            [project]
-            name = "dummypkg"
-            [tool.retrofy]
-            target-python = "3.9"
-            """,
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.chdir(tmp_path)
-    sdist = _make_minimal_sdist(tmp_path, {})
-
-    lower_sdist(sdist)
-
-    pkg_info = _read_sdist(sdist)["PKG-INFO"].decode("utf-8")
-    assert "Requires-Python: >=3.9" in pkg_info
-    assert "Requires-Python: >=3.15" not in pkg_info
 
 
 def test_lower_sdist_converts_source_even_without_target_python(tmp_path, monkeypatch):
@@ -884,6 +771,7 @@ def test_lower_sdist_collision_on_existing_retrofy_rt(tmp_path, monkeypatch):
             """\
             [project]
             name = "dummypkg"
+            dynamic = ["requires-python"]
             [tool.retrofy]
             target-python = "3.9"
             """,
@@ -1118,7 +1006,7 @@ def _requires_dist(text: str) -> list[str]:
             """\
             [project]
             name = "dummypkg"
-            dynamic = ["dependencies"]
+            dynamic = ["dependencies", "requires-python"]
             [tool.retrofy]
             target-python = "3.9"
             """,
@@ -1129,6 +1017,7 @@ def _requires_dist(text: str) -> list[str]:
             """\
             [project]
             name = "dummypkg"
+            dynamic = ["requires-python"]
             dependencies = ["httpx"]
             [tool.retrofy]
             target-python = "3.9"
@@ -1140,7 +1029,7 @@ def _requires_dist(text: str) -> list[str]:
             """\
             [project]
             name = "dummypkg"
-            dynamic = ["dependencies"]
+            dynamic = ["dependencies", "requires-python"]
             [tool.retrofy]
             target-python = "3.12"
             """,
@@ -1199,7 +1088,7 @@ def test_typing_extensions_requirement_in_editable_metadata(tmp_path, monkeypatc
         """\
         [project]
         name = "dummypkg"
-        dynamic = ["dependencies"]
+        dynamic = ["dependencies", "requires-python"]
         [tool.retrofy]
         target-python = "3.9"
         """,
