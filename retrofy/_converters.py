@@ -108,14 +108,15 @@ class _UnionLowerer(cst.CSTTransformer):
     """
 
     def __init__(self) -> None:
-        # Unions this transformer emitted, keyed by node identity, mapped
-        # to their members and separators so that an enclosing ``|`` can
-        # flatten them.
+        # Unions this transformer emitted, mapped to their members and
+        # separators so that an enclosing ``|`` can flatten them. Nodes
+        # hash by identity, and are held for the transformer's lifetime
+        # even once libcst has discarded them from the tree.
         self._emitted: dict[
-            int,
+            cst.BaseExpression,
             tuple[list[cst.BaseExpression], list[cst.Comma]],
         ] = {}
-        self._skip: set[int] = set()
+        self._skip: set[cst.SubscriptElement] = set()
         self.lowered = False
 
     def visit_Subscript(self, node: cst.Subscript) -> None:
@@ -123,12 +124,12 @@ class _UnionLowerer(cst.CSTTransformer):
         # bitwise-or, not a type union.
         name = _subscript_name(node)
         if name == "Literal":
-            self._skip.update(id(el) for el in node.slice)
+            self._skip.update(node.slice)
         elif name == "Annotated":
-            self._skip.update(id(el) for el in node.slice[1:])
+            self._skip.update(node.slice[1:])
 
     def visit_SubscriptElement(self, node: cst.SubscriptElement) -> bool:
-        return id(node) not in self._skip
+        return node not in self._skip
 
     def _members(
         self,
@@ -136,8 +137,8 @@ class _UnionLowerer(cst.CSTTransformer):
     ) -> tuple[list[cst.BaseExpression], list[cst.Comma]]:
         # Flattening drops the parentheses of ``(A | B) | C``, so only do
         # it when they hold no comments or line breaks.
-        if id(expr) in self._emitted and _parens_are_simple(expr):
-            return self._emitted[id(expr)]
+        if expr in self._emitted and _parens_are_simple(expr):
+            return self._emitted[expr]
         return [expr], []
 
     def leave_BinaryOperation(
@@ -178,7 +179,7 @@ class _UnionLowerer(cst.CSTTransformer):
             lpar=updated_node.lpar,
             rpar=updated_node.rpar,
         )
-        self._emitted[id(new_node)] = (members, commas)
+        self._emitted[new_node] = (members, commas)
         return new_node
 
 
