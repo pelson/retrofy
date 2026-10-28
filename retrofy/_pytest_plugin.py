@@ -49,12 +49,15 @@ on the current interpreter and must not be exposed to the converter.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import linecache
 import os
 from pathlib import Path
 import sys
 from types import CodeType, ModuleType
 from typing import TYPE_CHECKING
+
+import pytest
 
 from ._converters import convert
 from ._meta_hook_converter import register_runtime_synthesiser
@@ -144,18 +147,29 @@ def _install_rewriter_patches() -> None:
     from _pytest.assertion import rewrite as _r
 
     orig_rewrite_test = _r._rewrite_test
+    # pytest 9.2 validates its pyc cache by a hash of the source rather
+    # than its stat, and ``_rewrite_test`` returns that cache key.
+    hashed_pyc = pytest.version_tuple >= (9, 2)
 
-    def _rewrite_test(fn: Path, cfg: Config) -> tuple[os.stat_result, CodeType]:
+    def _rewrite_test(
+        fn: Path,
+        cfg: Config,
+    ) -> tuple[os.stat_result | bytes, CodeType]:
         converted = _read_and_convert(fn, cfg)
         if converted is None:
             return orig_rewrite_test(fn, cfg)
-        stat = os.stat(fn)
+        # Keyed on the on-disk source, which is what pytest re-validates.
+        cache_key = (
+            importlib.util.source_hash(Path(fn).read_bytes())
+            if hashed_pyc
+            else os.stat(fn)
+        )
         strfn = str(fn)
         tree = ast.parse(converted, filename=strfn)
         _r.rewrite_asserts(tree, converted.encode("utf-8"), strfn, cfg)
         co = compile(tree, strfn, "exec", dont_inherit=True)
         _stash_converted_source(strfn, converted)
-        return stat, co
+        return cache_key, co
 
     _r._rewrite_test = _rewrite_test
 
