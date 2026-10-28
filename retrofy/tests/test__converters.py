@@ -192,6 +192,23 @@ def test_union_lowering_in_pep695_type_expressions():
     assert _converters.convert(test_case_source) == expected
 
 
+def test_union_lowering_is_stable_across_unions():
+    # Intermediate unions are discarded as enclosing ``|`` flatten them;
+    # an unrelated node reusing such a node's ``id()`` must not be mistaken
+    # for it (GH #81). The reuse is down to the allocator, hence the repeats.
+    test_case_source = textwrap.dedent("""
+    JSON = None | bool | int | float | str | list["JSON"] | dict[str, "JSON"]
+    Timeout = float | tuple[float, float] | None
+    """)
+    expected = textwrap.dedent("""
+    import typing
+    JSON = typing.Union[None, bool, int, float, str, typing.List["JSON"], typing.Dict[str, "JSON"]]
+    Timeout = typing.Union[float, typing.Tuple[float, float], None]
+    """)
+    results = {_converters.convert(test_case_source) for _ in range(50)}
+    assert results == {expected}
+
+
 def test_convert():
     test_case_source = textwrap.dedent("""
     def bar(a: list[str]) -> list[str]:
