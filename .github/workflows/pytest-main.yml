@@ -1,0 +1,89 @@
+name: pytest-main
+
+# retrofy's pytest plugin patches pytest's private assertion-rewrite
+# internals, which change without notice (e.g. pytest 9.2 switched its pyc
+# cache key, #84). Run the suite against pytest's main branch to hear about
+# such changes before a release reaches users (#85). Kept out of
+# python-test so an upstream breakage doesn't fail unrelated PRs.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "retrofy/_pytest_plugin.py"
+      - ".github/workflows/pytest-main.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write  # To report scheduled failures.
+    env:
+      # libcst builds a native extension via PyO3, which caps at 3.14
+      # unless the stable-ABI forward-compat path is opted in to.
+      PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for setuptools-scm
+
+    # 3.15 builds the lowered wheel; the tests run on a released Python so
+    # that a failure points at pytest rather than an interpreter pre-release.
+    - name: Set up Python 3.13 and 3.15
+      uses: actions/setup-python@v5
+      with:
+        python-version: |
+          3.13
+          3.15
+        allow-prereleases: true
+
+    - name: Build the lowered wheel
+      # As in python-test: retrofy builds itself with the hooks in this
+      # checkout, so it must not be installed in the build environment.
+      run: |
+        python3.15 -m pip install build
+        python3.15 -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml','rb'))['build-system']['requires']))" \
+          > /tmp/build-requirements.txt
+        python3.15 -m pip install -r /tmp/build-requirements.txt
+        python3.15 -m build --wheel --no-isolation
+
+    - name: Install retrofy and pytest main
+      run: |
+        python3.13 -m venv /tmp/venv
+        /tmp/venv/bin/pip install "$(ls dist/retrofy-*.whl)[test]"
+        /tmp/venv/bin/pip install "pytest @ git+https://github.com/pytest-dev/pytest@main"
+        /tmp/venv/bin/python -m pytest --version
+
+    - name: Test with pytest (isolated from source)
+      run: |
+        mkdir -p not-the-source
+        cd not-the-source
+        /tmp/venv/bin/python -m pytest --pyargs retrofy -ssvv
+
+    - name: Report a scheduled failure in an issue
+      # A failed scheduled run otherwise only notifies whoever last edited
+      # the cron line, which is easily missed. Keep one open issue, and
+      # comment on it while the failure persists.
+      if: failure() && github.event_name == 'schedule'
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TITLE: "Test suite fails against pytest main"
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        issue=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+          --search "in:title \"$TITLE\"" --json number,title \
+          --jq "map(select(.title == env.TITLE))[0].number // empty")
+        if [ -n "$issue" ]; then
+          gh issue comment "$issue" --repo "$GITHUB_REPOSITORY" \
+            --body "Still failing: $RUN_URL"
+        else
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
+            --body "@${{ github.repository_owner }} the scheduled \`pytest-main\` run failed: $RUN_URL
+
+        A change on pytest's main branch likely breaks the pytest plugin (see #85). It will reach the regular pipelines once pytest releases it."
+        fi
